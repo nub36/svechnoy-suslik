@@ -2,6 +2,31 @@ import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
+/**
+ * Strukturnye tipy dlya yavnoj annotacii callbackov:
+ * s realnym (sgenerirovannym) klientom Prisma oni sovmestimy,
+ * a v pesochnice bez prisma generate zamenyayut implicit any.
+ */
+type RankedMarket = {
+  quoteVolume24h: number | null;
+};
+
+type RankedAsset = {
+  id: number;
+  symbol: string;
+  markets: RankedMarket[];
+};
+
+type RankedItem = {
+  id: number;
+  symbol: string;
+  exchangeCount: number;
+  totalVolume: number;
+  maxVolume: number;
+  liquidityScore: number;
+};
+
+
 const EXCLUDED = new Set([
   "USDT",
   "USDC",
@@ -42,18 +67,18 @@ async function main() {
 
   const ranked = assets
     .filter(
-      asset =>
+      (asset: RankedAsset) =>
         !EXCLUDED.has(asset.symbol) &&
         asset.markets.length > 0
     )
-    .map(asset => {
+    .map((asset: RankedAsset): RankedItem => {
       const volumes = asset.markets
-        .map(m => m.quoteVolume24h ?? 0)
-        .filter(v => v > 0)
-        .sort((a, b) => b - a);
+        .map((m: RankedMarket) => m.quoteVolume24h ?? 0)
+        .filter((v: number) => v > 0)
+        .sort((a: number, b: number) => b - a);
 
       const totalVolume =
-        volumes.reduce((sum, v) => sum + v, 0);
+        volumes.reduce((sum: number, v: number) => sum + v, 0);
 
       const maxVolume = volumes[0] ?? 0;
 
@@ -90,7 +115,7 @@ async function main() {
       };
     })
     .sort(
-      (a, b) =>
+      (a: RankedItem, b: RankedItem) =>
         b.liquidityScore - a.liquidityScore
     );
 
@@ -128,7 +153,7 @@ async function main() {
   console.log("");
   console.log("Top-20:");
 
-  top500.slice(0, 20).forEach((item, index) => {
+  top500.slice(0, 20).forEach((item: RankedItem, index: number) => {
     console.log(
       `${String(index + 1).padStart(3)}. ` +
       `${item.symbol.padEnd(10)} ` +

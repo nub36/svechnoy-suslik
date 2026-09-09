@@ -20,6 +20,23 @@ import {
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Strukturnyj tip dlya yavnoj annotacii callbackov:
+ * s realnym klientom Prisma sovmestim, a v pesochnice
+ * bez prisma generate zamenyaet implicit any.
+ */
+type StrategyRow = {
+  id: number;
+  name: string;
+  slug: string;
+  description: string;
+  version: number;
+  enabled: boolean;
+  status: string;
+  timeframes: string[];
+  minExchanges: number;
+};
+
 export default async function AdminPage() {
   const session = await auth();
 
@@ -68,7 +85,7 @@ export default async function AdminPage() {
 
   const published =
     strategies.filter(
-      (s) =>
+      (s: StrategyRow) =>
         s.status === "PUBLISHED" &&
         s.enabled
     ).length;
@@ -225,7 +242,7 @@ export default async function AdminPage() {
               </div>
             ) : (
               strategies.map(
-                (strategy) => (
+                (strategy: StrategyRow) => (
                   <div
                     className="strategyAdminCard"
                     key={strategy.id}
