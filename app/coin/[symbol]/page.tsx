@@ -1,50 +1,278 @@
+import CandleChart from "@/components/chart/CandleChart";
+
+export const dynamic = "force-dynamic";
+
+/**
+ * Страница монеты — ТОЛЬКО реальные данные из
+ * PostgreSQL Asset/Market/Candle.
+ *
+ * Prisma Signal здесь НЕ используется: production
+ * Signal Engine ещё не развёрнут (разделы §28, §25).
+ *
+ * Таймфреймы и последняя закрытая свеча берутся ОДНИМ
+ * агрегированным SQL-запросом на стороне PostgreSQL
+ * (GROUP BY по рынку и таймфрейму) — никаких загрузок
+ * всех свечей актива в Node.js.
+ */
+
+const TIMEFRAME_ORDER = [
+  "5m",
+  "15m",
+  "1h",
+  "4h",
+  "1d"
+];
+
+const TIMEFRAME_LABELS: Record<string, string> = {
+  "5m": "5 минут",
+  "15m": "15 минут",
+  "1h": "1 час",
+  "4h": "4 часа",
+  "1d": "1 день"
+};
+
+function timeframeLabel(tf: string): string {
+  return TIMEFRAME_LABELS[tf] ?? tf;
+}
+
+type ChartRow = {
+  marketId: number;
+  exchange: string;
+  exchangeSymbol: string;
+  timeframe: string;
+  candleCount: number;
+  lastCandleTime: Date;
+};
+
+function fmtTime(date: Date): string {
+  return (
+    date.toISOString().replace("T", " ").slice(0, 16) +
+    " UTC"
+  );
+}
+
 export default async function CoinPage({
   params
 }: {
   params: Promise<{ symbol: string }>;
 }) {
-  const { symbol } = await params;
+  const { symbol: raw } = await params;
+
+  const symbol = decodeURIComponent(raw)
+    .trim()
+    .toUpperCase();
+
+  if (!/^[A-Z0-9]{2,12}$/.test(symbol)) {
+    return (
+      <main className="shell">
+        <section className="hero">
+          <div>
+            <h1>Неверный тикер</h1>
+            <div className="muted">
+              «{raw}» не похож на тикер актива.
+            </div>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  let info:
+    | {
+        name: string | null;
+        rank: number | null;
+        top500: boolean;
+        rows: ChartRow[];
+      }
+    | null = null;
+
+  let dbError = false;
+
+  try {
+    // Ленивый импорт: недоступность клиента Prisma
+    // даёт честное «Нет данных», а не падение страницы.
+    const { prisma } = await import(
+      "@/lib/prisma"
+    );
+
+    const asset = await prisma.asset.findUnique({
+      where: { symbol },
+      select: {
+        id: true,
+        name: true,
+        rank: true,
+        top500: true
+      }
+    });
+
+    if (asset) {
+      const queryRaw =
+        prisma.$queryRaw as unknown as (
+          query: TemplateStringsArray,
+          ...values: unknown[]
+        ) => Promise<ChartRow[]>;
+
+      const rows = await queryRaw`
+        SELECT
+          m.id AS "marketId",
+          m.exchange AS "exchange",
+          m."exchangeSymbol" AS "exchangeSymbol",
+          c.timeframe AS "timeframe",
+          COUNT(*)::int AS "candleCount",
+          MAX(c."openTime") AS "lastCandleTime"
+        FROM "Candle" c
+        JOIN "Market" m ON m.id = c."marketId"
+        WHERE m."assetId" = ${asset.id}
+          AND m.enabled = true
+          AND m.status = 'ACTIVE'
+          AND m.quote = 'USDT'
+          AND m."marketType" = 'SPOT'
+        GROUP BY
+          m.id, m.exchange,
+          m."exchangeSymbol", c.timeframe
+        ORDER BY m.exchange, c.timeframe
+      `;
+
+      info = {
+        name: asset.name,
+        rank: asset.rank,
+        top500: asset.top500,
+        rows
+      };
+    }
+  } catch {
+    dbError = true;
+  }
+
+  const exchanges =
+    info && info.rows.length > 0
+      ? [...new Set(info.rows.map((r) => r.exchange))]
+      : [];
+
+  const timeframes =
+    info && info.rows.length > 0
+      ? TIMEFRAME_ORDER.filter((tf) =>
+          info.rows.some((r) => r.timeframe === tf)
+        )
+      : [];
+
+  const lastCandleTime =
+    info && info.rows.length > 0
+      ? info.rows
+          .map((r) => r.lastCandleTime)
+          .reduce<Date | null>(
+            (acc, t) =>
+              acc === null || t.getTime() > acc.getTime()
+                ? t
+                : acc,
+            null
+          )
+      : null;
 
   return (
     <main className="shell">
       <section className="hero">
         <div>
-          <h1>{symbol.toUpperCase()} / USDT</h1>
+          <h1>
+            {symbol}
+            /USDT
+            {info?.name ? ` · ${info.name}` : ""}
+          </h1>
+
           <div className="muted">
-            График, индикаторы и результаты стратегий
+            График по закрытым свечам из PostgreSQL.
+            Индикаторы: EMA, SMA, RSI, MACD, объём.
           </div>
         </div>
       </section>
 
-      <div className="cards">
-        <div className="card">
-          <div className="cardTitle">Общий сигнал</div>
-          <div className="bigValue positive">LONG</div>
-        </div>
+      {info ? (
+        <div className="cards">
+          <div className="card">
+            <div className="cardTitle">
+              Суслик Top-500
+            </div>
 
-        <div className="card">
-          <div className="cardTitle">Стратегии</div>
-          <div className="bigValue">4 LONG / 1 SHORT</div>
-        </div>
+            <div className="bigValue">
+              {info.rank !== null
+                ? `#${info.rank}`
+                : "Вне рейтинга"}
+            </div>
 
-        <div className="card">
-          <div className="cardTitle">Сила</div>
-          <div className="bigValue">78 / 100</div>
-        </div>
+            <span className="muted">
+              {info.top500
+                ? "актив в расчётном Top-500"
+                : "актив вне текущего Top-500"}
+            </span>
+          </div>
 
-        <div className="card">
-          <div className="cardTitle">Таймфрейм</div>
-          <div className="bigValue">4H</div>
-        </div>
-      </div>
+          <div className="card">
+            <div className="cardTitle">
+              Биржи с данными
+            </div>
 
-      <div className="card" style={{ marginTop: 16, minHeight: 430 }}>
-        <h3>Свечной график</h3>
-        <p className="muted">
-          Здесь подключим интерактивный график с индикаторами,
-          LONG/SHORT, Entry, TP и SL.
-        </p>
-      </div>
+            <div className="bigValue">
+              {exchanges.length > 0
+                ? exchanges.length
+                : "—"}
+            </div>
+
+            <span className="muted">
+              {exchanges.length > 0
+                ? exchanges.join(", ")
+                : "Рынков со свечами нет"}
+            </span>
+          </div>
+
+          <div className="card">
+            <div className="cardTitle">
+              Таймфреймы
+            </div>
+
+            <div className="bigValue" style={{ fontSize: "1rem" }}>
+              {timeframes.length > 0
+                ? timeframes
+                    .map((tf) => tf.toUpperCase())
+                    .join(" · ")
+                : "—"}
+            </div>
+
+            <span className="muted">
+              {timeframes.length > 0
+                ? timeframes
+                    .map((tf) => timeframeLabel(tf))
+                    .join(", ")
+                : "по активу пока нет свечей"}
+            </span>
+          </div>
+
+          <div className="card">
+            <div className="cardTitle">
+              Последняя закрытая свеча
+            </div>
+
+            <div className="bigValue" style={{ fontSize: "1rem" }}>
+              {lastCandleTime
+                ? fmtTime(lastCandleTime)
+                : "—"}
+            </div>
+
+            <span className="muted">
+              по всем рынкам актива
+            </span>
+          </div>
+        </div>
+      ) : (
+        <div className="tableBox" style={{ marginBottom: 16 }}>
+          <p className="muted" style={{ padding: "1rem" }}>
+            {dbError
+              ? "Нет данных: база временно недоступна."
+              : `Нет данных: актива ${symbol} нет в базе. Прогоните rank-assets и OHLCV worker.`}
+          </p>
+        </div>
+      )}
+
+      <CandleChart initialSymbol={symbol} />
     </main>
   );
 }

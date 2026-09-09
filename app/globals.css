@@ -1138,3 +1138,122 @@ td:nth-child(2) {
     grid-template-columns: 1fr;
   }
 }
+
+/* ===== Свечной график ===== */
+
+.chartCard {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 14px;
+  margin-top: 16px;
+}
+
+.chartToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+  margin-bottom: 10px;
+}
+
+.chartField {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 140px;
+  flex: 1 1 140px;
+}
+
+.chartField span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chartField select {
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+  max-width: 100%;
+}
+
+.chartToggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px 10px;
+  margin: 0;
+  flex: 2 1 260px;
+}
+
+.chartToggles legend {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 0 4px;
+}
+
+.chartToggles label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chartWrap {
+  position: relative;
+}
+
+.chartContainer {
+  height: clamp(360px, 58vh, 560px);
+  width: 100%;
+}
+
+.chartOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+  color: var(--muted);
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.chartStatus {
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--muted);
+  padding: 16px;
+}
+
+.chartNote {
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .chartCard {
+    padding: 10px;
+  }
+
+  .chartField {
+    min-width: 100%;
+  }
+
+  .chartContainer {
+    height: 340px;
+  }
+}
