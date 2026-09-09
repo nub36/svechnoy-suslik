@@ -49,7 +49,14 @@ export default async function Strategies() {
         minExchanges: true
       }
     });
-  } catch {
+  } catch (error) {
+    // База недоступна — показываем честный экран ниже,
+    // причину пишем в server-лог.
+    console.error(
+      "[strategies] Ошибка загрузки стратегий:",
+      error
+    );
+
     strategies = null;
   }
 

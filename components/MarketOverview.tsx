@@ -73,8 +73,13 @@ export default async function MarketOverview() {
       (s: { enabled: boolean; status: string }) =>
         s.enabled && s.status === "PUBLISHED"
     ).length;
-  } catch {
-    // база недоступна — карточки покажут «Нет данных»
+  } catch (error) {
+    // база недоступна — карточки покажут «Нет данных»,
+    // техническая причина остаётся в server-логе
+    console.error(
+      "[MarketOverview] Ошибка загрузки сводки:",
+      error
+    );
   }
 
   return (

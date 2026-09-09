@@ -62,7 +62,14 @@ export async function GET(
         })
       )
     });
-  } catch {
+  } catch (error) {
+    // Техническая причина — в server-лог; клиенту —
+    // безопасное сообщение без stack/secrets.
+    console.error(
+      "[api/search] Ошибка поиска активов:",
+      error
+    );
+
     return NextResponse.json(
       { error: "База данных временно недоступна" },
       { status: 503 }
