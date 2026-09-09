@@ -849,7 +849,7 @@ function seedLikeConfig(): TrendSuslikConfig {
       shortMin: 28,
       shortMax: 48
     },
-    macd: { fast: 12, slow: 26, signal: 9 },
+    macd: { fast: 12, slow: 26, signal: 9, deadZoneRatio: 0 },
     atr: {
       period: 14,
       stopMultiplier: 1.5,

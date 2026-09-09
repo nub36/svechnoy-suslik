@@ -31,6 +31,7 @@ type Config = {
     fast: number;
     slow: number;
     signal: number;
+    deadZoneRatio: number;
   };
 
   atr: {
@@ -103,11 +104,26 @@ function NumberField({
   );
 }
 
+function normalizeConfig(
+  raw: Config
+): Config {
+  return {
+    ...raw,
+    macd: {
+      ...raw.macd,
+      deadZoneRatio:
+        raw.macd.deadZoneRatio ?? 0
+    }
+  };
+}
+
 export default function StrategyEditor({
   strategy
 }: Props) {
   const [config, setConfig] =
-    useState<Config>(strategy.config);
+    useState<Config>(
+      normalizeConfig(strategy.config)
+    );
 
   const [enabled, setEnabled] =
     useState(strategy.enabled);
@@ -438,6 +454,24 @@ export default function StrategyEditor({
               updateSection(
                 "macd",
                 { signal: value }
+              )
+            }
+          />
+
+          <NumberField
+            label="Мёртвая зона (доля цены)"
+            description="Гистограмма MACD слабее этой доли цены считается шумом и не даёт баллов. 0 — зона выключена. Пример: 0.001 = 0,1% цены."
+            value={config.macd.deadZoneRatio ?? 0}
+            step="0.0001"
+            onChange={(value) =>
+              updateSection(
+                "macd",
+                {
+                  deadZoneRatio:
+                    Number.isFinite(value)
+                      ? value
+                      : 0
+                }
               )
             }
           />

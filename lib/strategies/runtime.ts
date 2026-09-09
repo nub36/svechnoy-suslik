@@ -14,14 +14,18 @@
 import type {
   MarketAnalysis
 } from "../analysis/analyze";
-import type {
-  TrendSuslikConfig
+import type { CandleData } from "../exchanges/types";
+import {
+  periodsAreStandard,
+  configToAnalysisParams,
+  type TrendSuslikConfig
 } from "./config";
 import {
   runTrendSuslik,
   type Direction,
   type StrategyReason
 } from "./trend-suslik";
+import { analyzeCandlesWithParams } from "../analysis/analyze";
 
 /**
  * Minimalnyj nabor, kotoryj runtime zhdyot
@@ -156,10 +160,26 @@ export function snapshotToAnalysis(
 
 /**
  * Raschyot strategii po odnomu snapshotu (odna birzha).
+ *
+ * Periody strategii:
+ * - standartnye (sovpadayut s IndicatorSnapshot) ->
+ *   znacheniya berutsya iz snapshot, svechi ne nuzhny;
+ * - nestandartnye i peredany history svech ->
+ *   indikatory rasschityvayutsya po zakrytym svecham
+ *   PostgreSQL (bez obrashcheniya k birzham) tochno
+ *   na candleTime snapshot;
+ * - nestandartnye, a svech net / ne hvataet ->
+ *   fallback na snapshot pozicionno, runtime vidat
+ *   warnings o rashozhdenii periodov.
+ *
+ * candles (esli peredany) — zakrytye svechi etogo
+ * rynka i tajmfrejma, lyuboj poryadok: funkciya
+ * otsortiruet i otrezhet budushchee samostoyatelno.
  */
 export function evaluateSnapshot(
   input: SnapshotInput,
-  config: TrendSuslikConfig
+  config: TrendSuslikConfig,
+  candles?: CandleData[]
 ): MarketStrategyResult {
   const filterReason = applyStrategyFilters(
     {
@@ -177,6 +197,71 @@ export function evaluateSnapshot(
       marketId: input.marketId,
       reason: filterReason
     };
+  }
+
+  if (!periodsAreStandard(config) && candles && candles.length > 0) {
+    const params = configToAnalysisParams(config);
+
+    const history = candles
+      .filter(
+        (c) =>
+          c.closed &&
+          c.openTime.getTime() <=
+            input.candleTime.getTime()
+      )
+      .sort(
+        (a, b) =>
+          a.openTime.getTime() -
+          b.openTime.getTime()
+      );
+
+    const computed = analyzeCandlesWithParams(
+      history,
+      params
+    );
+
+    if (
+      computed &&
+      computed.candleTime.getTime() ===
+        input.candleTime.getTime() &&
+      computed.price === input.price
+    ) {
+      const result = runTrendSuslik(
+        computed,
+        config,
+        {
+          emaFast: config.ema.fast,
+          emaMedium: config.ema.medium,
+          emaSlow: config.ema.slow,
+          rsi: config.rsi.period,
+          macdFast: config.macd.fast,
+          macdSlow: config.macd.slow,
+          macdSignal: config.macd.signal,
+          volume: config.volume.period
+        }
+      );
+
+      return {
+        status: "evaluated",
+        exchange: input.exchange,
+        market: input.exchangeSymbol,
+        marketId: input.marketId,
+        candleTime: input.candleTime,
+        price: input.price,
+        longScore: result.longScore,
+        shortScore: result.shortScore,
+        direction: result.direction,
+        reasons: result.reasons,
+        warnings: result.warnings
+      };
+    }
+
+    /*
+     * Fallback: svech ne hvatalo ili poslednyaya
+     * zakrytaya svecha ne sovpadaet s candleTime
+     * snapshot — schitaem po snapshot pozicionno,
+     * warnings dobavit sam runtime.
+     */
   }
 
   const analysis = snapshotToAnalysis(input);

@@ -28,9 +28,13 @@ import type { PrismaClient } from "@prisma/client";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  configToAnalysisParams,
+  periodsAreStandard,
   validateStrategyRuntime,
   type TrendSuslikConfig
 } from "../lib/strategies/config";
+import { minCandlesForParams } from "../lib/analysis/analyze";
+import type { CandleData } from "../lib/exchanges/types";
 import {
   aggregateAssetGroup,
   evaluateSnapshot,
@@ -131,6 +135,13 @@ type MarketBatch = {
   exchange: string;
   exchangeSymbol: string;
   input: SnapshotInput | null;
+
+  /**
+   * Istoriya zakrytyh svech dlya nestandartnyh periodov
+   * config (raschyot po PostgreSQL, bez obrashcheniya
+   * k birzham). Dlya standartnyh periodov — pustoj spisok.
+   */
+  candles: CandleData[];
 };
 
 type AssetBatch = {
@@ -192,10 +203,60 @@ async function loadBatches(
           orderBy: { candleTime: "desc" }
         });
 
+      let history: CandleData[] = [];
+
+      if (snap && !periodsAreStandard(config)) {
+        // Nestandartnye periody: indikatory schitaem
+        // po zakrytym svecham PostgreSQL tochno na
+        // candleTime snapshot. Tolko chtenie.
+        const rows = await database.candle.findMany({
+          where: {
+            marketId: market.id,
+            timeframe,
+            closed: true,
+            openTime: {
+              lte: snap.candleTime
+            }
+          },
+          orderBy: {
+            openTime: "desc"
+          },
+          take:
+            minCandlesForParams(
+              configToAnalysisParams(config)
+            ) + 50
+        });
+
+        history = rows.map(
+          (
+            row: {
+              openTime: Date;
+              closeTime: Date | null;
+              open: number;
+              high: number;
+              low: number;
+              close: number;
+              volume: number;
+              closed: boolean;
+            }
+          ) => ({
+            openTime: row.openTime,
+            closeTime: row.closeTime ?? undefined,
+            open: row.open,
+            high: row.high,
+            low: row.low,
+            close: row.close,
+            volume: row.volume,
+            closed: row.closed
+          })
+        );
+      }
+
       markets.push({
         marketId: market.id,
         exchange: market.exchange,
         exchangeSymbol: market.exchangeSymbol,
+        candles: history,
         input: snap
           ? {
               marketId: market.id,
@@ -480,7 +541,8 @@ async function main(): Promise<void> {
 
           return evaluateSnapshot(
             m.input,
-            config
+            config,
+            m.candles
           );
         });
 

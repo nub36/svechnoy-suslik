@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { validateTrendSuslikConfig } from "@/lib/strategies/config";
 
 async function isAdmin() {
   const session = await auth();
@@ -78,18 +79,22 @@ export async function PUT(
     );
   }
 
-  const score =
-    Number(config.minimumSignalScore);
+  /*
+   * Polnaya servernaya validaciya config
+ * (te zhe pravila, chto i dlya runtime):
+   * weights, ema, rsi, macd (vklyuchaya myortvuyu
+   * zonu), atr, volume, execution, filters.
+   * Ran'she proveryalsya tolko minimumSignalScore.
+   */
+  const validation =
+    validateTrendSuslikConfig(config);
 
-  if (
-    !Number.isFinite(score) ||
-    score < 0 ||
-    score > 100
-  ) {
+  if (!validation.ok) {
     return NextResponse.json(
       {
         error:
-          "Минимальная сила сигнала должна быть от 0 до 100"
+          "Конфигурация не прошла проверку: " +
+          validation.errors.join("; ")
       },
       { status: 400 }
     );

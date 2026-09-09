@@ -2,7 +2,8 @@ import type {
   MarketAnalysis
 } from "../analysis/analyze";
 import {
-  SNAPSHOT_INDICATOR_PERIODS,
+  snapshotActualPeriods,
+  type ActualPeriods,
   type TrendSuslikConfig
 } from "./config";
 
@@ -52,7 +53,8 @@ export type StrategyResult = {
  */
 export function runTrendSuslik(
   a: MarketAnalysis,
-  config: TrendSuslikConfig
+  config: TrendSuslikConfig,
+  actualPeriods?: ActualPeriods
 ): StrategyResult {
   let longScore = 0;
   let shortScore = 0;
@@ -64,7 +66,14 @@ export function runTrendSuslik(
   const emaPeriods = config.ema;
   const rsiCfg = config.rsi;
 
-  const snap = SNAPSHOT_INDICATOR_PERIODS;
+  /*
+   * Fakticheskie periody analiza: po umolchaniyu —
+   * fiksirovannye periody snapshot (staroe povedenie).
+   * Esli analiz rasschitan po svecham s periodami
+   * config, suda peredayutsya periody config,
+   * i warnings ne voznikayut.
+   */
+  const snap = actualPeriods ?? snapshotActualPeriods();
 
   if (
     emaPeriods.fast !== snap.emaFast ||
@@ -92,7 +101,8 @@ export function runTrendSuslik(
     config.macd.signal !== snap.macdSignal
   ) {
     warnings.push(
-      "MACD periody config otlichayutsya ot snapshot (12/26/9): " +
+      `MACD periody config (${config.macd.fast}/${config.macd.slow}/${config.macd.signal}) ` +
+        `otlichayutsya ot snapshot (${snap.macdFast}/${snap.macdSlow}/${snap.macdSignal}): ` +
         "ispolzovano znachenie snapshot"
     );
   }
@@ -209,14 +219,25 @@ export function runTrendSuslik(
         : undefined
   });
 
-  // MACD histogram
+  /*
+   * MACD histogram s myortvoj zonoj:
+   * |hist| <= deadZoneRatio * price — shum okolo
+   * nulya, ballov ni LONG, ni SHORT.
+   * deadZoneRatio = 0 (po umolchaniyu) -> kak ranshe.
+   */
+  const macdDeadZone =
+    config.macd.deadZoneRatio > 0
+      ? config.macd.deadZoneRatio *
+        Math.abs(a.price)
+      : 0;
+
   const macdLong =
     a.macdHist !== null &&
-    a.macdHist > 0;
+    a.macdHist > macdDeadZone;
 
   const macdShort =
     a.macdHist !== null &&
-    a.macdHist < 0;
+    a.macdHist < -macdDeadZone;
 
   if (macdLong) {
     longScore += w.macd;
@@ -232,7 +253,12 @@ export function runTrendSuslik(
     short: macdShort,
     weight: w.macd,
     value:
-      a.macdHist?.toFixed(2)
+      a.macdHist === null
+        ? undefined
+        : macdDeadZone > 0
+          ? `${a.macdHist.toFixed(2)} ` +
+            `(myortvaya zona ±${macdDeadZone.toFixed(2)})`
+          : a.macdHist.toFixed(2)
   });
 
   // Obyom ne vybiraet napravlenie,

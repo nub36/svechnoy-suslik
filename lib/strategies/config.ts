@@ -10,6 +10,8 @@
  * etot fail chitaetsya i iz testovyh CLI-skriptov.
  */
 
+import type { AnalysisParams } from "../analysis/analyze";
+
 export type TrendSuslikWeights = {
   trend: number;
   mediumTrend: number;
@@ -36,6 +38,15 @@ export type TrendSuslikMacd = {
   fast: number;
   slow: number;
   signal: number;
+
+  /**
+   * Myortvaya zona MACD: dolya ot ceny.
+   * |histogram| <= deadZoneRatio * price ne dayet
+   * ballov ni LONG, ni SHORT (slabyj shum ryadom
+   * s nulem ne schitaetsya impul'som).
+   * 0 = zona vyklyuchena (staroe povedenie).
+   */
+  deadZoneRatio: number;
 };
 
 export type TrendSuslikAtr = {
@@ -108,6 +119,79 @@ export const ALLOWED_TIMEFRAMES = [
 
 export type AllowedTimeframe =
   (typeof ALLOWED_TIMEFRAMES)[number];
+
+/**
+ * Fakticheskie periody, s kotorymi schitalas poverty
+ * analiz (snapshot ili raschyot po svecham).
+ * Ispolzuetsya dlya chestnyh warnings:
+ * net preduprezhdenij, kogda periody sovpadayut.
+ */
+export type ActualPeriods = {
+  emaFast: number;
+  emaMedium: number;
+  emaSlow: number;
+  rsi: number;
+  macdFast: number;
+  macdSlow: number;
+  macdSignal: number;
+  volume: number;
+};
+
+/** Fiksirovannye periody snapshot v vide ActualPeriods. */
+export function snapshotActualPeriods(): ActualPeriods {
+  const snap = SNAPSHOT_INDICATOR_PERIODS;
+
+  return {
+    emaFast: snap.emaFast,
+    emaMedium: snap.emaMedium,
+    emaSlow: snap.emaSlow,
+    rsi: snap.rsi,
+    macdFast: snap.macdFast,
+    macdSlow: snap.macdSlow,
+    macdSignal: snap.macdSignal,
+    volume: snap.volume
+  };
+}
+
+/** Periody strategii v vide AnalysisParams dlya raschyota po svecham. */
+export function configToAnalysisParams(
+  config: TrendSuslikConfig
+): AnalysisParams {
+  return {
+    emaFast: config.ema.fast,
+    emaMedium: config.ema.medium,
+    emaSlow: config.ema.slow,
+    rsi: config.rsi.period,
+    macdFast: config.macd.fast,
+    macdSlow: config.macd.slow,
+    macdSignal: config.macd.signal,
+    atr: config.atr.period,
+    volume: config.volume.period
+  };
+}
+
+/**
+ * Vse periody strategii sovpadayut s fiksirovannym
+ * naborom IndicatorSnapshot? Esli da — znacheniya
+ * berutsya napryamuyu iz snapshot, sviechi ne nuzhny.
+ */
+export function periodsAreStandard(
+  config: TrendSuslikConfig
+): boolean {
+  const snap = SNAPSHOT_INDICATOR_PERIODS;
+
+  return (
+    config.ema.fast === snap.emaFast &&
+    config.ema.medium === snap.emaMedium &&
+    config.ema.slow === snap.emaSlow &&
+    config.rsi.period === snap.rsi &&
+    config.macd.fast === snap.macdFast &&
+    config.macd.slow === snap.macdSlow &&
+    config.macd.signal === snap.macdSignal &&
+    config.atr.period === snap.atr &&
+    config.volume.period === snap.volume
+  );
+}
 
 export type ConfigValidationResult =
   | { ok: true; config: TrendSuslikConfig }
@@ -388,8 +472,33 @@ export function validateTrendSuslikConfig(
       raw.macd.signal, { integer: true, gtZero: true }
     );
 
-    if (fast !== null && slow !== null && signal !== null) {
-      macd = { fast, slow, signal };
+    /*
+     * Myortvaya zona neobyazatel'na dlya obratnoj
+     * sovmestimosti s konfigami v BD, kotorye byli
+     * sozdany bez etogo polya: otsutstvuet -> 0.
+     */
+    let deadZoneRatio = 0;
+
+    if (raw.macd.deadZoneRatio !== undefined) {
+      const dz = checkNumber(
+        errors,
+        "macd",
+        "deadZoneRatio",
+        raw.macd.deadZoneRatio,
+        { min: 0, max: 0.1 }
+      );
+
+      if (dz !== null) {
+        deadZoneRatio = dz;
+      }
+    }
+
+    if (
+      fast !== null &&
+      slow !== null &&
+      signal !== null
+    ) {
+      macd = { fast, slow, signal, deadZoneRatio };
     }
   }
 
