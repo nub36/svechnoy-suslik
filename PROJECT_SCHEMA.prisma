@@ -1,0 +1,229 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  PRO
+  ADMIN
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String?
+  telegramId    String?   @unique
+  vkId          String?   @unique
+  role          Role      @default(USER)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts Account[]
+  sessions Session[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model Strategy {
+  id           Int      @id @default(autoincrement())
+  name         String
+  slug         String
+  description  String
+  version      Int      @default(1)
+  enabled      Boolean  @default(false)
+  status       String   @default("DRAFT")
+  config       Json
+  timeframes   String[] @default(["1h", "4h"])
+  minExchanges Int      @default(3)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  signals Signal[]
+
+  @@unique([slug, version])
+  @@index([slug])
+  @@index([enabled])
+}
+
+model Signal {
+  id          Int       @id @default(autoincrement())
+  symbol      String
+  timeframe   String
+  direction   String
+  score       Float
+  entry       Float
+  stopLoss    Float?
+  takeProfit1 Float?
+  takeProfit2 Float?
+  takeProfit3 Float?
+  status      String    @default("ACTIVE")
+  reason      String
+  strategyId  Int
+  createdAt   DateTime  @default(now())
+  closedAt    DateTime?
+
+  strategy Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+
+  @@index([symbol, timeframe])
+  @@index([status])
+  @@index([strategyId])
+  @@index([createdAt])
+}
+
+model Asset {
+  id             Int      @id @default(autoincrement())
+  symbol         String   @unique
+  name           String?
+  rank           Int?
+  imageUrl       String?
+  enabled        Boolean  @default(true)
+  exchangeCount  Int      @default(0)
+  totalVolume24h Float?
+  maxVolume24h   Float?
+  liquidityScore Float?
+  top500         Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  markets Market[]
+
+  @@index([rank])
+  @@index([top500])
+  @@index([enabled])
+  @@index([liquidityScore])
+}
+
+model Market {
+  id             Int       @id @default(autoincrement())
+  exchange       String
+  exchangeSymbol String
+  marketType     String    @default("SPOT")
+  base           String
+  quote          String
+  enabled        Boolean   @default(true)
+  status         String    @default("ACTIVE")
+  price          Float?
+  volume24h      Float?
+  quoteVolume24h Float?
+  change24h      Float?
+  lastSyncAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  assetId        Int
+
+  asset     Asset               @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  candles   Candle[]
+  snapshots IndicatorSnapshot[]
+
+  @@unique([exchange, exchangeSymbol, marketType])
+  @@index([assetId])
+  @@index([base, quote])
+  @@index([exchange, enabled])
+  @@index([quoteVolume24h])
+  @@index([status])
+}
+
+model Candle {
+  id        BigInt    @id @default(autoincrement())
+  marketId  Int
+  timeframe String
+  openTime  DateTime
+  closeTime DateTime?
+  open      Float
+  high      Float
+  low       Float
+  close     Float
+  volume    Float
+  closed    Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  market Market @relation(fields: [marketId], references: [id], onDelete: Cascade)
+
+  @@unique([marketId, timeframe, openTime])
+  @@index([marketId, timeframe, openTime])
+  @@index([timeframe, openTime])
+  @@index([closed])
+}
+
+model IndicatorSnapshot {
+  id           BigInt   @id @default(autoincrement())
+  marketId     Int
+  timeframe    String
+  candleTime   DateTime
+  price        Float
+  rsi14        Float?
+  ema20        Float?
+  ema50        Float?
+  ema200       Float?
+  macd         Float?
+  macdSignal   Float?
+  macdHist     Float?
+  atr14        Float?
+  volume       Float?
+  avgVolume20  Float?
+  volumeRatio  Float?
+  calculatedAt DateTime @default(now())
+
+  market Market @relation(fields: [marketId], references: [id], onDelete: Cascade)
+
+  @@unique([marketId, timeframe, candleTime])
+  @@index([marketId, timeframe])
+  @@index([timeframe, candleTime])
+  @@index([calculatedAt])
+}
+
+model Instrument {
+  id        Int      @id @default(autoincrement())
+  symbol    String   @unique
+  base      String
+  quote     String
+  enabled   Boolean  @default(true)
+  rank      Int?
+  createdAt DateTime @default(now())
+}
