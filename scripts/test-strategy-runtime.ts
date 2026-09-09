@@ -17,7 +17,7 @@
  *   npx tsx scripts/test-strategy-runtime.ts --prove-db-link
  */
 
-import type { Prisma, PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -549,12 +549,17 @@ function cloneJson<T>(value: T): T {
   ) as T;
 }
 
+/**
+ * JSON round-trip bez привязки к типу Prisma.InputJsonValue:
+ * так код компилируется и со сгенерированным клиентом,
+ * и в песочнице без prisma generate (заглушка клиента).
+ */
 function configToJson(
   config: TrendSuslikConfig
-): Prisma.InputJsonValue {
+) {
   return JSON.parse(
     JSON.stringify(config)
-  ) as Prisma.InputJsonValue;
+  );
 }
 
 async function runProveDbLink(
@@ -844,7 +849,7 @@ function seedLikeConfig(): TrendSuslikConfig {
       shortMin: 28,
       shortMax: 48
     },
-    macd: { fast: 12, slow: 26, signal: 9 },
+    macd: { fast: 12, slow: 26, signal: 9, deadZoneRatio: 0 },
     atr: {
       period: 14,
       stopMultiplier: 1.5,
