@@ -1485,3 +1485,135 @@ build — компиляция успешна (останов на старых,
 Приметка: в песочнице run-режим падает на stub-клиенте
 Prisma до цикла, поэтому корректность Ctrl+C на живом
 проходе окончательно подтверждается на VPS.
+
+
+==================================================
+30. ДИАГНОСТИКА ДАННЫХ, PLAN-РЕЖИМЫ И СТАТУС ГРАФИКА
+==================================================
+
+Дата: 09.09.2026. Ветка arena/ui-chart-clean поверх 0f596d9.
+
+!!! Arena implementation — требуется VPS runtime
+verification для всего перечисленного ниже. На VPS эти
+механизмы ещё НЕ проверялись; записей о VPS-проверке здесь
+нет сознательно.
+
+1. АДМИНКА: «СОСТОЯНИЕ ДАННЫХ» (/admin/data, только ADMIN)
+
+- существующая Auth.js-защита (auth() + role=ADMIN,
+  USER/PRO → redirect «/»); server component, отдельный
+  admin API НЕ создавался; env/DATABASE_URL/stack trace
+  не выводятся;
+- АКТИВЫ: всего/enabled/Top-500/с местом в рейтинге +
+  updatedAt как честная approximation времени рейтинга
+  (время прогона rank-assets в схеме не хранится);
+- РЫНКИ: один SQL GROUP BY exchange с FILTER — всего и
+  активных SPOT USDT по Binance/Bybit/Gate/KuCoin/BingX;
+- CANDLE: один SQL GROUP BY timeframe — всего/closed/
+  open/рынков со свечами/первая/последняя + строка
+  freshness; итог — сумма в Node (свечи НЕ грузятся);
+- SNAPSHOT: GROUP BY timeframe — всего/рынков/последний
+  candleTime;
+- COVERAGE: рынков со свечами / активных SPOT USDT по
+  каждому ТФ (подпись: coverage РЫНКОВ, не активов) +
+  Top-10 (JOIN Asset, rank<=10);
+- рекомендуемые plan-команды для отсутствующих ТФ —
+  текстом; веб-запуск worker'ов СОЗНАТЕЛЬНО не сделан
+  (безопасность);
+- сырой SQL — членные prisma.$queryRaw<T>`...` без
+  Unsafe, файл добавлен в проверку scripts/test-chart-sql.ts;
+- в навигации админки мёртвая ссылка «Источники данных»
+  теперь ведёт на /admin/data.
+
+2. FRESHNESS (lib/data/freshness.ts, чистая функция)
+
+Формула (документирована в модуле): D — длительность ТФ
+(5/15/60/240/1440 минут), age = now − openTime последней
+закрытой свечи. АКТУАЛЬНО: age ≤ 2D; ЗАДЕРЖКА: ≤ 6D;
+иначе УСТАРЕЛО; свечи нет — НЕТ ДАННЫХ. 1d-свеча 10 минут
+(и даже ~28 часов) — АКТУАЛЬНО. Используется в админке
+и на графике. Тесты: test-freshness.ts — 32/32
+(фиксированный now).
+
+3. OHLCV --plan И ПРЕДОХРАНИТЕЛЬ (lib/ohlcv/plan.ts)
+
+- npx tsx scripts/ohlcv-worker.ts --plan --top=10
+  --timeframes=5m,15m,1h,4h,1d --limit=300 → read-only
+  SELECT (Asset/Market): активы, рынки, задачи
+  (рынок×ТФ), максимум свечей, оценка API-запросов,
+  разбивка по биржам; баннер «Режим PLAN: PostgreSQL
+  не изменяется, API бирж не вызываются»;
+- sync-код и адаптеры бирж в plan-режиме НЕ импортируются
+  (импорт после предохранителя, только в run);
+- предохранитель: LARGE_RUN_TASK_THRESHOLD = 500 задач
+  (рынок×ТФ); выше — отказ с числом задач, оценкой и
+  готовой командой повтора с --confirm-large-run;
+  Top-10×5ТФ (240) и Top-20×5ТФ (~480) проходят без
+  confirm; Top-500×1ТФ (~2357) — уже требует confirm;
+- тесты: test-ohlcv-cli 68 → 94.
+
+4. SNAPSHOT --plan (lib/snapshots/plan.ts)
+
+- npx tsx scripts/snapshot-worker.ts --plan --top=10
+  --timeframes=... → read-only: по каждому ТФ сколько
+  рынков имеют историю ≥ historyLimit, сколько нет,
+  сколько снапшотов потенциально создано/обновлено;
+  IndicatorSnapshot НЕ пишутся, API бирж не вызываются;
+- тесты: test-snapshot-cli 33 → 44; SQL включён в
+  chart-sql проверку (4 файла).
+
+5. ГРАФИК: СТАТУС ДАННЫХ И URL-СОСТОЯНИЕ
+
+- статусная строка: BINANCE · BTCUSDT · 1 час /
+  «Загружено свечей: N» / «Последняя: 09.09.2026 17:00
+  UTC» / «● АКТУАЛЬНО» (freshness по формуле выше);
+- /coin/BTC?exchange=BINANCE&timeframe=1h — восстановление
+  выбора; смена биржи/ТФ обновляет URL через
+  history.replaceState (без reload); невалидные
+  exchange=XXX / timeframe=2h → fallback без поломки
+  (lib/chart/url-state.ts, тесты 18/18);
+- ошибка подгрузки истории — ОТДЕЛЬНО от ошибки основной
+  загрузки: график остаётся на загруженных данных,
+  показывается предупреждение; параллельные pagination
+  запросы исключены (loadingOlderRef), при смене окна
+  история обрывается и сбрасывается.
+
+6. API VALIDATION (lib/chart/params.ts)
+
+- symbol: пустой/длинный (>16)/инъекция → 400;
+  нормализация в верхний регистр;
+- exchange: только BINANCE/BYBIT/GATE/KUCOIN/BINGX → 400
+  со списком доступных;
+- timeframe=2h/1H → 400; limit=0/999999/abc/10.5 → 400
+  (тихий fallback на 300 удалён; отсутствие параметра —
+  300 как раньше); before=abc/-5/0/будущее → 400;
+- все негативные сценарии проверены живым dev-сервером
+  песочницы (8 сценариев → 400) и юнит-тестами
+  test-chart-params.ts — 37/37.
+
+7. PERFORMANCE (оценка)
+
+Размер ответа /api/chart/candles (синтетическая оценка
+структуры JSON в песочнице, НЕ VPS-замер): limit=300 ≈
+119 КБ, limit=1000 ≈ 408 КБ. Лишние Asset/Market поля не
+отдаются (select узкий), все Candle сразу не возвращаются
+(лимит + cursor). gzip — задача HTTP layer, не вводился.
+Новые индексы НЕ требуются: cursor ложится на существующий
+@@index([marketId, timeframe, openTime]), агрегаты админки
+идут по существующим индексам; схема НЕ менялась.
+
+8. READ/WRITE-ОПЕРАЦИИ ЭТАПА
+
+Read-only (новое): /admin/data (все запросы), --plan
+OHLCV (Asset/Market SELECT), --plan snapshot (Asset/
+Market/Candle/IndicatorSnapshot SELECT).
+Write-capable (как прежде, только явные run): OHLCV
+run-режим (upsert Candle, Market.lastSyncAt), snapshot
+run-режим (upsert IndicatorSnapshot). Новых write-операций
+не появилось; из HTTP write к БД по-прежнему невозможен.
+
+Проверки этапа (песочница): 74/74, 59/59, 54/54,
+chart-sql (4 файла), 32/32 freshness, 94/94 ohlcv-cli,
+44/44 snapshot-cli, 35/35 chart-history, 18/18 url-state,
+37/37 chart-params; tsc — 14 старых sandbox-ошибок,
+новых нет; build — компиляция успешна (останов на старых).

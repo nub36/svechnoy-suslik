@@ -1,3 +1,4 @@
+app/admin/data/page.tsx
 app/admin/page.tsx
 app/admin/strategies/[id]/page.tsx
 app/api/admin/strategies/[id]/route.ts
@@ -25,6 +26,9 @@ components/admin/StrategyEditor.tsx
 components/chart/CandleChart.tsx
 lib/analysis/analyze.ts
 lib/chart/history.ts
+lib/chart/params.ts
+lib/chart/url-state.ts
+lib/data/freshness.ts
 lib/exchanges/binance-candles.ts
 lib/exchanges/binance.ts
 lib/exchanges/bingx.ts
@@ -37,10 +41,12 @@ lib/exchanges/types.ts
 lib/indicators/index.ts
 lib/market.ts
 lib/ohlcv/cli.ts
+lib/ohlcv/plan.ts
 lib/ohlcv/retry.ts
 lib/ohlcv/sync.ts
 lib/prisma.ts
 lib/snapshots/cli.ts
+lib/snapshots/plan.ts
 lib/snapshots/sync.ts
 lib/strategies/config.ts
 lib/strategies/runtime.ts
@@ -55,10 +61,13 @@ scripts/sync-markets.ts
 scripts/test-analysis.ts
 scripts/test-bybit.ts
 scripts/test-chart-history.ts
+scripts/test-chart-params.ts
 scripts/test-chart-sql.ts
+scripts/test-freshness.ts
 scripts/test-indicators.ts
 scripts/test-ohlcv-cli.ts
 scripts/test-snapshot-cli.ts
 scripts/test-strategy-periods.ts
 scripts/test-strategy-runtime.ts
 scripts/test-strategy.ts
+scripts/test-url-state.ts
