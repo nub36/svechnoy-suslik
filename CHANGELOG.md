@@ -449,3 +449,69 @@ Signal Engine (после живого прогона Runtime на VPS).
   timeframes: [...] } ], error: null };
 - GET /coin/BTC -> карточки с реальными Top-500/биржами/
   таймфреймами/последней свечой, а не «Нет данных».
+
+
+==================================================
+
+## 09.09.2026 — Multi-timeframe OHLCV, история графика по прокрутке, UX
+
+### Задача 1 — OHLCV multi-TF готовность (без переписывания)
+- lib/ohlcv/cli.ts: белый список 5m/15m/1h/4h/1d, границы
+  --top 1..500 (по умолчанию 10), --limit 50..1000,
+  --delay, env OHLCV_*; тесты 39/39.
+- created/updated по дельте COUNT; итоги по КАЖДОМУ ТФ
+  (markets/fetched/written/created/updated/skipped/errors);
+  printVerification по всем ТФ + глобальная проверка дублей.
+- Пайплайн не менялся: concurrency=1, retry/backoff,
+  upsert по market+tf+openTime, без удаления/reset,
+  без автопрогона Top-500.
+
+### Задача 2 — Snapshot на нескольких ТФ
+- --timeframes=5m,15m,1h,4h,1d (прогон по каждому ТФ
+  отдельно, итоги по каждому), --timeframe сохранён;
+  только PostgreSQL Candle, без API бирж, схема не
+  расширена; тесты 15/15.
+
+### Задача 3 — История графика (cursor-пагинация)
+- API: before (строгая валидация, 400), limit 50..1000,
+  take limit+1 → hasMore/nextCursor, без OFFSET;
+- клиент: подгрузка при прокрутке влево, слияние без
+  дублей (lib/chart/history.ts), пересчёт индикаторов
+  тем же lib/indicators, сохранение видимой области,
+  AbortController, останов hasMore=false/added=0,
+  бейдж «Загрузка истории…»; тесты 35/35.
+
+### Задача 4 — UX
+- легенда OHLCV+индикаторов под курсором (русские
+  названия, DOM-обновление), кнопка «Сбросить масштаб»,
+  мобильные брейкпоинты 430/360.
+
+### Задача 5 — Кнопки
+- аудит: мёртвых кнопок нет; disabled-состояния с
+  русскими подписями у select'ов графика.
+
+### Задача 6 — Производительность
+- N+1 нет; cursor по индексу (marketId, timeframe,
+  openTime) — существует; новых индексов не требуется.
+
+### Задача 7 — Error handling
+- console.error причины во всех server catch UI/Chart;
+  клиенту — безопасные русские сообщения.
+
+### Файлы
+- Новые: lib/ohlcv/cli.ts, lib/snapshots/cli.ts,
+  lib/chart/history.ts, scripts/test-ohlcv-cli.ts,
+  scripts/test-snapshot-cli.ts, scripts/test-chart-history.ts.
+- Изменённые: scripts/ohlcv-worker.ts, lib/ohlcv/sync.ts,
+  scripts/snapshot-worker.ts, app/api/chart/candles/route.ts,
+  components/chart/CandleChart.tsx, app/globals.css,
+  app/api/search/route.ts, app/strategies/page.tsx,
+  components/MarketOverview.tsx, документация.
+
+### Проверка
+- tsc: 14 старых sandbox-ошибок, новых нет; компиляция
+  build успешна; 74/74, 59/59, 54/54, chart-sql ОК,
+  39/39, 15/15, 35/35.
+- Запреты соблюдены: Signal Engine/schema/lib/prisma.ts/
+  minExchanges не тронуты; reset/force-push/merge в main
+  отсутствуют.
