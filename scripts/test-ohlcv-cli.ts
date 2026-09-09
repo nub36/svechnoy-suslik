@@ -10,10 +10,13 @@
  */
 
 import {
+  buildOhlcvHelp,
   formatTimeframeSummary,
   parseCliNumber,
   parseOhlcvArgs,
-  parseTimeframeList
+  parseTimeframeList,
+  resolveOhlcvInvocation,
+  wantsHelp
 } from "../lib/ohlcv/cli";
 
 let passed = 0;
@@ -239,6 +242,97 @@ ok(
   lines.some((l) => l.includes("5m") && l.includes("ошибок=2")),
   "formatTimeframeSummary: ошибки по ТФ выводятся"
 );
+
+/* ---------- --help/-h и неизвестные флаги (регрессия VPS-инцидента) ---------- */
+
+// VPS-факт: `ohlcv-worker --help` молча игнорировал --help и запускал
+// реальный проход с defaults. Теперь help обязан выбираться РАНЬШЕ всего.
+
+ok(wantsHelp(["--help"]) === true, "wantsHelp: --help");
+ok(wantsHelp(["-h"]) === true, "wantsHelp: -h");
+ok(wantsHelp(["--top=3"]) === false, "wantsHelp: обычный запуск — не help");
+ok(wantsHelp([]) === false, "wantsHelp: пустой список — не help");
+
+const helpCall = resolveOhlcvInvocation(["--help"]);
+
+ok(helpCall.kind === "help", "resolve(--help): режим help");
+ok(
+  helpCall.kind === "help" && !("options" in helpCall),
+  "resolve(--help): опций run НЕТ (worker не запустится)"
+);
+
+ok(
+  resolveOhlcvInvocation(["-h"]).kind === "help",
+  "resolve(-h): режим help"
+);
+ok(
+  resolveOhlcvInvocation(["--help", "--top=3"]).kind === "help",
+  "resolve: --help приоритетнее остальных аргументов"
+);
+
+// unknown/опечатанные флаги — ошибка, а не тихий запуск с defaults
+const unknown = resolveOhlcvInvocation(["--foobar"]);
+
+ok(unknown.kind === "error", "resolve(--foobar): режим error");
+ok(
+  unknown.kind === "error" && unknown.message.includes("Неизвестный флаг"),
+  "resolve(--foobar): понятное сообщение"
+);
+ok(
+  unknown.kind === "error" && unknown.message.includes("--help"),
+  "resolve(--foobar): подсказка про --help"
+);
+
+for (const typo of ["--onc", "--onc=1", "--to=5", "--timeframess=1h", "--lim=100"]) {
+  const r = resolveOhlcvInvocation([typo]);
+
+  ok(
+    r.kind === "error",
+    `resolve(${typo}): опечатка отклонена (не тихий defaults)`
+  );
+}
+
+ok(
+  resolveOhlcvInvocation(["serve"]).kind === "error",
+  "resolve: позиционный аргумент отклонён"
+);
+
+throws(
+  () => parseOhlcvArgs(["--foobar"], {}),
+  "Неизвестный флаг",
+  "parseOhlcvArgs: неизвестный флаг бросает ошибку"
+);
+
+// обычный запуск по-прежнему разбирается как run
+const runCall = resolveOhlcvInvocation(["--top=3", "--once"]);
+
+ok(runCall.kind === "run", "resolve(--top=3 --once): режим run");
+ok(
+  runCall.kind === "run" &&
+    runCall.options.top === 3 &&
+    runCall.options.once === true,
+  "resolve(--top=3 --once): опции корректны"
+);
+
+// справка содержит параметры, defaults и примеры
+const helpText = buildOhlcvHelp();
+
+for (const needle of [
+  "--top=",
+  "по умолчанию 10",
+  "5m,15m,1h,4h,1d",
+  "по умолчанию 1h",
+  "--limit=",
+  "--delay=",
+  "--once",
+  "--help, -h",
+  "npx tsx scripts/ohlcv-worker.ts"
+]) {
+  ok(
+    helpText.includes(needle),
+    `buildOhlcvHelp: содержит "${needle}"`
+  );
+}
 
 /* ---------- итог ---------- */
 

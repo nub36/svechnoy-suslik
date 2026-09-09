@@ -98,10 +98,147 @@ export type OhlcvCliOptions = OhlcvWorkerOptions & {
   intervalMs: number;
 };
 
+/* ---------- безопасный разбор вызова ---------- */
+
+/**
+ * Флаги, которые понимает ohcv-worker. Всё прочее —
+ * ошибка (защита от опечаток вида --onc/--to=5,
+ * которые раньше молча запускали воркер с defaults).
+ */
+const KNOWN_OHLCV_FLAGS: ReadonlySet<string> = new Set([
+  "top",
+  "timeframes",
+  "limit",
+  "delay",
+  "once",
+  "help",
+  "h"
+]);
+
+export function wantsHelp(argv: string[]): boolean {
+  return (
+    argv.includes("--help") || argv.includes("-h")
+  );
+}
+
+export function validateKnownFlags(
+  argv: string[],
+  known: ReadonlySet<string>,
+  availableHint: string
+): string | null {
+  for (const arg of argv) {
+    if (!arg.startsWith("-")) {
+      return `Неизвестный аргумент "${arg}". Доступные флаги: ${availableHint}. Справка: --help`;
+    }
+
+    if (!arg.startsWith("--")) {
+      // одиночный "-h" разрешён, остальной одиночный дефис — нет
+      if (arg !== "-h") {
+        return `Неизвестный флаг "${arg}". Доступные флаги: ${availableHint}. Справка: --help`;
+      }
+
+      continue;
+    }
+
+    const name = arg.slice(2).split("=")[0];
+
+    if (!known.has(name)) {
+      return `Неизвестный флаг "${arg}". Доступные флаги: ${availableHint}. Справка: --help`;
+    }
+  }
+
+  return null;
+}
+
+export type OhlcvInvocation =
+  | { kind: "help" }
+  | { kind: "error"; message: string }
+  | { kind: "run"; options: OhlcvCliOptions };
+
+/**
+ * Полный разбор вызова воркера БЕЗ обращения к БД/биржам:
+ * help обнаруживается раньше всего; неизвестные флаги и
+ * невалидные значения — error (воркер выйдет с кодом != 0),
+ * иначе — run с готовыми опциями.
+ */
+export function resolveOhlcvInvocation(
+  argv: string[],
+  env: Record<string, string | undefined> = process.env
+): OhlcvInvocation {
+  // --help приоритетнее любых других аргументов.
+  if (wantsHelp(argv)) {
+    return { kind: "help" };
+  }
+
+  const flagError = validateKnownFlags(
+    argv,
+    KNOWN_OHLCV_FLAGS,
+    "--top= --timeframes= --limit= --delay= --once"
+  );
+
+  if (flagError !== null) {
+    return { kind: "error", message: flagError };
+  }
+
+  try {
+    return {
+      kind: "run",
+      options: parseOhlcvArgs(argv, env)
+    };
+  } catch (error) {
+    return {
+      kind: "error",
+      message:
+        error instanceof Error
+          ? error.message
+          : String(error)
+    };
+  }
+}
+
+export function buildOhlcvHelp(): string {
+  return [
+    "🐿️ OHLCV Worker — загрузка свечей с бирж в PostgreSQL",
+    "",
+    "Использование:",
+    "  npx tsx scripts/ohlcv-worker.ts [флаги]",
+    "",
+    "Флаги (только форма --имя=значение):",
+    "  --top=N           сколько топ-активов грузить, 1..500, по умолчанию 10",
+    "                    (Top-500 сам по себе НЕ запускается)",
+    "  --timeframes=...  список таймфреймов: 5m,15m,1h,4h,1d, по умолчанию 1h",
+    "  --limit=N         свечей истории за один запрос, 50..1000, по умолчанию 300",
+    "  --delay=N         пауза между запросами в мс, 0..60000, по умолчанию 250",
+    "  --once            один проход (без него цикл: проход раз в час)",
+    "  --help, -h        эта справка (без обращения к БД и биржам)",
+    "",
+    "Примеры безопасного запуска:",
+    "  npx tsx scripts/ohlcv-worker.ts --top=10 --timeframes=1h --once",
+    "  npx tsx scripts/ohlcv-worker.ts --top=10 --timeframes=5m,15m,1h,4h,1d --once",
+    "  npx tsx scripts/ohlcv-worker.ts --top=5 --timeframes=1h --limit=300 --delay=250 --once",
+    "",
+    "Безопасность: воркер идёт строго последовательно, с retry/backoff;",
+    "пишет только upsert по ключу рынок+таймфрейм+openTime — дубли невозможны,",
+    "существующие свечи не удаляются, никакого reset. Остановка: Ctrl+C"
+  ].join("\n");
+}
+
 export function parseOhlcvArgs(
   argv: string[],
   env: Record<string, string | undefined> = process.env
 ): OhlcvCliOptions {
+  // Строгая проверка имён флагов: опечатка вида --onc
+  // или --to=5 должна падать, а не молча включать defaults.
+  const flagError = validateKnownFlags(
+    argv,
+    KNOWN_OHLCV_FLAGS,
+    "--top= --timeframes= --limit= --delay= --once"
+  );
+
+  if (flagError !== null) {
+    throw new Error(flagError);
+  }
+
   const get = (name: string): string | undefined => {
     const prefix = `--${name}=`;
     const hit = argv.find((arg) =>

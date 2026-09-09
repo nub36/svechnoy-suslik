@@ -7,7 +7,11 @@
  * Запуск: npx tsx scripts/test-snapshot-cli.ts
  */
 
-import { parseSnapshotArgs } from "../lib/snapshots/cli";
+import {
+  buildSnapshotHelp,
+  parseSnapshotArgs,
+  resolveSnapshotInvocation
+} from "../lib/snapshots/cli";
 
 let passed = 0;
 let total = 0;
@@ -138,6 +142,74 @@ throws(
   "--top",
   "границы: не-число отклонено"
 );
+
+/* ---------- --help/-h и неизвестные флаги (регрессия VPS-инцидента) ---------- */
+
+// VPS-факт: `snapshot-worker --help` тоже молча запускал worker
+// с defaults (остановлен Ctrl+C до прогона). Теперь help раньше всего.
+
+ok(
+  resolveSnapshotInvocation(["--help"]).kind === "help",
+  "resolve(--help): режим help"
+);
+ok(
+  resolveSnapshotInvocation(["-h"]).kind === "help",
+  "resolve(-h): режим help"
+);
+ok(
+  resolveSnapshotInvocation(["--help", "--top=3"]).kind === "help",
+  "resolve: --help приоритетнее остальных аргументов"
+);
+
+const snapHelp = resolveSnapshotInvocation(["--help"]);
+
+ok(
+  snapHelp.kind === "help" && !("options" in snapHelp),
+  "resolve(--help): опций run НЕТ"
+);
+
+for (const bad of ["--foobar", "--hist=5", "--timeframee=1h", "--tops=3", "serve"]) {
+  const r = resolveSnapshotInvocation([bad]);
+
+  ok(
+    r.kind === "error",
+    `resolve(${bad}): отклонён (не тихий defaults)`
+  );
+}
+
+const snapUnknown = resolveSnapshotInvocation(["--foobar"]);
+
+ok(
+  snapUnknown.kind === "error" &&
+    snapUnknown.message.includes("Неизвестный флаг"),
+  "resolve(--foobar): понятное сообщение"
+);
+
+const snapRun = resolveSnapshotInvocation(["--top=3", "--timeframe=4h"]);
+
+ok(snapRun.kind === "run", "resolve(--top=3 --timeframe=4h): режим run");
+ok(
+  snapRun.kind === "run" &&
+    snapRun.options.top === 3 &&
+    JSON.stringify(snapRun.options.timeframes) === '["4h"]',
+  "resolve(--top=3 --timeframe=4h): опции корректны"
+);
+
+const snapHelpText = buildSnapshotHelp();
+
+for (const needle of [
+  "--top=",
+  "по умолчанию 10",
+  "--timeframes=",
+  "--history=",
+  "PostgreSQL",
+  "npx tsx scripts/snapshot-worker.ts"
+]) {
+  ok(
+    snapHelpText.includes(needle),
+    `buildSnapshotHelp: содержит "${needle}"`
+  );
+}
 
 /* ---------- итог ---------- */
 

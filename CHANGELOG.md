@@ -515,3 +515,39 @@ Signal Engine (после живого прогона Runtime на VPS).
 - Запреты соблюдены: Signal Engine/schema/lib/prisma.ts/
   minExchanges не тронуты; reset/force-push/merge в main
   отсутствуют.
+
+
+==================================================
+
+## 09.09.2026 — Fix CLI воркеров: настоящий --help/-h, строгость флагов, аккуратный Ctrl+C
+
+### Инцидент (VPS, честно)
+- `ohlcv-worker --help` молча запускал worker с defaults;
+  выполнен один проход Top-10 × 1H: создано 289 Candle,
+  обновлено 48, errors=0, duplicates=0 (Candle 14731);
+  процесс остановлен Ctrl+C до второго прохода;
+  данные не потеряны, свечи сохранены (идемпотентный upsert).
+- `snapshot-worker --help` остановлен до прогона.
+
+### Исправление
+- resolveOhlcvInvocation / resolveSnapshotInvocation:
+  help | error | run; help выбирается раньше всего;
+- --help/-h: русская справка с параметрами, defaults и
+  безопасными примерами, exit 0, БД/биржи/Prisma не
+  затрагиваются (динамические импорты только в run-режиме);
+- неизвестные/опечатанные флаги (--foobar, --onc, --to=5,
+  --timeframess=1h, --hist=5) — ошибка и exit 1;
+- SIGINT/SIGTERM: корректное завершение + $disconnect в
+  finally; повторный Ctrl+C — немедленно (130).
+
+### Файлы
+- lib/ohlcv/cli.ts, lib/snapshots/cli.ts (resolve/buildHelp/
+  validateKnownFlags), scripts/ohlcv-worker.ts,
+  scripts/snapshot-worker.ts (переписаны на безопасный разбор),
+  тесты: test-ohlcv-cli 39->68, test-snapshot-cli 15->33;
+  PROJECT_CONTEXT §29.1.
+
+### Проверка
+- 68/68, 33/33, 35/35, chart-sql, 74/74, 59/59, 54/54;
+- tsc: 14 старых sandbox-ошибок, новых нет; build: компиляция
+  успешна; поведение --help/--foobar проверено запусками.
