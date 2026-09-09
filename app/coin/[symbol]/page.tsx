@@ -106,13 +106,10 @@ export default async function CoinPage({
     });
 
     if (asset) {
-      const queryRaw =
-        prisma.$queryRaw as unknown as (
-          query: TemplateStringsArray,
-          ...values: unknown[]
-        ) => Promise<ChartRow[]>;
-
-      const rows = await queryRaw`
+      // Вызов строго членом объекта: отрыв $queryRaw
+      // в переменную теряет this и даёт TypeError
+      // в runtime (см. scripts/test-chart-sql.ts).
+      const rows = await prisma.$queryRaw<ChartRow[]>`
         SELECT
           m.id AS "marketId",
           m.exchange AS "exchange",
@@ -140,7 +137,14 @@ export default async function CoinPage({
         rows
       };
     }
-  } catch {
+  } catch (error) {
+    // Техническая причина — только в server-лог,
+    // чтобы молчаливый empty state не скрывал баги БД.
+    console.error(
+      `[coin/${symbol}] Ошибка загрузки метаданных:`,
+      error
+    );
+
     dbError = true;
   }
 

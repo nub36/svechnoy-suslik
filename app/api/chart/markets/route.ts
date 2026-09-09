@@ -18,6 +18,9 @@ export const dynamic = "force-dynamic";
  * и без загрузки свечей в Node.js. Prisma groupBy не
  * используется из-за проблем типов на реальном
  * сгенерированном клиенте.
+ *
+ * $queryRaw вызывается ТОЛЬКО членом объекта:
+ * prisma.$queryRaw<T>`...` (см. scripts/test-chart-sql.ts).
  */
 
 type ChartRow = {
@@ -107,13 +110,13 @@ export async function GET(
       );
     }
 
-    const queryRaw =
-      prisma.$queryRaw as unknown as (
-        query: TemplateStringsArray,
-        ...values: unknown[]
-      ) => Promise<ChartRow[]>;
-
-    const rows = await queryRaw`
+    // ВАЖНО: $queryRaw вызывается строго членом объекта
+    // (tagged template с типом результата). Присваивать его
+    // переменной нельзя: метод прототипный, отрыв от клиента
+    // теряет this и в runtime даёт TypeError, который catch
+    // маскирует под «БД недоступна» (реальный 503 на VPS
+    // при живой базе). Проверяет scripts/test-chart-sql.ts.
+    const rows = await prisma.$queryRaw<ChartRow[]>`
       SELECT
         m.id AS "marketId",
         m.exchange AS "exchange",
@@ -199,7 +202,14 @@ export async function GET(
       markets: result,
       error: null
     });
-  } catch {
+  } catch (error) {
+    // Техническая причина — только в server-лог; клиенту —
+    // безопасное русское сообщение без stack/secrets.
+    console.error(
+      "[api/chart/markets] Ошибка запроса рынков:",
+      error
+    );
+
     return NextResponse.json(
       {
         error:

@@ -391,3 +391,61 @@ Signal Engine (после живого прогона Runtime на VPS).
 
 - VPS-проверка и перенос commits; Signal Engine —
   отдельным решением.
+
+==================================================
+
+## 09.09.2026 — Исправление VPS-ревью: 503 /api/chart/markets
+
+### Причина (точная)
+
+- В runtime Prisma 6.19.3 $queryRaw — ПРОТОТИПНЫЙ метод
+  клиента ($queryRaw(n,...i){ return this._createPrismaPromise(...) }).
+- Код делал const queryRaw = prisma.$queryRaw as unknown as (...)
+  и вызывал queryRaw`...` — отрыв метода от объекта теряет this,
+  внутри _createPrismaPromise возникает TypeError, голый catch
+  маскировал его под 503 «База данных временно недоступна»
+  при живой PostgreSQL (candles API тем временем отвечал 200).
+- Песочница не могла это поймать: stub @prisma/client (any,
+  без generate) делает любой вызов «работоспособным».
+
+### Исправление
+
+- app/api/chart/markets/route.ts и app/coin/[symbol]/page.tsx:
+  вызов строго членом объекта — await prisma.$queryRaw<Row[]>`...`
+  (типизированный tagged template, безопасная параметризация
+  сохранена, SQL не менялся);
+- в оба catch добавлено console.error с технической причиной
+  (server-лог), клиенту — прежнее безопасное русское сообщение;
+- новый scripts/test-chart-sql.ts — статический тест БЕЗ базы:
+  ловит отрыв $queryRaw, unsafe-варианты, ссылки на таблицы/
+  колонки вне schema.prisma, расхождение алиасов SQL и полей
+  ChartRow; --self-test на фикстурах. На сломанном коде даёт
+  точный диагноз, после фикса — зелёный.
+
+### Не тронуто
+
+- Signal Engine, prisma/schema.prisma, PROJECT_SCHEMA.prisma,
+  lib/prisma.ts, Strategy Runtime, minExchanges.
+- Сам SQL не менялся — он был корректен; корректен был и
+  вызов tsc/build на VPS (ошибка была runtime-only).
+
+### Проверки (песочница)
+
+- test-chart-sql: сам код зелёный, --self-test зелёный;
+  на ПРЕДЫДУЩЕМ коде падал с точным диагнозом обоих мест;
+- tsc --noEmit: 14 старых implicit-any (app/admin, rank-assets —
+  класс «в песочнице нет prisma generate»), новых ошибок нет;
+- npm run build: компиляция успешна, останов на тех же старых
+  ошибках; test-indicators 74/74, periods 59/59, runtime 54/54;
+- dev-smoke: страницы 200, 503 markets теперь сопровождается
+  записью причины в server-лог.
+
+### Ожидает VPS-проверки
+
+- git fetch && checkout arena/ui-chart-clean (fix-коммит поверх bd1f40f);
+- npm install; npm run build; pm2 restart;
+- GET /api/chart/markets?symbol=BTC -> ожидание: 200 JSON
+  { asset, markets: [ { marketId, exchange, exchangeSymbol,
+  timeframes: [...] } ], error: null };
+- GET /coin/BTC -> карточки с реальными Top-500/биржами/
+  таймфреймами/последней свечой, а не «Нет данных».

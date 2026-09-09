@@ -1252,3 +1252,44 @@ test-strategy-runtime.ts — идентичны origin/main.
 - npx prisma validate / generate: binaries.prisma.sh
   недоступен из песочницы — выполнить на VPS
   (schema.prisma не менялась относительно main).
+
+
+==================================================
+28.1. ИСПРАВЛЕНИЕ VPS-РЕВЮ: 503 /api/chart/markets
+==================================================
+
+Дата: 09.09.2026. Исправление в ветке arena/ui-chart-clean
+поверх bd1f40f. Ожидает повторной VPS-проверки.
+
+Точная причина 503: $queryRaw в runtime Prisma 6.19.3 —
+прототипный метод клиента. Код commit 84f7c63 отрывал его
+в переменную (const queryRaw = prisma.$queryRaw as ...),
+вызов queryRaw`...` терял this -> TypeError внутри
+_createPrismaPromise -> голый catch превращал это в 503
+«База данных временно недоступна» при живой PostgreSQL.
+Песочница не ловила: stub-клиент (any, без prisma generate)
+делает вызов «работоспособным». /coin/BTC молча показывал
+empty state по той же причине.
+
+Исправление (SQL не менялся — он корректен):
+
+- app/api/chart/markets/route.ts,
+  app/coin/[symbol]/page.tsx: вызов строго членом объекта,
+  await prisma.$queryRaw<ChartRow[]>`...` — типизированный
+  tagged template, параметризация сохранена;
+- в оба catch добавлен console.error технической причины
+  (server-лог); клиент получает прежнее безопасное
+  русское сообщение;
+- scripts/test-chart-sql.ts — НОВЫЙ статический тест без
+  базы: запрещает отрыв $queryRaw и unsafe-варианты,
+  сверяет таблицы/колонки SQL с schema.prisma, алиасы SQL
+  с полями ChartRow; --self-test на фикстурах. На сломанном
+  коде даёт точный диагноз, на исправленном — зелёный.
+
+Проверки: tsc — 14 старых sandbox-ошибок, новых нет;
+build — компиляция успешна (останов на старых, см. §28);
+74/74 + 59/59 + 54/54; dev-smoke: страницы 200, причина
+503 пишется в server-лог.
+
+Правило на будущее: prisma.$queryRaw — ТОЛЬКО членный
+tagged-template вызов; проверяется scripts/test-chart-sql.ts.
