@@ -389,3 +389,223 @@ Signal Engine (после живого прогона Runtime на VPS).
 3. После боевого прохода: реальные счётчики /admin и
    главной, метки LONG/SHORT, график монеты, история
    сигналов; затем статусы ACTIVE/CLOSED.
+
+==================================================
+
+## 09.09.2026 — Исправлены блокеры локальной проверки песочницы
+
+### Сделано
+- app/admin/page.tsx и scripts/rank-assets.ts: явные
+  структурные типы вместо implicit any.
+- scripts/test-strategy-runtime.ts: configToJson без
+  привязки к типу Prisma.InputJsonValue (JSON round-trip
+  сохранён; компилируется и со stub-клиентом, и с
+  сгенерированным).
+
+### Изменённые/созданные файлы
+- app/admin/page.tsx, scripts/rank-assets.ts,
+  scripts/test-strategy-runtime.ts.
+
+### База данных
+- Изменений нет.
+
+### Проверка
+- npx tsc --noEmit: 0 ошибок (было 16 старых).
+- Самотесты 54/54 и 48/48.
+- npm run build: компиляция и проверка типов проходят.
+
+### Результат
+- Локальная проверка tsc/build разблокирована.
+
+### Известные ограничения
+- На тот момент build всё ещё падал на Collecting page
+  data (stub-клиент Prisma); окончательно решено в этапе
+  «UI-заглушки» через ленивый Prisma-клиент.
+
+### Следующий этап
+- Свечной график рынка.
+
+==================================================
+
+## 09.09.2026 — Свечной график рынка
+
+### Сделано
+- Добавлена зависимость lightweight-charts ^5.2.1
+  (минимальная, без peer-зависимостей, Next 15 + React 19).
+- lib/indicators: серийные версии smaSeries, rsiSeries,
+  macdSeries, atrSeries; старые функции делегируют сериям,
+  эквивалентность проверена (300 прогонов, diff 0).
+- app/api/chart/markets: активы/биржи/таймфреймы из
+  PostgreSQL (только чтение).
+- app/api/chart/candles: закрытые свечи + индикаторы
+  (EMA 20/50/200, SMA 20, RSI 14, MACD 12/26/9) тем же
+  слоем lib/indicators; лимиты 50..1000.
+- components/chart/CandleChart.tsx: свечи, объём,
+  EMA/SMA, панели RSI и MACD, переключатели, выбор
+  монеты/биржи/таймфрейма, zoom/прокрутка, тёмная/светлая
+  тема (CSS-переменные + MutationObserver), русский UI,
+  loading/error/empty, защита от гонок.
+- app/coin/[symbol]: УДАЛЕНЫ выдуманные карточки
+  (LONG/78/100/4H), вместо них реальные данные и график.
+- Обновлены PROJECT_DEPENDENCIES.txt, PROJECT_FILES.txt.
+
+### Изменённые/созданные файлы
+- Созданы: app/api/chart/markets/route.ts,
+  app/api/chart/candles/route.ts,
+  components/chart/CandleChart.tsx.
+- Изменены: lib/indicators/index.ts,
+  app/coin/[symbol]/page.tsx, app/globals.css,
+  package.json, package-lock.json,
+  PROJECT_DEPENDENCIES.txt.
+
+### База данных
+- Схема не менялась. Только чтение Candle/Market/Asset.
+
+### Проверка
+- Эквивалентность индикаторов: 300 прогонов, 0 расхождений.
+- tsc: 0 ошибок; build: компиляция и типы успешны.
+- Dev-сервер: /coin/BTC 200 с честным состоянием,
+  API 400/503 с русскими сообщениями.
+- Визуальная проверка с реальными свечами — на VPS.
+
+### Результат
+- График реализован; живой вид проверить на VPS (§25, шаг 8).
+
+### Известные ограничения
+- ATR на график сознательно не вынесен (не перегружать).
+- В песочнице нет PostgreSQL — весь поток с данными
+  не просмотрен глазами.
+
+### Следующий этап
+- Аудит и замена остальных UI-заглушек.
+
+==================================================
+
+## 09.09.2026 — UI-заглушки заменены реальной функциональностью
+
+### Сделано
+- MarketOverview: реальные счётчики PostgreSQL и
+  капитализация Top-500 (CoinGecko) вместо выдуманных цифр.
+- /strategies: реальные PUBLISHED-стратегии из БД вместо
+  семи выдуманных; честные статусы.
+- Header: кнопка «Поиск» без обработчика -> рабочий поиск
+  (components/SearchBox.tsx, app/api/search/route.ts,
+  PostgreSQL, переход на /coin/SYMBOL).
+- Ссылка «Мой профиль» (вела в никуда) -> страница
+  app/profile/page.tsx с реальными данными сессии.
+- MarketTable: мёртвые чипы «С сигналом»/«Настроить
+  колонки» удалены; «Все/Рост/Падение» — рабочие фильтры;
+  фиктивные колонки RSI и «Сигнал АНАЛИЗ» удалены.
+- lib/market.ts: демо-монеты-фолбэк удалены (правило
+  честных данных), честное «источник недоступен».
+- lib/prisma.ts: ленивый клиент (Proxy) — импорт модуля
+  не падает без prisma generate; на VPS поведение то же;
+  npm run build теперь проходит полностью в песочнице.
+- Страницы с БД (signals и др.) переведены на ленивый
+  импорт Prisma: честные состояния вместо 500.
+
+### Изменённые/созданные файлы
+- Созданы: app/api/search/route.ts, app/profile/page.tsx,
+  components/SearchBox.tsx.
+- Изменены: components/MarketOverview.tsx,
+  components/MarketTable.tsx, components/Header.tsx,
+  app/strategies/page.tsx, app/signals/page.tsx,
+  app/page.tsx, lib/market.ts, lib/prisma.ts,
+  app/globals.css, PROJECT_FILES.txt.
+
+### База данных
+- Схема не менялась. Только чтение.
+
+### Проверка
+- Dev-сервер: /, /signals, /strategies, /login,
+  /coin/BTC -> 200; /profile -> 307 на /login без сессии;
+  /api/search -> 503 с честным сообщением.
+- tsc: 0 ошибок; npm run build: exit 0 (все 15 маршрутов).
+
+### Результат
+- Ни одной кнопки/ссылки без поведения на публичных
+  страницах; фейковых торговых данных в UI нет.
+
+### Известные ограничения
+- Роли PRO/USER отличий в UI пока не имеют (backend
+  разграничений не существует) — честно показан статус.
+- Полная визуальная проверка — на VPS.
+
+### Следующий этап
+- Динамические периоды + MACD dead zone.
+
+==================================================
+
+## 09.09.2026 — Динамические периоды + MACD dead zone (Strategy Runtime)
+
+### Сделано
+- lib/analysis/analyze.ts: AnalysisParams,
+  analyzeCandlesWithParams (произвольные периоды
+  EMA/RSI/MACD/ATR/объёма по закрытым свечам),
+  minCandlesForParams; analyzeCandles сохранил поведение.
+- lib/strategies/config.ts: MACD deadZoneRatio (доля цены,
+  валидация 0..0.1, необязательное поле — старые конфиги
+  БД валидны, зона 0); periodsAreStandard,
+  configToAnalysisParams, ActualPeriods,
+  snapshotActualPeriods.
+- lib/strategies/trend-suslik.ts: warnings сравниваются
+  с фактическими периодами анализа; мёртвая зона MACD
+  (|hist| <= deadZoneRatio*price не даёт баллов,
+  симметрично, видна в причине).
+- lib/strategies/runtime.ts: evaluateSnapshot принимает
+  историю свечей — стандартные периоды берутся из
+  snapshot, нестандартные считаются по закрытым свечам
+  PostgreSQL точно на candleTime snapshot, при
+  недостатке — fallback с warnings. Без обращений к биржам.
+- scripts/signal-worker.ts: подтягивает свечи для
+  нестандартных периодов (по-прежнему DRY-RUN по умолчанию).
+- components/admin/StrategyEditor.tsx: поле «Мёртвая зона»,
+  нормализация старых конфигов.
+- app/api/admin/strategies/[id]/route.ts: полная серверная
+  валидация config (validateTrendSuslikConfig) вместо
+  проверки только minimumSignalScore.
+- scripts/test-strategy-periods.ts: самотест 27/27 +
+  живой DB-режим только-чтение для VPS.
+
+### Изменённые/созданные файлы
+- Созданы: scripts/test-strategy-periods.ts.
+- Изменены: lib/analysis/analyze.ts,
+  lib/strategies/config.ts, lib/strategies/runtime.ts,
+  lib/strategies/trend-suslik.ts,
+  scripts/signal-worker.ts,
+  scripts/test-strategy-runtime.ts (фикстура + deadZoneRatio: 0),
+  components/admin/StrategyEditor.tsx,
+  app/api/admin/strategies/[id]/route.ts, PROJECT_FILES.txt.
+
+### База данных
+- Схема НЕ менялась (конфиг стратегии — JSON).
+- Старые конфиги в БД остаются валидными (поле
+  необязательное, трактуется как зона 0) — проверено тестом.
+
+### Проверка
+- Новый самотест: 27/27 (периоды, эквивалентность,
+  границы свечей, отсечение будущего, fallback, мёртвая
+  зона, валидация, аудит чистоты).
+- Прежние самотесты: 54/54 и 48/48 — обратная
+  совместимость полная.
+- tsc: 0 ошибок; npm run build: exit 0.
+- Живой расчёт по свечам и admin-сохранение — на VPS
+  (§25, шаги 15-16).
+
+### Результат
+- Ограничение «фиксированные периоды snapshot» снято:
+  стандартные параметры — из snapshot, нестандартные —
+  расчёт по закрытым свечам PostgreSQL без обращений к биржам.
+
+### Известные ограничения
+- Подписи причин при fallback по-прежнему используют
+  периоды config (существующее поведение), честность
+  обеспечивают warnings.
+- Живой DB-режим test-strategy-periods не выполнялся —
+  нет БД в песочнице.
+
+### Следующий этап
+- Нулевой шаг на VPS (§25): перенос ветки в main,
+  npm install, prisma-шаги, db push расширения Signal,
+  build+restart, живые прогоны графика/Runtime/периодов,
+  затем dry-run и боевой проход Signal Engine по команде.

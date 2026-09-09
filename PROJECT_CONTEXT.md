@@ -920,106 +920,82 @@ app/admin/strategies/[id]/page.tsx
 25. ТЕКУЩАЯ ТОЧКА ПРОДОЛЖЕНИЯ
 ==================================================
 
-OHLCV Worker успешно проверен.
+Реализовано и проверено в песочнице (см. §26-§30):
 
-IndicatorSnapshot Engine успешно реализован и проверен.
+- OHLCV Worker (VPS, живой прогон ранее).
+- IndicatorSnapshot Engine (VPS, живой прогон ранее).
+- Strategy Runtime (самотесты 54/54; живой прогон — на VPS).
+- Signal Engine: ядро + worker DRY-RUN (самотест 48/48;
+  запись в PostgreSQL по-прежнему НЕ выполнялась).
+- Свечной график рынка (§28): tsc 0, build green,
+  живой вид с реальными свечами НЕ проверен (в песочнице
+  нет PostgreSQL с Candle) — проверить на VPS.
+- UI-заглушки заменены реальной функциональностью (§29).
+- Динамические периоды + MACD dead zone (§30): самотесты
+  27/27; живой DB-режим — scripts/test-strategy-periods.ts
+  на VPS.
 
-Strategy Runtime успешно реализован и проверен.
+Текущее состояние тестового контура (VPS, до Signal Engine):
 
-Signal Engine: ядро + prod-worker реализованы,
-самотест 48/48 (без БД). Запись в PostgreSQL ещё
-НЕ выполнялась: сначала db push на VPS, затем
-dry-run и только потом --apply (см. нулевой шаг ниже).
+Candle: 14442+, IndicatorSnapshot: 48, Signal: 0.
+Top-10 тестовых активов, 1H, 48 рынков,
+биржи Binance/Bybit/Gate/KuCoin/BingX.
 
-Текущее состояние тестового контура (VPS):
+В песочнице binaries.prisma.sh недоступен:
+npx prisma format / validate / generate падают по сети —
+выполнять на VPS. Схема prisma/schema.prisma в Git,
+изменений в этой серии этапов НЕ было.
 
-Candle:
-14442+
-
-IndicatorSnapshot:
-48
-
-Signal:
-0 (создание ещё не запускалось)
-
-Top:
-10 тестовых активов
-
-Timeframe:
-1H
-
-Рынков:
-48
-
-Биржи:
-Binance
-Bybit
-Gate
-KuCoin
-BingX
-
-Snapshot рассчитывается исключительно из PostgreSQL Candle.
-
-Используются только закрытые свечи.
-
-Повторный запуск Snapshot Engine не создаёт дубликаты.
-
-В модели Signal теперь есть всё для Engine:
-strategyVersion + marketId + exchange + exchangeSymbol +
-candleTime + atr14 + reasonsJson/warningsJson/indicatorsJson,
-UNIQUE от дублей
-(strategyId, strategyVersion, marketId, timeframe,
-candleTime, direction).
-
-ВНИМАНИЕ: в песочнице binaries.prisma.sh недоступен,
-поэтому prisma generate / db push / format / validate
-выполняются на VPS. Изменение схемы уже в Git.
-
-НУЛЕВОЙ ШАГ НА VPS (строго по порядку):
+НУЛЕВОЙ ШАГ НА VPS (строго по порядку, ~15 минут):
 
 1. cd ~/svechnoy-suslik && git pull
-2. npx prisma format && npx prisma validate
-3. npx prisma generate
-4. Проверка перед db push:
-   psql: SELECT COUNT(*) FROM "Signal";
-   ожидается 0 (никакой код раньше сигналы не создавал).
-5. npx prisma db push
-   (расширяет Signal, данные Candle/Snapshot/Strategy
-   не трогает; --force-reset запрещён).
-6. npm run build
-7. pm2 restart svechnoy-suslik --update-env
+   (после переноса Arena-ветки в main)
+2. npm install
+   (новая зависимость lightweight-charts ^5.2.1)
+3. npx prisma format && npx prisma validate
+4. npx prisma generate
+5. psql: SELECT COUNT(*) FROM "Signal"; — ожидание 0.
+6. npx prisma db push
+   (расширение Signal из этапа Signal Engine;
+   Candle/Snapshot/Strategy не трогаются;
+   --force-reset запрещён)
+7. npm run build && pm2 restart svechnoy-suslik --update-env
 
-Затем живой прогон Runtime (нулевой шаг §26):
+Затем проверки UI и графика в браузере:
+8. /coin/BTC — график: выбор биржи, ТФ, индикаторы,
+   zoom/прокрутка, тёмная/светлая тема, телефон.
+9. /strategies — реальные стратегии из БД.
+10. /, /signals, /profile — честные состояния.
 
-8. npx tsx scripts/ohlcv-worker.ts --top=10 --timeframes=1h --once
-9. npx tsx scripts/snapshot-worker.ts --top=10 --timeframe=1h
-10. npx tsx scripts/test-strategy-runtime.ts --top=10 --timeframe=1h
-11. npx tsx scripts/test-strategy-runtime.ts --prove-db-link --top=10 --timeframe=1h
-    (убедиться: Signal count не изменился, config восстановлен)
+Затем живой прогон Strategy Runtime:
+11. npx tsx scripts/ohlcv-worker.ts --top=10 --timeframes=1h --once
+12. npx tsx scripts/snapshot-worker.ts --top=10 --timeframe=1h
+13. npx tsx scripts/test-strategy-runtime.ts --top=10 --timeframe=1h
+14. npx tsx scripts/test-strategy-runtime.ts --prove-db-link --top=10 --timeframe=1h
+    (Signal count не меняется, config восстанавливается)
 
-Затем Signal Engine:
+Затем динамические периоды (§30):
+15. npx tsx scripts/test-strategy-periods.ts --self-test
+16. npx tsx scripts/test-strategy-periods.ts --top=10 --timeframe=1h
+    (только чтение; сравнение fallback vs computed)
 
-12. npx tsx scripts/test-signal-engine.ts --self-test
-    (ожидается 48/48)
-13. DRY-RUN:
-    npx tsx scripts/signal-worker.ts --top=10 --timeframe=1h
-    убедиться, что записей нет: Signal count остался 0.
-14. Боевой проход:
-    npx tsx scripts/signal-worker.ts --top=10 --timeframe=1h --apply
-15. Повторить шаг 13 (--apply ещё раз или dry-run):
-    дубликатов быть не должно (UNIQUE + skipDuplicates).
+Затем Signal Engine (см. §27):
+17. npx tsx scripts/test-signal-engine.ts --self-test
+18. npx tsx scripts/signal-worker.ts --top=10 --timeframe=1h
+    DRY-RUN: Signal остаётся 0.
+19. npx tsx scripts/signal-worker.ts --top=10 --timeframe=1h --apply
+20. Повторить шаг 18: дубликатов быть не должно.
 
-СЛЕДУЮЩИЙ ЭТАП (после успешного боевого прохода):
+СЛЕДУЮЩИЙ ЭТАП (после боевого прохода Signal Engine):
 
-Подключить реальные Signal к интерфейсу:
-- реальные счётчики /admin и главной;
-- график монеты, метки LONG/SHORT;
-- история сигналов, статусы ACTIVE/CLOSED
-  (фиксация результата по движению к TP/SL — отдельный этап).
+Реальные сигналы в интерфейсе: счётчики /admin и главной,
+метки LONG/SHORT на графике монеты, история сигналов,
+затем статусы ACTIVE/CLOSED с фиксацией результата
+по движению к TP/SL.
 
-Страница /signals УЖЕ переведена на реальные данные
-из PostgreSQL: пока сигналов нет, честно показывает
-«Нет данных». Демо-сигналы удалены.
+Запрещено без явной команды: production Signal Engine,
+запись Signal, изменение minExchanges автоматически,
+push/merge в main, изменения VPS.
 
 ==================================================
 26. STRATEGY RUNTIME — РЕАЛИЗОВАН И ПРОВЕРЕН
@@ -1246,3 +1222,213 @@ app/signals/page.tsx
   только ACTIVE по умолчанию.
 - Score стратегии — сила совпадения условий, а не
   вероятность успешной сделки (пометка выведена в UI).
+
+==================================================
+28. СВЕЧНОЙ ГРАФИК РЫНКА — РЕАЛИЗОВАН, ЖДЁТ ЖИВОЙ ПРОВЕРКИ
+==================================================
+
+Дата: 09.09.2026
+
+Полноценный интерактивный свечной график в существующей
+странице монеты /coin/[SYMBOL]. Второй OHLCV-конвейер НЕ
+создавался: данные читаются из существующего PostgreSQL
+Candle/Market/Asset.
+
+Новая зависимость:
+lightweight-charts ^5.2.1 (минимальная, без peer-зависимостей,
+совместима с Next.js 15 + React 19; ESM, клиентский бандл).
+
+Созданные файлы:
+
+app/api/chart/markets/route.ts
+- Без параметров: активы, у которых есть включённые
+  SPOT USDT-рынки со свечами (из Asset/Market/Candle).
+- С ?symbol=BTC: биржи актива и доступные таймфреймы
+  с количеством свечей и временем последней.
+- Только чтение; ленивый импорт Prisma;
+  честные 404/503 на русском.
+
+app/api/chart/candles/route.ts
+- GET ?symbol&exchange&timeframe&limit (50..1000, дефолт 300).
+- Закрытые свечи PostgreSQL, от старых к новым.
+- Индикаторы считает СУЩЕСТВУЮЩИЙ слой lib/indicators:
+  EMA 20/50/200, SMA 20, RSI 14, MACD 12/26/9 — тот же
+  набор, что и в IndicatorSnapshot; ATR на график
+  сознательно не вынесен (не перегружать основной график).
+- Ответ содержит series, выровненные по времени (UTC).
+
+components/chart/CandleChart.tsx
+- Клиентский компонент lightweight-charts v5:
+  свечи + объём-оверлей + EMA/SMA на главной панели,
+  RSI в отдельной панели, MACD (линия+сигнал+гистограмма)
+  в третьей панели; переключатели индикаторов.
+- Выбор монеты, биржи и таймфрейма (только реально
+  доступные в БД).
+- Zoom (колесо/щипок) и прокрутка истории — встроенные.
+- Тёмная/светлая тема: цвета читаются из CSS-переменных
+  проекта и обновляются автоматически (MutationObserver
+  на data-theme).
+- Состояния: загрузка, ошибка с кнопкой «Повторить»,
+  честное «Нет данных», все тексты на русском.
+- Защита от гонок запросов (abort + requestId).
+
+lib/indicators/index.ts — расширение
+- Добавлены серийные версии: smaSeries, rsiSeries,
+  macdSeries, atrSeries (для графика и параметрического
+  анализа). Старые sma/ema/rsi/macd/atr сохранены и
+  теперь делегируют сериям — поведение проверено
+  на эквивалентность (300 случайных прогонов, разница 0).
+
+app/coin/[symbol]/page.tsx — переписана
+- УДАЛЕНЫ выдуманные карточки «LONG / 4 LONG / 78 / 100 / 4H»
+  (нарушение правила честных торговых данных).
+- Реальные карточки: биржи с данными, таймфреймы,
+  последняя закрытая свеча (UTC), активные сигналы
+  (пока честное «Нет»).
+- Проверка тикера, честные состояния «нет актива» и
+  «база недоступна».
+
+Проверка:
+- tsc: 0 новых ошибок; npm run build: успешно (exit 0).
+- Dev-сервер: /coin/BTC -> 200 с честным состоянием,
+  /api/chart/* -> 400/503 с русскими сообщениями.
+- Визуальная проверка с реальными свечами — на VPS (§25, шаг 8).
+
+==================================================
+29. UI-ЗАГЛУШКИ — АУДИТ И ЗАМЕНА НА РЕАЛЬНУЮ ФУНКЦИОНАЛЬНОСТЬ
+==================================================
+
+Дата: 09.09.2026
+
+Аудит найденных заглушек и что с ними сделано:
+
+1. components/MarketOverview.tsx — выдуманные цифры
+   («$2.71 трлн», «38 сигналов», «RSI 53.4», «7/7 движок
+   работает»). Стало: реальные данные — капитализация
+   Top-500 (сумма CoinGecko), счётчики PostgreSQL
+   (свечи/снимки/ACTIVE-сигналы/стратегии), честные
+   «Нет данных» при недоступной базе.
+
+2. app/strategies/page.tsx — 7 выдуманных стратегий
+   с «АКТИВНА». Стало: реальные PUBLISHED-стратегии
+   из PostgreSQL (название, версия, таймфреймы,
+   minExchanges, честный статус АКТИВНА/ВЫКЛЮЧЕНА),
+   пустое состояние и состояние недоступной базы.
+
+3. components/Header.tsx — кнопка «Поиск» без обработчика.
+   Стало: рабочий поиск по активам
+   (components/SearchBox.tsx + app/api/search/route.ts,
+   PostgreSQL Asset, переход на /coin/SYMBOL, debounce,
+   Escape/клик-вне, честное «Ничего не найдено»).
+
+4. components/UserMenu.tsx — ссылка «Мой профиль» вела
+   на несуществующий /profile. Стало: страница
+   app/profile/page.tsx с реальными данными сессии
+   (имя, email, роль USER/PRO/ADMIN), редирект на /login
+   для неавторизованных. Подписки/уведомления честно
+   помечены как будущие.
+
+5. components/MarketTable.tsx — мёртвые чипы
+   «С сигналом» и «Настроить колонки», колонки RSI («—»)
+   и «Сигнал» («АНАЛИЗ») без данных. Стало: рабочие
+   фильтры «Все активы / Рост / Падение» (с активным
+   состоянием), фиктивные чипы и колонки удалены,
+   честное «Ничего не найдено» при пустом фильтре.
+
+6. lib/market.ts — при недоступности CoinGecko
+   подсовывались демо-монеты как реальные цены.
+   Стало: пустой список, на главной честное
+   «источник рынка временно недоступен».
+
+7. app/signals/page.tsx и страницы с БД — переведены
+   на ленивый импорт Prisma: недоступная база даёт
+   честное «Нет данных», а не падение страницы.
+
+8. lib/prisma.ts — клиент создаётся лениво (Proxy)
+   при первом обращении. На VPS поведение то же;
+   в песочнице без prisma generate приложение больше
+   не падает при импорте — build проходит полностью.
+
+Сознательно оставлено как есть:
+- /admin и админка — работали, не тронуты (кроме
+  валидации, см. §30);
+- роли и авторизация Auth.js — не тронуты;
+- «Управление подписками» в /profile — честная пометка
+  «появится в будущих версиях» (backend отсутствует).
+
+Проверка: dev-сервер, все страницы 200
+(/, /signals, /strategies, /login, /coin/BTC),
+/profile -> 307 на /login без сессии,
+tsc 0, npm run build exit 0.
+
+==================================================
+30. STRATEGY RUNTIME — ДИНАМИЧЕСКИЕ ПЕРИОДЫ + MACD DEAD ZONE
+==================================================
+
+Дата: 09.09.2026
+
+Разрешение известного ограничения «фиксированные периоды
+snapshot» + мёртвая зона MACD.
+
+lib/analysis/analyze.ts
+- AnalysisParams + analyzeCandlesWithParams():
+  анализ с произвольными периодами EMA/RSI/MACD/ATR/объёма
+  по закрытым свечам; minCandlesForParams() — сколько
+  свечей нужно. analyzeCandles() сохранил прежнее
+  поведение (делегирует с дефолтными периодами).
+
+lib/strategies/config.ts
+- TrendSuslikMacd.deadZoneRatio: доля цены; валидация
+  0..0.1, поле необязательное — старые конфиги в БД
+  валидны и означают зону 0 (проверено тестом).
+- periodsAreStandard(): все ли периоды стратегии
+  совпадают с фиксированным набором IndicatorSnapshot.
+- configToAnalysisParams(), ActualPeriods,
+  snapshotActualPeriods().
+
+lib/strategies/trend-suslik.ts
+- runTrendSuslik(a, config, actualPeriods?): warnings
+  теперь сравнивают config с ФАКТИЧЕСКИМИ периодами
+  анализа; при расчёте по свечам с периодами config
+  warnings нет. Без параметра — прежнее поведение.
+- Мёртвая зона MACD: |histogram| <= deadZoneRatio * |price|
+  не даёт баллов ни LONG, ни SHORT; в причине видна зона.
+  deadZoneRatio = 0 — прежнее поведение.
+
+lib/strategies/runtime.ts
+- evaluateSnapshot(input, config, candles?): если периоды
+  стандартные — snapshot напрямую (как раньше); если
+  нестандартные и передана история — индикаторы считаются
+  по закрытым свечам PostgreSQL точно на candleTime
+  snapshot (свечи «из будущего» отбрасываются; при
+  несовпадении последней свечи — fallback на snapshot
+  с warnings). Никаких обращений к биржам.
+
+scripts/signal-worker.ts (по-прежнему DRY-RUN по умолчанию)
+- Для нестандартных периодов подтягивает свечи из
+  PostgreSQL и передаёт их в evaluateSnapshot.
+
+components/admin/StrategyEditor.tsx
+- Поле «Мёртвая зона (доля цены)» в секции MACD,
+  нормализация старых конфигов без поля.
+
+app/api/admin/strategies/[id]/route.ts
+- Полная серверная валидация config через
+  validateTrendSuslikConfig (раньше проверялся только
+  minimumSignalScore); ошибки по-русски с перечислением.
+
+scripts/test-strategy-periods.ts
+- Самотест 27/27 без БД: распознавание периодов,
+  эквивалентность analyzeCandles, границы достаточности
+  свечей, отсечение будущего, fallback-и, мёртвая зона
+  (симметрия, границы, совместимость), валидация
+  deadZoneRatio, аудит чистоты.
+- Живой DB-режим для VPS (ТОЛЬКО чтение):
+  --top=10 --timeframe=1h — сравнение fallback (snapshot
+  позиционно, с warnings) vs computed (свечи, без
+  warnings) по всем рынкам. Signal не создаются.
+
+Проверка в песочнице:
+- 27/27 новый самотест; 54/54 и 48/48 прежние
+  (обратная совместимость полная); tsc 0; build exit 0.
+- Живой расчёт по свечам и admin-сохранение — на VPS.
