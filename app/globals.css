@@ -1341,3 +1341,33 @@ td:nth-child(2) {
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/* ===== Подгрузка истории и сброс масштаба ===== */
+
+.chartHistoryLoader {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.chartResetScale {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 3;
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.chartResetScale:hover {
+  opacity: 1;
+}

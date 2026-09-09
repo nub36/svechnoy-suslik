@@ -12,8 +12,15 @@ import {
   type ISeriesApi,
   type HistogramData,
   type LineData,
-  type UTCTimestamp
+    type UTCTimestamp
 } from "lightweight-charts";
+import {
+  emaSeries,
+  macdSeries,
+  rsiSeries,
+  smaSeries
+} from "@/lib/indicators";
+import { mergeOlder } from "@/lib/chart/history";
 
 /**
  * Свечной график на lightweight-charts.
@@ -85,6 +92,8 @@ type CandlesResponse = {
   } | null;
   message?: string;
   error?: string;
+  hasMore?: boolean;
+  nextCursor?: number | null;
 };
 
 type ThemeColors = {
@@ -134,6 +143,118 @@ function timeframeLabel(tf: string): string {
   return TIMEFRAME_LABELS[tf] ?? tf;
 }
 
+/* ---------- пересчёт индикаторов на клиенте ---------- */
+
+/**
+ * При подгрузке истории индикаторы пересчитываются
+ * на клиенте тем же слоем lib/indicators, который
+ * использует сервер: линии EMA/RSI/MACD остаются
+ * математически непрерывными через стык батчей.
+ */
+
+type RawCandle = {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+};
+
+function alignCompactClient(
+  compact: number[],
+  offset: number,
+  times: number[]
+): TimePoint[] {
+  const result: TimePoint[] = [];
+
+  for (let j = 0; j < compact.length; j++) {
+    const index = j + offset;
+
+    if (index >= times.length) {
+      break;
+    }
+
+    result.push({
+      time: times[index],
+      value: compact[j]
+    });
+  }
+
+  return result;
+}
+
+function alignNullableClient(
+  series: (number | null | undefined)[],
+  times: number[]
+): TimePoint[] {
+  const result: TimePoint[] = [];
+
+  for (let i = 0; i < series.length; i++) {
+    const value = series[i];
+
+    if (
+      value !== null &&
+      value !== undefined &&
+      Number.isFinite(value)
+    ) {
+      result.push({
+        time: times[i],
+        value
+      });
+    }
+  }
+
+  return result;
+}
+
+function computeIndicators(
+  candles: RawCandle[]
+): NonNullable<CandlesResponse["indicators"]> {
+  const times = candles.map((c) => c.time);
+  const closes = candles.map((c) => c.close);
+  const macd = macdSeries(closes, 12, 26, 9);
+
+  return {
+    ema20: alignCompactClient(
+      emaSeries(closes, 20),
+      19,
+      times
+    ),
+    ema50: alignCompactClient(
+      emaSeries(closes, 50),
+      49,
+      times
+    ),
+    ema200: alignCompactClient(
+      emaSeries(closes, 200),
+      199,
+      times
+    ),
+    sma20: alignNullableClient(
+      smaSeries(closes, 20),
+      times
+    ),
+    rsi14: alignNullableClient(
+      rsiSeries(closes, 14),
+      times
+    ),
+    macd: {
+      macd: alignNullableClient(
+        macd.macd,
+        times
+      ),
+      signal: alignNullableClient(
+        macd.signal,
+        times
+      ),
+      histogram: alignNullableClient(
+        macd.histogram,
+        times
+      )
+    }
+  };
+}
+
 export default function CandleChart({
   initialSymbol
 }: {
@@ -178,6 +299,25 @@ export default function CandleChart({
   const dataRef = useRef<CandlesResponse | null>(
     null
   );
+
+  /* ---------- состояние подгрузки истории ---------- */
+
+  // Сырые свечи/объём текущего окна (ASC по time) —
+  // база для слияния истории без дублей.
+  const rawCandlesRef = useRef<RawCandle[]>([]);
+  const volumeRawRef = useRef<TimePoint[]>([]);
+  const hasMoreRef = useRef(true);
+  const oldestTimeRef = useRef<number | null>(null);
+  const loadingOlderRef = useRef(false);
+  const olderAbortRef = useRef<AbortController | null>(
+    null
+  );
+  const loadOlderRef = useRef<() => void>(() => {});
+
+  const [historyLoading, setHistoryLoading] =
+    useState(false);
+  const [historyEnded, setHistoryEnded] =
+    useState(false);
 
   const [symbols, setSymbols] = useState<
     SymbolInfo[]
@@ -362,6 +502,15 @@ export default function CandleChart({
   const applyData = useCallback(
     (data: CandlesResponse) => {
       dataRef.current = data;
+
+      // база для последующей подгрузки истории
+      rawCandlesRef.current = data.candles;
+      volumeRawRef.current = data.volume;
+      hasMoreRef.current = data.hasMore === true;
+      oldestTimeRef.current =
+        data.candles.length > 0
+          ? data.candles[0].time * 1000
+          : null;
 
       const colors = readThemeColors();
 
@@ -675,6 +824,18 @@ export default function CandleChart({
 
     applyVisibility();
 
+    // Прокрутка влево до начала видимой области —
+    // подгружаем более старую историю (cursor по openTime).
+    chart
+      .timeScale()
+      .subscribeVisibleLogicalRangeChange(
+        (range) => {
+          if (range && range.from <= 2) {
+            loadOlderRef.current();
+          }
+        }
+      );
+
     // реакция на смену темы
     const observer =
       new MutationObserver(() => {
@@ -876,6 +1037,13 @@ export default function CandleChart({
         return;
       }
 
+      // смена окна: обрываем подгрузку истории
+      // и начинаем отсчёт заново
+      olderAbortRef.current?.abort();
+      loadingOlderRef.current = false;
+      setHistoryLoading(false);
+      setHistoryEnded(false);
+
       abortRef.current?.abort();
 
       const controller =
@@ -959,10 +1127,232 @@ export default function CandleChart({
     ]
   );
 
+  /* ---------- подгрузка истории при прокрутке влево ---------- */
+
+  const loadOlder = useCallback(
+    async () => {
+      if (
+        loadingOlderRef.current ||
+        !hasMoreRef.current
+      ) {
+        return;
+      }
+
+      if (
+        !symbol ||
+        !exchange ||
+        oldestTimeRef.current === null
+      ) {
+        return;
+      }
+
+      loadingOlderRef.current = true;
+      setHistoryLoading(true);
+
+      const controller =
+        new AbortController();
+
+      olderAbortRef.current = controller;
+
+      try {
+        const response = await fetch(
+          `/api/chart/candles?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}&timeframe=${encodeURIComponent(timeframe)}&before=${oldestTimeRef.current}&limit=300`,
+          { signal: controller.signal }
+        );
+
+        const data: CandlesResponse =
+          await response.json();
+
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        // Ошибка истории не должна ломать график:
+        // прекращаем попытки и честно сообщаем.
+        if (
+          !response.ok ||
+          !Array.isArray(data.candles)
+        ) {
+          hasMoreRef.current = false;
+          setHistoryEnded(true);
+
+          return;
+        }
+
+        const candlesMerge = mergeOlder(
+          rawCandlesRef.current,
+          data.candles
+        );
+
+        // Добавлять нечего — истории дальше нет,
+        // прекращаем запросы.
+        if (candlesMerge.added === 0) {
+          hasMoreRef.current = false;
+          setHistoryEnded(true);
+
+          return;
+        }
+
+        const volumeMerge = mergeOlder(
+          volumeRawRef.current,
+          data.volume
+        );
+
+        rawCandlesRef.current =
+          candlesMerge.merged;
+        volumeRawRef.current =
+          volumeMerge.merged;
+        oldestTimeRef.current =
+          candlesMerge.merged[0].time * 1000;
+        hasMoreRef.current =
+          data.hasMore === true;
+
+        // Полный пересчёт индикаторов по объединённому
+        // окну тем же слоем lib/indicators.
+        const indicators =
+          computeIndicators(candlesMerge.merged);
+
+        const merged: CandlesResponse = {
+          ...dataRef.current!,
+          candles: candlesMerge.merged,
+          volume: volumeMerge.merged,
+          indicators
+        };
+
+        dataRef.current = merged;
+
+        const chart = chartRef.current;
+        const colors = readThemeColors();
+
+        // Сохраняем видимую область: после setData
+        // сдвигаем её на число добавленных свечей.
+        const range =
+          chart
+            ?.timeScale()
+            .getVisibleLogicalRange() ?? null;
+
+        candleSeriesRef.current?.setData(
+          merged.candles.map(
+            (c): CandlestickData =>
+              ({
+                time: c.time as UTCTimestamp,
+                open: c.open,
+                high: c.high,
+                low: c.low,
+                close: c.close
+              }) as CandlestickData
+          )
+        );
+
+        volumeSeriesRef.current?.setData(
+          merged.volume.map(
+            (v): HistogramData => ({
+              time: v.time as UTCTimestamp,
+              value: v.value,
+              color: colors.muted + "55"
+            })
+          )
+        );
+
+        const setLine = (
+          series: ISeriesApi<"Line"> | null,
+          points: TimePoint[]
+        ) => {
+          series?.setData(
+            points.map(
+              (p): LineData => ({
+                time: p.time as UTCTimestamp,
+                value: p.value
+              })
+            )
+          );
+        };
+
+        setLine(
+          ema20Ref.current,
+          indicators.ema20
+        );
+        setLine(
+          ema50Ref.current,
+          indicators.ema50
+        );
+        setLine(
+          ema200Ref.current,
+          indicators.ema200
+        );
+        setLine(
+          sma20Ref.current,
+          indicators.sma20
+        );
+        setLine(
+          rsiRef.current,
+          indicators.rsi14
+        );
+        setLine(
+          macdLineRef.current,
+          indicators.macd.macd
+        );
+        setLine(
+          macdSignalRef.current,
+          indicators.macd.signal
+        );
+
+        macdHistRef.current?.setData(
+          indicators.macd.histogram.map(
+            (p): HistogramData => ({
+              time: p.time as UTCTimestamp,
+              value: p.value,
+              color:
+                p.value >= 0
+                  ? colors.green + "99"
+                  : colors.red + "99"
+            })
+          )
+        );
+
+        if (chart && range) {
+          chart
+            .timeScale()
+            .setVisibleLogicalRange({
+              from: range.from + candlesMerge.added,
+              to: range.to + candlesMerge.added
+            });
+        }
+
+        if (!hasMoreRef.current) {
+          setHistoryEnded(true);
+        }
+      } catch (error) {
+        if (
+          error instanceof DOMException &&
+          error.name === "AbortError"
+        ) {
+          return;
+        }
+
+        // Сеть/сервер недоступны: не зацикливаемся,
+        // история остаётся как есть.
+        hasMoreRef.current = false;
+        setHistoryEnded(true);
+      } finally {
+        loadingOlderRef.current = false;
+        setHistoryLoading(false);
+      }
+    },
+    [symbol, exchange, timeframe]
+  );
+
+  useEffect(() => {
+    loadOlderRef.current = () => {
+      void loadOlder();
+    };
+  }, [loadOlder]);
+
   useEffect(() => {
     void loadCandles();
 
     return () => {
+      olderAbortRef.current?.abort();
       abortRef.current?.abort();
     };
   }, [loadCandles]);
@@ -1173,6 +1563,37 @@ export default function CandleChart({
               Загрузка…
             </div>
           )}
+
+          {historyLoading && (
+            <div className="chartHistoryLoader">
+              Загрузка истории…
+            </div>
+          )}
+
+          <button
+            type="button"
+            className="chip chartResetScale"
+            title="Вернуть масштаб по умолчанию"
+            onClick={() => {
+              const chart = chartRef.current;
+
+              if (!chart) {
+                return;
+              }
+
+              chart
+                .timeScale()
+                .resetTimeScale();
+
+              chart
+                .priceScale("right")
+                .applyOptions({
+                  autoScale: true
+                });
+            }}
+          >
+            Сбросить масштаб
+          </button>
         </div>
       )}
 
@@ -1183,7 +1604,12 @@ export default function CandleChart({
             ? ` · рынок ${selectedMarket.exchangeSymbol} на ${selectedMarket.exchange}`
             : ""}
           . Масштаб — колесо мыши или щипок,
-          прокрутка истории — перетаскивание.
+          прокрутка влево подгружает более старую
+          историю
+          {historyEnded
+            ? " · история загружена полностью"
+            : ""}
+          .
         </div>
       )}
     </div>

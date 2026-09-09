@@ -5,6 +5,10 @@ import {
   rsiSeries,
   smaSeries
 } from "@/lib/indicators";
+import {
+  parseHistoryLimit,
+  validateCursor
+} from "@/lib/chart/history";
 
 export const dynamic = "force-dynamic";
 
@@ -112,15 +116,29 @@ export async function GET(
     .get("timeframe")
     ?.trim();
 
-  const limitRaw = Number(
-    searchParams.get("limit") ?? "300"
+  const limit = parseHistoryLimit(
+    searchParams.get("limit")
   );
-  const limit =
-    Number.isInteger(limitRaw) &&
-    limitRaw >= 50 &&
-    limitRaw <= 1000
-      ? limitRaw
-      : 300;
+
+  // Cursor-пагинация истории: before = openTime (мс) свечи,
+  // СТРОГО старее которой нужны свечи. Никакого OFFSET.
+  const beforeRaw =
+    searchParams.get("before");
+
+  let beforeMs: number | null = null;
+
+  if (beforeRaw !== null) {
+    const cursor = validateCursor(beforeRaw);
+
+    if (!cursor.ok) {
+      return NextResponse.json(
+        { error: cursor.message },
+        { status: 400 }
+      );
+    }
+
+    beforeMs = cursor.ms;
+  }
 
   if (
     !symbol ||
@@ -190,12 +208,20 @@ export async function GET(
         where: {
           marketId: market.id,
           timeframe,
-          closed: true
+          closed: true,
+          ...(beforeMs !== null
+            ? {
+                openTime: {
+                  lt: new Date(beforeMs)
+                }
+              }
+            : {})
         },
         orderBy: {
           openTime: "desc"
         },
-        take: limit,
+        // limit+1: лишняя свеча — только признак hasMore.
+        take: limit + 1,
         select: {
           openTime: true,
           open: true,
@@ -206,7 +232,12 @@ export async function GET(
         }
       });
 
-    if (candles.length === 0) {
+    const hasMore = candles.length > limit;
+    const page = hasMore
+      ? candles.slice(0, limit)
+      : candles;
+
+    if (page.length === 0) {
       return NextResponse.json({
         market: {
           exchange: market.exchange,
@@ -217,25 +248,27 @@ export async function GET(
         candles: [],
         volume: [],
         indicators: null,
+        hasMore: false,
+        nextCursor: null,
         message:
-          "Нет данных: по этому рынку и таймфрейму свечей ещё нет"
+          "Нет данных: по этому рынку и таймфрейму свечей больше нет"
       });
   }
 
     // от старых к новым
-    candles.reverse();
+    page.reverse();
 
-    const times = candles.map((c: CandleRow) =>
+    const times = page.map((c: CandleRow) =>
       Math.floor(
         c.openTime.getTime() / 1000
       )
     );
 
-    const closes = candles.map(
+    const closes = page.map(
       (c: CandleRow) => c.close
     );
 
-    const ohlc = candles.map((c: CandleRow) => ({
+    const ohlc = page.map((c: CandleRow) => ({
       time: Math.floor(
         c.openTime.getTime() / 1000
       ),
@@ -245,7 +278,7 @@ export async function GET(
       close: c.close
     }));
 
-    const volume = candles.map((c: CandleRow) => ({
+    const volume = page.map((c: CandleRow) => ({
       time: Math.floor(
         c.openTime.getTime() / 1000
       ),
@@ -315,9 +348,21 @@ export async function GET(
       },
       lastCandleTime:
         times[times.length - 1] ?? null,
-      count: ohlc.length
+      count: ohlc.length,
+      hasMore,
+      nextCursor:
+        hasMore && ohlc.length > 0
+          ? page[0].openTime.getTime()
+          : null
     });
-  } catch {
+  } catch (error) {
+    // Техническая причина — в server-лог; клиенту —
+    // безопасное русское сообщение без stack/secrets.
+    console.error(
+      "[api/chart/candles] Ошибка запроса свечей:",
+      error
+    );
+
     return NextResponse.json(
       {
         error:
