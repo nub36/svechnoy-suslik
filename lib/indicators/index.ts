@@ -232,6 +232,25 @@ export function macdSeries(
   );
 
   /*
+   * ВАЖНО о выравнивании.
+   *
+   * emaSeries возвращает КОМПАКТНЫЙ массив БЕЗ null:
+   * emaSeries(x, p)[k] соответствует индексу x
+   * (p - 1) + k (result[0] — это SMA-сид).
+   *
+   * Поэтому signal в точке macdValues[j]:
+   *   signalSeries[j - (signalPeriod - 1)]
+   *
+   * Для 12/26/9: macdValues[0] -> вход 25;
+   * первый signal j=8 -> вход 33 -> signalSeries[0]
+   * (SMA-сид первых 9 macd-значений). Вариант
+   * signalSeries[j] читал бы macdValues[j+8] —
+   * значение из будущего (look-ahead), а на хвосте —
+   * undefined. Это фиксируется тестами
+   * scripts/test-indicators.ts (поэлементное
+   * совпадение + границы N=35/40).
+   */
+  /*
    * macdValues[j] соответствует индексу входа
    * j + slow - 1. Сигнальная EMA в точке j — это
    * signalSeries[j - (signalPeriod - 1)],

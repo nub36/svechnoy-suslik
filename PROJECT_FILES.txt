@@ -53,6 +53,7 @@ scripts/snapshot-worker.ts
 scripts/sync-markets.ts
 scripts/test-analysis.ts
 scripts/test-bybit.ts
+scripts/test-indicators.ts
 scripts/test-signal-engine.ts
 scripts/test-strategy-periods.ts
 scripts/test-strategy-runtime.ts

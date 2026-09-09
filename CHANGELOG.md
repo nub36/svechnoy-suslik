@@ -698,3 +698,78 @@ Signal Engine (после живого прогона Runtime на VPS).
 - Перенос Strategy Runtime (lib-ядро + тесты) на VPS
   отдельным набором файлов БЕЗ Signal Engine, живой
   прогон test-strategy-periods --top=10 --timeframe=1h.
+
+==================================================
+
+## 09.09.2026 — Проверка выравнивания macdSeries по ревью (изменений алгоритма не потребовалось)
+
+### Контекст
+Ручное ревью указало на «двойное смещение» в macdSeries:
+будто emaSeries возвращает массив, выровненный по входу
+(индексы 0..period-2 = null), и signal надо читать как
+signalSeries[j]. Фактическая проверка кода показала:
+emaSeries возвращает КОМПАКТНЫЙ массив без null
+(result[0] — SMA-сид, соответствующий входному индексу
+period-1). Поэтому корректное чтение —
+signalSeries[j - (signalPeriod - 1)], как и реализовано.
+
+Доказательства:
+- Предложенный вариант signalSeries[j] соответствовал бы
+  macdValues[j + signalPeriod - 1] — ЗНАЧЕНИЮ ИЗ БУДУЩЕГО
+  (look-ahead), а на хвосте давал бы undefined:
+  macd() возвращал бы null почти на всех данных
+  (скалярный API сломался бы).
+- Старый скалярный macd() (production до c14c97b,
+  проверенный на живых данных VPS на этапе
+  IndicatorSnapshot Engine) использует ema(macdValues,
+  signal) = последний элемент КОМПАКТНОЙ emaSeries —
+  текущая macdSeries воспроизводит его один в один.
+
+### Сделано
+- scripts/test-indicators.ts — новый постоянный тест (74/74):
+  - численная эквивалентность macd() против эталонного
+    алгоритма старого production (fastSeries/slowSeries,
+    сборка macdValues, expectedSignal = ema(macdValues,
+    signal)) для 12/26/9, 5/35/7, 8/17/9 на N = 35/42/26
+    (ровно guard-минимум), 100, 300, 1000 — точное ===
+    по macd/signal/histogram;
+  - поэлементная сверка macdSeries по входным индексам
+    (macd/signal/histogram на своих свечах, null в зонах
+    прогрева, null за хвостом) — вариант signalSeries[j]
+    эти тесты проваливает (look-ahead);
+  - границы 12/26/9: N=34 — guard, всё null; N=35 —
+    macd/signal на входе 34; N=40 — macd впервые на
+    входе 25, signal впервые ровно на входе 33,
+    на входе 32 ещё null; ручной случай 3/5/2 на [1..10];
+  - обратная совместимость скалярного API против
+    НЕЗАВИСИМЫХ реализаций (другой порядок операций,
+    допуск 1e-9): sma/ema/rsi/atr/macd — 150/150 наборов;
+  - согласованность серий со скалярными функциями.
+- lib/indicators/index.ts: только поясняющий комментарий
+  о компактном выравнивании emaSeries в macdSeries
+  (поведение НЕ менялось).
+- PROJECT_FILES.txt.
+
+### Изменённые/созданные файлы
+- Создан: scripts/test-indicators.ts.
+- Изменён: lib/indicators/index.ts (только комментарий),
+  PROJECT_FILES.txt, CHANGELOG.md.
+
+### База данных
+- Изменений нет. Signal Engine, Prisma, minExchanges
+  не затронуты.
+
+### Проверка
+- scripts/test-indicators.ts: 74/74.
+- scripts/test-strategy-periods.ts: 59/59.
+- scripts/test-strategy-runtime.ts: 54/54.
+- scripts/test-signal-engine.ts: 48/48.
+- npx tsc --noEmit: 0 ошибок. npm run build: exit 0.
+
+### Результат
+- Выравнивание macdSeries подтверждено математически
+  и численно; алгоритм не менялся — изменение «signalSeries[j]»
+  внесло бы look-ahead и сломало бы скалярный API.
+
+### Следующий этап
+- Без изменений: §25 (нулевой шаг на VPS).
