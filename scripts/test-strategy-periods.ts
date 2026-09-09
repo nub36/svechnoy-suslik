@@ -1000,6 +1000,7 @@ type MarketRow = {
   id: number;
   exchange: string;
   exchangeSymbol: string;
+  quoteVolume24h: number | null;
 };
 
 type Db = {
@@ -1161,7 +1162,7 @@ async function runDbMode(
             market.exchangeSymbol,
           assetSymbol: asset.symbol,
           assetTop500: true,
-          quoteVolume24h: null,
+          quoteVolume24h: market.quoteVolume24h,
           timeframe,
           candleTime: snap.candleTime,
           price: snap.price,
