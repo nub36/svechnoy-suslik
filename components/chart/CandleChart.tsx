@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState
+} from "react";
+import { useRouter } from "next/navigation";
 import {
   CandlestickSeries,
   HistogramSeries,
@@ -416,6 +422,7 @@ export default function CandleChart({
     null
   );
   const loadOlderRef = useRef<() => void>(() => {});
+  const router = useRouter();
   const legendRef =
     useRef<HTMLDivElement | null>(null);
   const legendMapsRef =
@@ -633,6 +640,22 @@ export default function CandleChart({
   }, []);
 
   /* ---------- наполнение серий данными ---------- */
+
+  const resetChartScale = useCallback(() => {
+    const chart = chartRef.current;
+
+    if (!chart) {
+      return;
+    }
+
+    chart.timeScale().resetTimeScale();
+
+    chart
+      .priceScale("right")
+      .applyOptions({
+        autoScale: true
+      });
+  }, []);
 
   const rebuildLegendMaps = useCallback(
     (data: CandlesResponse) => {
@@ -1761,9 +1784,21 @@ export default function CandleChart({
           <select
             value={symbol}
             disabled={symbols.length === 0}
-            onChange={(e) =>
-              setSymbol(e.target.value)
-            }
+            onChange={(e) => {
+              const next = e.target.value;
+
+              setSymbol(next);
+
+              // URL следует за выбором: /coin/ETH?...
+              // (мягкая навигация Next — серверная карточка
+              // монеты тоже обновляется, без полной перезагрузки)
+              if (/^[A-Z0-9]{1,16}$/.test(next)) {
+                router.push(
+                  `/coin/${next}${buildChartSearch(exchange, timeframe)}`,
+                  { scroll: false }
+                );
+              }
+            }}
           >
             {symbols.length === 0 ? (
               <option value="">
@@ -1947,7 +1982,10 @@ export default function CandleChart({
           <p>{errorMessage}</p>
         </div>
       ) : (
-        <div className="chartWrap">
+        <div
+          className="chartWrap"
+          onDoubleClick={resetChartScale}
+        >
           <div
             ref={containerRef}
             className="chartContainer"
@@ -2022,23 +2060,7 @@ export default function CandleChart({
             type="button"
             className="chip chartResetScale"
             title="Вернуть масштаб по умолчанию"
-            onClick={() => {
-              const chart = chartRef.current;
-
-              if (!chart) {
-                return;
-              }
-
-              chart
-                .timeScale()
-                .resetTimeScale();
-
-              chart
-                .priceScale("right")
-                .applyOptions({
-                  autoScale: true
-                });
-            }}
+            onClick={resetChartScale}
           >
             Сбросить масштаб
           </button>
