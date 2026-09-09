@@ -3,6 +3,7 @@ app/admin/data/page.tsx
 app/admin/indicators/page.tsx
 app/admin/journal/page.tsx
 app/admin/markets/page.tsx
+app/admin/monitoring/page.tsx
 app/admin/notifications/page.tsx
 app/admin/page.tsx
 app/admin/strategies/[id]/page.tsx

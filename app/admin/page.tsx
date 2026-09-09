@@ -32,52 +32,133 @@ export default async function AdminPage() {
     redirect("/");
   }
 
-  const [
-    strategies,
-    assets,
-    markets,
-    candleCount,
-    signals
-  ] = await Promise.all([
-    prisma.strategy.findMany({
-      orderBy: [
-        { slug: "asc" },
-        { version: "desc" }
-      ]
-    }),
+  // Обёртка с честной деградацией: если БД недоступна,
+  // страница показывает «Нет данных», а не падает.
+  let data:
+    | {
+        strategies: {
+          id: number;
+          slug: string;
+          name: string;
+          description: string | null;
+          version: number;
+          enabled: boolean;
+          status: string;
+          timeframes: string[];
+          minExchanges: number;
+        }[];
+        assets: number;
+        markets: number;
+        candleCount: number;
+        signals: number;
+        dbLatencyMs: number | null;
+        exchangesDistinct: number;
+        lastClosed1h: Date | null;
+      }
+    | null = null;
 
-    // основной universe Top-100 (lib/universe.ts)
-    prisma.asset.count({
-      where: {
-        enabled: true,
-        rank: {
-          lte: 100,
-          not: null
+  try {
+    const started = Date.now();
+
+    const [
+      strategies,
+      assets,
+      markets,
+      candleCount,
+      signals,
+      activeMarkets,
+      exchanges,
+      lastClosedRows
+    ] = await Promise.all([
+      prisma.strategy.findMany({
+        orderBy: [
+          { slug: "asc" },
+          { version: "desc" }
+        ]
+      }),
+
+      // основной universe Top-100 (lib/universe.ts)
+      prisma.asset.count({
+        where: {
+          enabled: true,
+          rank: {
+            lte: 100,
+            not: null
+          }
         }
-      }
-    }),
+      }),
 
-    prisma.market.count({
-      where: {
-        enabled: true
-      }
-    }),
+      prisma.market.count({
+        where: {
+          enabled: true
+        }
+      }),
 
-    prisma.candle.count(),
+      prisma.candle.count(),
 
-    prisma.signal.count({
-      where: {
-        status: "ACTIVE"
-      }
-    })
-  ]);
+      prisma.signal.count({
+        where: {
+          status: "ACTIVE"
+        }
+      }),
+
+      // точный смысл карточки «Рынков»
+      prisma.market.count({
+        where: {
+          enabled: true,
+          status: "ACTIVE",
+          quote: "USDT",
+          marketType: "SPOT"
+        }
+      }),
+
+      // факт о ДАННЫХ в БД, не о доступности API бирж
+      prisma.market.findMany({
+        where: {
+          enabled: true,
+          status: "ACTIVE",
+          quote: "USDT",
+          marketType: "SPOT"
+        },
+        select: { exchange: true },
+        distinct: ["exchange"]
+      }),
+
+      // последняя ЗАКРЫТАЯ 1h свеча для worker-статуса
+      (prisma.$queryRaw<{ t: Date | null }[]>`
+        SELECT MAX(c."openTime") FILTER (
+          WHERE c.closed = true
+        ) AS t
+        FROM "Candle" c
+        WHERE c.timeframe = '1h'
+      `) as unknown as { t: Date | null }[]
+    ]);
+
+    data = {
+      strategies,
+      assets,
+      markets,
+      candleCount,
+      signals,
+      dbLatencyMs: Date.now() - started,
+      exchangesDistinct: exchanges.length,
+      lastClosed1h: lastClosedRows[0]?.t ?? null
+    };
+  } catch (error) {
+    console.error(
+      "[admin] Ошибка загрузки сводки:",
+      error
+    );
+
+    data = null;
+  }
 
   const published =
-    strategies.filter(
+    data?.strategies.filter(
       (s) =>
         s.status === "PUBLISHED" &&
         s.enabled
-    ).length;
+    ).length ?? 0;
 
   return (
     <main className="adminPage">
@@ -109,26 +190,38 @@ export default async function AdminPage() {
         <div className="adminStats">
           <div className="adminStatCard">
             <span>Top активов (Top-100)</span>
-            <b>{assets}</b>
+            <b>
+              {data
+                ? data.assets
+                : "—"}
+            </b>
             <small>
               основной universe анализа
             </small>
           </div>
 
           <div className="adminStatCard">
-            <span>Рынков</span>
-            <b>{markets}</b>
+            <span>Рынков (активных)</span>
+            <b>
+              {data
+                ? data.markets.toLocaleString(
+                    "ru-RU"
+                  )
+                : "—"}
+            </b>
             <small>
-              на пяти биржах
+              активные SPOT USDT-рынки в БД
             </small>
           </div>
 
           <div className="adminStatCard">
             <span>Свечей в БД</span>
             <b>
-              {candleCount.toLocaleString(
-                "ru-RU"
-              )}
+              {data
+                ? data.candleCount.toLocaleString(
+                    "ru-RU"
+                  )
+                : "—"}
             </b>
             <small>
               сохранённая история OHLCV
@@ -137,9 +230,13 @@ export default async function AdminPage() {
 
           <div className="adminStatCard">
             <span>Активных сигналов</span>
-            <b>{signals}</b>
+            <b>
+              {data ? data.signals : "—"}
+            </b>
             <small>
-              сейчас отслеживаются
+              {data && data.signals === 0
+                ? "Signal Engine не развёрнут"
+                : "по активным стратегиям"}
             </small>
           </div>
         </div>
@@ -168,12 +265,12 @@ export default async function AdminPage() {
           </div>
 
           <div className="strategyAdminList">
-            {strategies.length === 0 ? (
+            {!data || data.strategies.length === 0 ? (
               <div className="adminEmpty">
                 Стратегии пока не созданы.
               </div>
             ) : (
-              strategies.map(
+              data?.strategies.map(
                 (strategy) => (
                   <div
                     className="strategyAdminCard"
@@ -271,64 +368,84 @@ export default async function AdminPage() {
 
           <div className="engineStatusGrid">
             <div>
-              <span className="statusDot statusGreen" />
+              <span
+                className={`statusDot ${
+                  data ? "statusGreen" : "statusRed"
+                }`}
+              />
               <p>
                 <b>PostgreSQL</b>
                 <small>
-                  База подключена
-                </small>
-              </p>
-            </div>
-
-            <div>
-              <span className="statusDot statusGreen" />
-              <p>
-                <b>Биржи</b>
-                <small>
-                  Binance, Bybit, Gate,
-                  KuCoin, BingX
+                  {data && data.dbLatencyMs !== null
+                    ? `Отвечает (SELECT 1, ${data.dbLatencyMs} мс)`
+                    : "Нет ответа — см. Мониторинг"}
                 </small>
               </p>
             </div>
 
             <div>
               <span
-                className={
-                  candleCount > 0
-                    ? "statusDot statusGreen"
-                    : "statusDot statusYellow"
-                }
+                className={`statusDot ${
+                  data &&
+                  data.exchangesDistinct > 0
+                    ? "statusGreen"
+                    : "statusYellow"
+                }`}
               />
+              <p>
+                <b>Биржи (данные в БД)</b>
+                <small>
+                  {data
+                    ? `${data.exchangesDistinct} бирж с активными SPOT USDT-рынками (это не статус API бирж)`
+                    : "нет данных"}
+                </small>
+              </p>
+            </div>
+
+            <div>
+              <span className="statusDot statusYellow" />
 
               <p>
                 <b>OHLCV Worker</b>
                 <small>
-                  {candleCount > 0
-                    ? "Свечи поступают"
-                    : "Фоновую загрузку ещё запускаем"}
+                  Состояние процесса не
+                  отслеживается (web не имеет
+                  безопасного доступа к PM2).
+                  Последняя закрытая 1h-свеча:{" "}
+                  {data?.lastClosed1h
+                    ? data.lastClosed1h.toLocaleString(
+                        "ru-RU",
+                        {
+                          timeZone: "UTC",
+                          day: "2-digit",
+                          month: "2-digit",
+                          hour: "2-digit",
+                          minute: "2-digit"
+                        }
+                      ) + " UTC"
+                    : "—"}
                 </small>
               </p>
             </div>
 
             <div>
-              <span
-                className={
-                  signals > 0
-                    ? "statusDot statusGreen"
-                    : "statusDot statusYellow"
-                }
-              />
+              <span className="statusDot statusYellow" />
 
               <p>
                 <b>Signal Engine</b>
                 <small>
-                  {signals > 0
-                    ? "Есть активные сигналы"
-                    : "Постоянный сканер ещё не запущен"}
+                  Не развёрнут. Записей Signal в
+                  базе: {data ? data.signals : "—"}
                 </small>
               </p>
             </div>
           </div>
+
+          <p className="muted healthNote">
+            Подробные измеримые состояния — на странице
+            «Мониторинг»: замер PostgreSQL, свежесть
+            закрытых свечей по таймфреймам, счётчики.
+          </p>
         </section>
       </section>
     </main>

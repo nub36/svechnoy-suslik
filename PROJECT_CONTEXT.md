@@ -1772,3 +1772,41 @@ top500 = «входит в исторический Top-500 рейтинг»).
 
 СТОП после коммитов A — ждём VPS review. ЭТАП B
 (график + Strategy Runtime) не начинается.
+
+---
+
+## §31a. Статус этапа A (09.09.2026) — ВЫПОЛНЕН
+
+- A1 **e6934a9** — Top-100 universe (lib/universe.ts,
+  CLI, coin-карточка, admin/data), история Top-500
+  сохранена.
+- A2 **557d003** — AdminNav, /admin/indicators,
+  /admin/markets, честные /admin/backtests и
+  /admin/notifications.
+- A3 **30d82a9** — журнал: instrumentation.ts +
+  lib/observability/journal.ts (ring-buffer 500,
+  маскирование секретов), /admin/journal с фильтрами;
+  без schema change; test-journal 23/23.
+- A4 — /admin/monitoring (SELECT 1+latency, счётчики,
+  freshness закрытых свечей по ТФ; worker-состояние
+  честно «не отслеживается») и переписанный Overview
+  (замер PostgreSQL, «Биржи» = факт о БД, OHLCV Worker
+  без выдуманного «Свечи поступают», Signal Engine
+  «Не развёрнут», graceful-деградация при недоступной
+  БД); AdminNav дополнен пунктом «Журнал»;
+  globals.css: .statusRed.
+
+Проверки песочницы: tsc — 12 известных implicit-any
+(scripts/rank-assets.ts, baseline; 2 из admin/page
+закрыты явной типизацией); build компилируется,
+финальный фейл — тот же baseline rank-assets
+(подтверждено сравнением с HEAD~1); self-тесты:
+journal 23/23, ohlcv 102/102, snapshot 44/44,
+freshness 52/52, chart-history 50/50, url-state 18/18,
+chart-params 37/37, chart-sql ok, indicators 74/74,
+periods 59/59, runtime 54/54.
+
+VPS-ревью рендера/admin-auth — на живой БД (песочница
+stub: admin-страницы дают 500 «did not initialize» —
+ожидаемо). ЭТАП B не начинается до явного
+подтверждения.

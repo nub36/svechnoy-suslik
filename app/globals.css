@@ -1086,6 +1086,11 @@ td:nth-child(2) {
   box-shadow: 0 0 0 4px rgba(232,170,39,.1);
 }
 
+.statusRed {
+  background: #f05252;
+  box-shadow: 0 0 0 4px rgba(240,82,82,.1);
+}
+
 .adminEmpty {
   padding: 30px;
   text-align: center;
