@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { parseSymbolParam } from "@/lib/chart/params";
 
 export const dynamic = "force-dynamic";
 
@@ -44,6 +45,17 @@ export async function GET(
     ?.trim()
     .toUpperCase();
 
+  const symbolCheck = parseSymbolParam(symbol);
+
+  if (!symbolCheck.ok) {
+    return NextResponse.json(
+      { error: symbolCheck.message },
+      { status: 400 }
+    );
+  }
+
+  const symbolValue = symbolCheck.value;
+
   try {
     // Ленивый импорт: ошибка клиента Prisma
     // превращается в честный 503, а не в падение модуля.
@@ -51,7 +63,7 @@ export async function GET(
       "@/lib/prisma"
     );
 
-    if (!symbol) {
+    if (!symbolValue) {
       const assets =
         await prisma.asset.findMany({
           where: {
@@ -90,7 +102,7 @@ export async function GET(
 
     const asset =
       await prisma.asset.findUnique({
-        where: { symbol },
+        where: { symbol: symbolValue },
         select: {
           id: true,
           symbol: true,

@@ -5,10 +5,13 @@ import {
   rsiSeries,
   smaSeries
 } from "@/lib/indicators";
+import { validateCursor } from "@/lib/chart/history";
 import {
-  parseHistoryLimit,
-  validateCursor
-} from "@/lib/chart/history";
+  parseExchangeParam,
+  parseLimitParam,
+  parseSymbolParam,
+  parseTimeframeParam
+} from "@/lib/chart/params";
 
 export const dynamic = "force-dynamic";
 
@@ -116,9 +119,32 @@ export async function GET(
     .get("timeframe")
     ?.trim();
 
-  const limit = parseHistoryLimit(
+  // Строгая валидация: некорректный параметр — 400
+  // с русским сообщением (никогда не 500 и не fallback).
+  const symbolCheck = parseSymbolParam(symbol);
+  const exchangeCheck = parseExchangeParam(exchange);
+  const timeframeCheck = parseTimeframeParam(timeframe);
+  const limitCheck = parseLimitParam(
     searchParams.get("limit")
   );
+
+  const firstInvalid = [
+    symbolCheck,
+    exchangeCheck,
+    timeframeCheck,
+    limitCheck
+  ].find((check) => !check.ok);
+
+  if (firstInvalid && !firstInvalid.ok) {
+    return NextResponse.json(
+      { error: firstInvalid.message },
+      { status: 400 }
+    );
+  }
+
+  const limit = limitCheck.ok
+    ? limitCheck.value
+    : 300;
 
   // Cursor-пагинация истории: before = openTime (мс) свечи,
   // СТРОГО старее которой нужны свечи. Никакого OFFSET.
