@@ -25,7 +25,10 @@ import {
   type Direction,
   type StrategyReason
 } from "./trend-suslik";
-import { analyzeCandlesWithParams } from "../analysis/analyze";
+import {
+  analyzeCandlesWithParams,
+  minCandlesForParams
+} from "../analysis/analyze";
 
 /**
  * Minimalnyj nabor, kotoryj runtime zhdyot
@@ -71,7 +74,7 @@ export type EvaluatedMarket = {
 };
 
 export type SkippedMarket = {
-  status: "filtered" | "no-snapshot";
+  status: "filtered" | "no-snapshot" | "cannot-evaluate";
   exchange: string;
   market: string;
   marketId: number;
@@ -159,22 +162,198 @@ export function snapshotToAnalysis(
 }
 
 /**
+ * Sravnenie cen s otnositelnoj tolerancej.
+ *
+ * input.price (IndicatorSnapshot.price) i computed.price
+ * (Candle.close) prohodyat raznye preobrazovaniya
+ * PostgreSQL float8 -> JS number v raznyh zaprosah,
+ * poetomu strogoe === hrupko. CandleTime pri etom
+ * ostaetsya TOCHNYM ogranicheniem, a cena schitaetsya
+ * sovpadayushchej pri otnositelnoj pogreshnosti <= 1e-9:
+ * okruglenie double dva poryadka menshe, lyuboe realnoe
+ * dvizhenie ceny — na mnozhestva bolshe.
+ */
+export function priceMatches(
+  a: number,
+  b: number
+): boolean {
+  if (
+    !Number.isFinite(a) ||
+    !Number.isFinite(b)
+  ) {
+    return false;
+  }
+
+  if (a === b) {
+    return true;
+  }
+
+  const scale = Math.max(
+    Math.abs(a),
+    Math.abs(b)
+  );
+
+  if (scale === 0) {
+    return false;
+  }
+
+  return (
+    Math.abs(a - b) / scale <= 1e-9
+  );
+}
+
+function cannotEvaluate(
+  input: SnapshotInput,
+  reason: string
+): SkippedMarket {
+  return {
+    status: "cannot-evaluate",
+    exchange: input.exchange,
+    market: input.exchangeSymbol,
+    marketId: input.marketId,
+    reason
+  };
+}
+
+/**
+ * Nestandartnye periody: raschyot TOLKO po zakrytym
+ * svecham s fakticheskimi periodami config.
+ *
+ * Fiksirovannyj IndicatorSnapshot (RSI14, EMA20/50/200,
+ * MACD 12/26/9, ATR14, Volume20) zdes NE ispolzuetsya
+ * NI V KAKOM VIDE: pozicionnaya podstanovka znachenij
+ * s drugimi periodami dala by lozhnyj scoring.
+ *
+ * Lyubaya problema s istoriej — net svechej, istorii
+ * malo, poslednyaya svecha ne na candleTime snapshot,
+ * rashozhdenie ceny, oshibka raschyota — daet
+ * "cannot-evaluate": rynok sejchas nelzya chestno
+ * otzenit, golosa v agregacii on ne daet.
+ */
+function evaluateWithCandles(
+  input: SnapshotInput,
+  config: TrendSuslikConfig,
+  candles: CandleData[]
+): MarketStrategyResult {
+  const params = configToAnalysisParams(config);
+  const required = minCandlesForParams(params);
+
+  if (candles.length === 0) {
+    return cannotEvaluate(
+      input,
+      "nestandartnye periody: istoriya zakrytyh svechej " +
+        "ne peredana — scoring po fiksirovannomu snapshot " +
+        "s drugimi periodami zapreshchyon"
+    );
+  }
+
+  /*
+   * Tolko zakrytye svechi NE POZJE candleTime snapshot.
+   * Svechi posle candleTime v raschyote ne uchastvuyut
+   * nikogda; analyzeCandlesWithParams dopolnitelno
+   * sortiruet istoriyu ot staryh k novym.
+   */
+  const history = candles
+    .filter(
+      (c) =>
+        c.closed &&
+        c.openTime.getTime() <=
+          input.candleTime.getTime()
+    )
+    .sort(
+      (a, b) =>
+        a.openTime.getTime() -
+        b.openTime.getTime()
+    );
+
+  if (history.length < required) {
+    return cannotEvaluate(
+      input,
+      `nestandartnye periody: istorii ne hvataet — ` +
+        `nuzhno >= ${required} zakrytyh svechej ` +
+        `do candleTime, est ${history.length}`
+    );
+  }
+
+  const computed = analyzeCandlesWithParams(
+    history,
+    params
+  );
+
+  if (!computed) {
+    return cannotEvaluate(
+      input,
+      "nestandartnye periody: raschyot indikatorov nevozmozhen"
+    );
+  }
+
+  if (
+    computed.candleTime.getTime() !==
+    input.candleTime.getTime()
+  ) {
+    return cannotEvaluate(
+      input,
+      `nestandartnye periody: poslednyaya rasschitannaya ` +
+        `svecha ${computed.candleTime.toISOString()} ` +
+        `ne sovpadaet s candleTime snapshot ` +
+        `${input.candleTime.toISOString()}`
+    );
+  }
+
+  if (!priceMatches(computed.price, input.price)) {
+    return cannotEvaluate(
+      input,
+      `nestandartnye periody: cena snapshot ${input.price} ` +
+        `ne sovpadaet s cenoj svechi ${computed.price} — ` +
+        "dannye rassinhronizirovany"
+    );
+  }
+
+  const result = runTrendSuslik(
+    computed,
+    config,
+    {
+      emaFast: config.ema.fast,
+      emaMedium: config.ema.medium,
+      emaSlow: config.ema.slow,
+      rsi: config.rsi.period,
+      macdFast: config.macd.fast,
+      macdSlow: config.macd.slow,
+      macdSignal: config.macd.signal,
+      volume: config.volume.period
+    }
+  );
+
+  return {
+    status: "evaluated",
+    exchange: input.exchange,
+    market: input.exchangeSymbol,
+    marketId: input.marketId,
+    candleTime: input.candleTime,
+    price: input.price,
+    longScore: result.longScore,
+    shortScore: result.shortScore,
+    direction: result.direction,
+    reasons: result.reasons,
+    warnings: result.warnings
+  };
+}
+
+/**
  * Raschyot strategii po odnomu snapshotu (odna birzha).
  *
- * Periody strategii:
- * - standartnye (sovpadayut s IndicatorSnapshot) ->
- *   znacheniya berutsya iz snapshot, svechi ne nuzhny;
- * - nestandartnye i peredany history svech ->
- *   indikatory rasschityvayutsya po zakrytym svecham
- *   PostgreSQL (bez obrashcheniya k birzham) tochno
- *   na candleTime snapshot;
- * - nestandartnye, a svech net / ne hvataet ->
- *   fallback na snapshot pozicionno, runtime vidat
- *   warnings o rashozhdenii periodov.
+ * 1) periodsAreStandard(config) === true — znacheniya
+ *    berutsya iz IndicatorSnapshot kak ran'she.
  *
- * candles (esli peredany) — zakrytye svechi etogo
- * rynka i tajmfrejma, lyuboj poryadok: funkciya
- * otsortiruet i otrezhet budushchee samostoyatelno.
+ * 2) periodsAreStandard(config) === false — TOLKO closed
+ *    candles PostgreSQL + analyzeCandlesWithParams
+ *    s fakticheskimi periodami config. Fixed snapshot
+ *    dlya scoringa NE ispolzuetsya; pri nedostatke
+ *    istorii rynok ottalkivaetsya kak "cannot-evaluate".
+ *
+ * candles (esli peredany) — istoriya svechej etogo rynka
+ * i tajmfrejma, lyuboj poryadok: funkciya sama otbiraet
+ * zakrytye svechi do candleTime snapshot.
  */
 export function evaluateSnapshot(
   input: SnapshotInput,
@@ -199,69 +378,12 @@ export function evaluateSnapshot(
     };
   }
 
-  if (!periodsAreStandard(config) && candles && candles.length > 0) {
-    const params = configToAnalysisParams(config);
-
-    const history = candles
-      .filter(
-        (c) =>
-          c.closed &&
-          c.openTime.getTime() <=
-            input.candleTime.getTime()
-      )
-      .sort(
-        (a, b) =>
-          a.openTime.getTime() -
-          b.openTime.getTime()
-      );
-
-    const computed = analyzeCandlesWithParams(
-      history,
-      params
+  if (!periodsAreStandard(config)) {
+    return evaluateWithCandles(
+      input,
+      config,
+      candles ?? []
     );
-
-    if (
-      computed &&
-      computed.candleTime.getTime() ===
-        input.candleTime.getTime() &&
-      computed.price === input.price
-    ) {
-      const result = runTrendSuslik(
-        computed,
-        config,
-        {
-          emaFast: config.ema.fast,
-          emaMedium: config.ema.medium,
-          emaSlow: config.ema.slow,
-          rsi: config.rsi.period,
-          macdFast: config.macd.fast,
-          macdSlow: config.macd.slow,
-          macdSignal: config.macd.signal,
-          volume: config.volume.period
-        }
-      );
-
-      return {
-        status: "evaluated",
-        exchange: input.exchange,
-        market: input.exchangeSymbol,
-        marketId: input.marketId,
-        candleTime: input.candleTime,
-        price: input.price,
-        longScore: result.longScore,
-        shortScore: result.shortScore,
-        direction: result.direction,
-        reasons: result.reasons,
-        warnings: result.warnings
-      };
-    }
-
-    /*
-     * Fallback: svech ne hvatalo ili poslednyaya
-     * zakrytaya svecha ne sovpadaet s candleTime
-     * snapshot — schitaem po snapshot pozicionno,
-     * warnings dobavit sam runtime.
-     */
   }
 
   const analysis = snapshotToAnalysis(input);

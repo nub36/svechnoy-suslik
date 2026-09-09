@@ -7,10 +7,12 @@
  *                snapshot/svechi, myortvaya zona,
  *                sovmestimost so starymi konfigami.
  *   (DB-rezhim)  --top=10 --timeframe=1h — zhivoj progon
- *                na VPS, TOLKO chtenie: dlya kazhdogo
- *                rynka sravnivaet ocenku po snapshot
- *                s ocenkoj po svecham dlya nestandartnyh
- *                periodov. Signal ne sozdayutsya.
+ *                na VPS, TOLKO chtenie: nestandartnye
+ *                periody schitayutsya strogo po zakrytym
+ *                svecham PostgreSQL; rynok bez dostatochnoj
+ *                istorii ottalkivaetsya kak cannot-evaluate
+ *                (fallback na fiksirovannyj snapshot
+ *                zapreshchyon). Signal ne sozdayutsya.
  *
  * Primery:
  *   npx tsx scripts/test-strategy-periods.ts --self-test
@@ -31,10 +33,12 @@ import {
   analyzeCandles,
   analyzeCandlesWithParams,
   minCandlesForParams,
-  type AnalysisParams
+  type AnalysisParams,
+  type MarketAnalysis
 } from "../lib/analysis/analyze";
 import {
   evaluateSnapshot,
+  priceMatches,
   snapshotToAnalysis,
   type SnapshotInput
 } from "../lib/strategies/runtime";
@@ -319,11 +323,11 @@ function runSelfTest(): Check[] {
       LAST_CANDLE.openTime.getTime()
   );
 
-  /* ---- C. evaluateSnapshot: rezolving ---- */
+  /* ---- C. evaluateSnapshot: bez fallbacka na snapshot ---- */
   const snap = mkInput({
     price: LAST_CANDLE.close,
-    // Zavomlo zavedno nevernye znacheniya,
-    // chtoby otlichit snapshot-put ot raschyota.
+    // Zavedno nevernye dlya raschyota znacheniya:
+    // esli by snapshot uchastvoval, rezultat byl by inym.
     rsi14: 55.5,
     ema20: 888,
     ema50: 777,
@@ -341,21 +345,14 @@ function runSelfTest(): Check[] {
   );
 
   add(
-    "nestandartnye periody bez svech -> fallback so warnings",
-    snapshotEval.status === "evaluated" &&
-      snapshotEval.warnings.some(
-        (w) =>
-          w.includes(
-            "EMA periody config (10/40/100)"
-          ) &&
-          w.includes(
-            "snapshot (20/50/200)"
-          )
-      ) &&
-      snapshotEval.warnings.some(
-        (w) =>
-          w.includes("RSI period config (7)")
-      )
+    "nestandartnye periody bez svech -> cannot-evaluate",
+    snapshotEval.status === "cannot-evaluate" &&
+      snapshotEval.reason.includes("ne peredana")
+  );
+
+  add(
+    "cannot-evaluate ne daet napravleniya i ballov",
+    snapshotEval.status !== "evaluated"
   );
 
   const computedEval = evaluateSnapshot(
@@ -370,6 +367,8 @@ function runSelfTest(): Check[] {
       computedEval.warnings.length === 0
   );
 
+  // Rezultat dolzhen sovpadat s priamoj svyazkoj
+  // analyzeCandlesWithParams + runTrendSuslik
   const manual = analyzeCandlesWithParams(
     candles.filter(
       (c) =>
@@ -379,34 +378,35 @@ function runSelfTest(): Check[] {
     params
   );
 
+  const manualResult =
+    manual === null
+      ? null
+      : runTrendSuslik(manual, custom, {
+          emaFast: custom.ema.fast,
+          emaMedium: custom.ema.medium,
+          emaSlow: custom.ema.slow,
+          rsi: custom.rsi.period,
+          macdFast: custom.macd.fast,
+          macdSlow: custom.macd.slow,
+          macdSignal: custom.macd.signal,
+          volume: custom.volume.period
+        });
+
   add(
-    "raschyot sovpadaet s priamym analyzeCandlesWithParams",
+    "rezultat sovpadaet s analyzeCandlesWithParams + runTrendSuslik",
     manual !== null &&
+      manualResult !== null &&
       computedEval.status === "evaluated" &&
-      computedEval.warnings.length === 0 &&
-      Math.abs(
-        (manual?.rsi14 ?? NaN) -
-          (customEvalRsi(
-            snap,
-            custom,
-            candles
-          ) ??
-            NaN)
-      ) < 1e-9
+      computedEval.longScore ===
+        manualResult.longScore &&
+      computedEval.shortScore ===
+        manualResult.shortScore &&
+      computedEval.direction ===
+        manualResult.direction
   );
 
-  function customEvalRsi(
-    input: SnapshotInput,
-    config: TrendSuslikConfig,
-    history: CandleData[]
-  ): number | null {
-    void input;
-    void config;
-    return manual?.rsi14 ?? null;
-  }
-
   add(
-    "budushchie svechi posle candleTime otbreasyvayutsya",
+    "svechi posle candleTime nikogda ne uchastvuyut (identichnyj rezultat)",
     (() => {
       const future = candles.concat([
         {
@@ -416,27 +416,56 @@ function runSelfTest(): Check[] {
               5 * 60 * 60 * 1000
           ),
           close: 999,
+          high: 1000,
+          low: 998,
+          open: 999,
+          volume: 99999,
           closed: true
         }
       ]);
 
-      const evalWithFuture = evaluateSnapshot(
-        snap,
-        custom,
-        future
-      );
+      const evalWithFuture =
+        evaluateSnapshot(snap, custom, future);
+      const evalWithout =
+        evaluateSnapshot(snap, custom, candles);
 
       return (
-        evalWithFuture.status ===
-          "evaluated" &&
-        evalWithFuture.warnings
-          .length === 0
+        evalWithFuture.status === "evaluated" &&
+        JSON.stringify(evalWithFuture) ===
+          JSON.stringify(evalWithout)
       );
     })()
   );
 
   add(
-    "poslednyaya svecha ne sovpala s candleTime -> fallback",
+    "tolko svechi posle candleTime -> istorii net (est 0)",
+    (() => {
+      const onlyFuture: CandleData[] = [
+        {
+          ...LAST_CANDLE,
+          openTime: new Date(
+            snap.candleTime.getTime() +
+              60 * 60 * 1000
+          ),
+          closed: true
+        }
+      ];
+
+      const result = evaluateSnapshot(
+        snap,
+        custom,
+        onlyFuture
+      );
+
+      return (
+        result.status === "cannot-evaluate" &&
+        result.reason.includes("est 0")
+      );
+    })()
+  );
+
+  add(
+    "poslednyaya svecha ne sovpala s candleTime -> cannot-evaluate",
     (() => {
       const shifted = candles
         .filter(
@@ -454,10 +483,109 @@ function runSelfTest(): Check[] {
 
       return (
         evalShifted.status ===
-          "evaluated" &&
-        evalShifted.warnings.length > 0
+          "cannot-evaluate" &&
+        evalShifted.reason.includes(
+          "ne sovpadaet s candleTime"
+        )
       );
     })()
+  );
+
+  add(
+    "GLAVNOE: nestandartnye periody + malo istorii NE ochenivayutsya po snapshot",
+    (() => {
+      // Znacheniya snapshot takovy, chto standartnyj
+      // config dayet LONG: kontrol dokazyvaet, chto
+      // eti znacheniya priveli by k scoringu, esli by
+      // snapshot ispolzovalsya. Nestandartnyj config
+      // s korotkoj istoriej dolzhen ottalknut rynok.
+      const longSnap = mkInput({
+        price: 100,
+        rsi14: 60,
+        ema20: 101,
+        ema50: 98,
+        ema200: 95,
+        macdHist: 1,
+        volumeRatio: 2
+      });
+
+      const control = evaluateSnapshot(
+        longSnap,
+        standard
+      );
+
+      const guarded = evaluateSnapshot(
+        longSnap,
+        custom,
+        candles.slice(0, 60)
+      );
+
+      return (
+        control.status === "evaluated" &&
+        control.direction === "LONG" &&
+        guarded.status === "cannot-evaluate"
+      );
+    })()
+  );
+
+  add(
+    "prichina nedostatka istorii soderzhit tochnye chisla",
+    (() => {
+      const guarded = evaluateSnapshot(
+        mkInput(),
+        custom,
+        candles.slice(0, 60)
+      );
+
+      return (
+        guarded.status === "cannot-evaluate" &&
+        guarded.reason.includes("nuzhno >= 100") &&
+        guarded.reason.includes("est 60")
+      );
+    })()
+  );
+
+  add(
+    "tsena: rashozhdenie 1e-12 otnositelno — tolerance, raschyot idet",
+    (() => {
+      const eps = LAST_CANDLE.close * 1e-12;
+
+      const evalTol = evaluateSnapshot(
+        mkInput({
+          price: LAST_CANDLE.close + eps
+        }),
+        custom,
+        candles
+      );
+
+      return evalTol.status === "evaluated";
+    })()
+  );
+
+  add(
+    "tsena: realnoe rashozhdenie (1%) -> cannot-evaluate",
+    (() => {
+      const evalBad = evaluateSnapshot(
+        mkInput({
+          price: LAST_CANDLE.close * 1.01
+        }),
+        custom,
+        candles
+      );
+
+      return (
+        evalBad.status === "cannot-evaluate" &&
+        evalBad.reason.includes(
+          "rassinhronizirovany"
+        )
+      );
+    })()
+  );
+
+  add(
+    "priceMatches: NaN i Infinity ne prohodyat",
+    !priceMatches(NaN, 100) &&
+      !priceMatches(100, Infinity)
   );
 
   add(
@@ -469,17 +597,168 @@ function runSelfTest(): Check[] {
         candles
       );
 
-      // snapshot pozicionno: ema20 -> fast (888)
-      // v resultate prichin vidny znacheniya snapshot
       return (
-        evalStd.status ===
-          "evaluated" &&
+        evalStd.status === "evaluated" &&
         JSON.stringify(
           evaluateSnapshot(snap, standard)
-        ) ===
-          JSON.stringify(evalStd)
+        ) === JSON.stringify(evalStd)
       );
     })()
+  );
+
+  /* ---- C2. Granitsy minCandlesForParams protiv realnyh indikatorov ---- */
+  function analysisComplete(
+    a: MarketAnalysis | null
+  ): boolean {
+    return (
+      a !== null &&
+      a.rsi14 !== null &&
+      a.ema20 !== null &&
+      a.ema50 !== null &&
+      a.ema200 !== null &&
+      a.macd !== null &&
+      a.macdSignal !== null &&
+      a.macdHist !== null &&
+      a.atr14 !== null &&
+      a.avgVolume20 !== null &&
+      a.volumeRatio !== null
+    );
+  }
+
+  function boundaryCase(
+    label: string,
+    config: TrendSuslikConfig,
+    expectedMin: number
+  ): void {
+    const p = configToAnalysisParams(config);
+
+    add(
+      `granitsa ${label}: minCandlesForParams = ${expectedMin}`,
+      minCandlesForParams(p) === expectedMin
+    );
+
+    const exact = analyzeCandlesWithParams(
+      makeCandles(expectedMin),
+      p
+    );
+
+    add(
+      `granitsa ${label}: rovno ${expectedMin} svechej — vse indikatory poschitany`,
+      analysisComplete(exact)
+    );
+
+    const less = analyzeCandlesWithParams(
+      makeCandles(expectedMin - 1),
+      p
+    );
+
+    add(
+      `granitsa ${label}: ${expectedMin - 1} svechej — null`,
+      less === null
+    );
+  }
+
+  // Standartnyj nabor: max(200, 15, 35, 15, 20) = 200
+  boundaryCase(
+    "standart (20/50/200, RSI14, MACD 12/26/9, ATR14, V20)",
+    standard,
+    200
+  );
+
+  // MACD dominiruet: max(10, 6, 35+7, 5, 6) = 42
+  boundaryCase(
+    "MACD 5/35/7 + EMA 3/5/10",
+    cfg({
+      ema: { fast: 3, medium: 5, slow: 10 },
+      rsiPeriod: 5,
+      atrPeriod: 4,
+      volumePeriod: 6,
+      macd: { fast: 5, slow: 35, signal: 7 }
+    }),
+    42
+  );
+
+  // MACD dominiruet: max(10, 6, 17+9, 5, 6) = 26
+  boundaryCase(
+    "MACD 8/17/9 + EMA 3/5/10",
+    cfg({
+      ema: { fast: 3, medium: 5, slow: 10 },
+      rsiPeriod: 5,
+      atrPeriod: 4,
+      volumePeriod: 6,
+      macd: { fast: 8, slow: 17, signal: 9 }
+    }),
+    26
+  );
+
+  // MACD dominiruet: max(10, 6, 26+9, 5, 6) = 35
+  boundaryCase(
+    "MACD 12/26/9 + EMA 3/5/10",
+    cfg({
+      ema: { fast: 3, medium: 5, slow: 10 },
+      rsiPeriod: 5,
+      atrPeriod: 4,
+      volumePeriod: 6
+    }),
+    35
+  );
+
+  // EMA slow > 200: max(300, 15, 35, 15, 20) = 300
+  boundaryCase(
+    "EMA slow 300",
+    cfg({ ema: { fast: 20, medium: 50, slow: 300 } }),
+    300
+  );
+
+  // RSI dominiruet: max(10, 21+1, 5+4, 5, 6) = 22
+  boundaryCase(
+    "RSI 21 + EMA 3/5/10 + MACD 3/5/4",
+    cfg({
+      ema: { fast: 3, medium: 5, slow: 10 },
+      rsiPeriod: 21,
+      atrPeriod: 4,
+      volumePeriod: 6,
+      macd: { fast: 3, slow: 5, signal: 4 }
+    }),
+    22
+  );
+
+  // ATR dominiruet: max(10, 5, 9, 20+1, 6) = 21
+  boundaryCase(
+    "ATR 20 + EMA 3/5/10",
+    cfg({
+      ema: { fast: 3, medium: 5, slow: 10 },
+      rsiPeriod: 4,
+      atrPeriod: 20,
+      volumePeriod: 6,
+      macd: { fast: 3, slow: 5, signal: 4 }
+    }),
+    21
+  );
+
+  // Volume dominiruet: max(10, 5, 9, 5, 30) = 30
+  boundaryCase(
+    "Volume 30 + EMA 3/5/10",
+    cfg({
+      ema: { fast: 3, medium: 5, slow: 10 },
+      rsiPeriod: 4,
+      atrPeriod: 4,
+      volumePeriod: 30,
+      macd: { fast: 3, slow: 5, signal: 4 }
+    }),
+    30
+  );
+
+  add(
+    "legacy analyzeCandles trebuet te zhe 200, chto i minCandlesForParams(default)",
+    analyzeCandles(makeCandles(199)) === null &&
+      analyzeCandles(makeCandles(200)) !== null &&
+      analyzeCandlesWithParams(
+        makeCandles(199)
+      ) === null &&
+      analyzeCandlesWithParams(
+        makeCandles(200)
+      ) !== null
   );
 
   /* ---- D. MACD dead zone ---- */
@@ -815,7 +1094,8 @@ async function runDbMode(
     }
 
     let compared = 0;
-    let mismatches = 0;
+    let evaluatedCount = 0;
+    let cannotCount = 0;
 
     for (const asset of assetsWithMarkets) {
       for (const market of asset.markets) {
@@ -898,51 +1178,48 @@ async function runDbMode(
           volumeRatio: snap.volumeRatio
         };
 
-        const fallback =
-          evaluateSnapshot(input, config);
-
-        const computed =
-          evaluateSnapshot(
-            input,
-            config,
-            candles
-          );
+        const computed = evaluateSnapshot(
+          input,
+          config,
+          candles
+        );
 
         compared++;
 
-        const sameDirection =
-          fallback.status ===
-            "evaluated" &&
-          computed.status ===
-            "evaluated" &&
-          fallback.direction ===
-            computed.direction;
+        if (computed.status === "evaluated") {
+          evaluatedCount++;
 
-        if (!sameDirection) {
-          mismatches++;
+          console.log(
+            `${asset.symbol} ${market.exchange}: ` +
+              `${computed.direction} ` +
+              `score ${Math.max(computed.longScore, computed.shortScore)}`
+          );
+        } else {
+          if (computed.status === "cannot-evaluate") {
+            cannotCount++;
+          }
+
+          console.log(
+            `${asset.symbol} ${market.exchange}: ` +
+              `${computed.status} — ${computed.reason}`
+          );
         }
-
-        console.log(
-          `${asset.symbol} ${market.exchange}: ` +
-            `fallback=${fallback.status === "evaluated" ? fallback.direction : fallback.status}` +
-            ` (warnings ${fallback.status === "evaluated" ? fallback.warnings.length : "—"}) · ` +
-            `computed=${computed.status === "evaluated" ? computed.direction : computed.status}` +
-            ` (warnings ${computed.status === "evaluated" ? computed.warnings.length : "—"})`
-        );
       }
     }
 
     console.log(
-      `\nSravneno rynkov: ${compared}, raznyj resultat: ${mismatches}`
+      `\nRynkov provereno: ${compared}, ` +
+        `oceneno po svecham: ${evaluatedCount}, ` +
+        `cannot-evaluate: ${cannotCount}`
     );
     console.log(
-      "Ozhidanie: fallback daet warnings (pozicionnyj snapshot),"
+      "Ozhidanie: nestandartnye periody schitayutsya tolko"
     );
     console.log(
-      "computed schitaet po svecham bez warnings; napravleniya"
+      "po svecham; rynki bez dostatochnoj istorii —"
     );
     console.log(
-      "mogut razlichatsya — eto i est effekt nestandartnyh periodov."
+      "cannot-evaluate, NIKAKOGO scoringa po snapshot."
     );
   } finally {
     await db.$disconnect();

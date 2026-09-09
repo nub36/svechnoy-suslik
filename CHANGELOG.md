@@ -609,3 +609,92 @@ Signal Engine (после живого прогона Runtime на VPS).
   npm install, prisma-шаги, db push расширения Signal,
   build+restart, живые прогоны графика/Runtime/периодов,
   затем dry-run и боевой проход Signal Engine по команде.
+
+==================================================
+
+## 09.09.2026 — Исправление по ревью VPS: запрещён fallback на фиксированный snapshot
+
+### Сделано
+- lib/strategies/runtime.ts: при НЕстандартных периодах
+  стратегии оценка выполняется ТОЛЬКО по закрытым Candle
+  PostgreSQL с фактическими периодами config.
+  Fallback на фиксированный IndicatorSnapshot
+  (RSI14/EMA20/50/200/MACD12-26-9/ATR14/Volume20)
+  полностью удалён — он давал бы ложный scoring
+  позиционной подстановкой значений других периодов.
+- Новый безопасный статус "cannot-evaluate" (расширен
+  union SkippedMarket.status, существующая архитектура
+  status/reason): рынок сейчас нельзя честно оценить;
+  направлений и баллов у результата нет, в
+  мультибиржевой агрегации рынок не голосует.
+  Возникает при: свечи не переданы; пусто; истории меньше
+  minCandlesForParams; последняя рассчитанная свеча не на
+  candleTime snapshot; расхождение цены; невозможность
+  расчёта.
+- priceMatches: сравнение цены с относительной
+  tolerance 1e-9 вместо хрупкого === (input.price и
+  computed.price проходят разные преобразования
+  float8 -> number). candleTime — по-прежнему точное
+  ограничение.
+- Свечи после candleTime snapshot гарантированно
+  исключаются до анализа (доказано тестом побайтного
+  равенства результата с «будущими» свечами и без них).
+- minCandlesForParams() аудитирован против реальных
+  реализаций ema/rsi/macd/atr/sma (включая guard
+  macd() N >= slow+signal); добавлены boundary-тесты.
+- scripts/test-strategy-periods.ts: 27 -> 59 проверок;
+  DB-режим (только чтение) переведён на новую семантику.
+- scripts/signal-worker.ts в этом коммите НЕ менялся:
+  Runtime-решение концептуально от него не зависит
+  (lib-ядро самодостаточно; worker лишь передаёт свечи
+  в evaluateSnapshot и корректно обрабатывает
+  cannot-evaluate через существующие проверки
+  status !== "evaluated").
+
+### Изменённые/созданные файлы
+- lib/strategies/runtime.ts,
+  scripts/test-strategy-periods.ts,
+  PROJECT_CONTEXT.md (§25, §30), CHANGELOG.md.
+
+### База данных
+- Изменений нет. Prisma Signal не менялся, minExchanges
+  не менялся.
+
+### Проверка
+- npx tsc --noEmit: 0 ошибок.
+- npm run build: exit 0.
+- Самотест периодов: 59/59, включая:
+  - границы «ровно N свечей — все индикаторы посчитаны /
+    N-1 — null» для 8 наборов периодов (стандарт;
+    MACD 5/35/7, 8/17/9, 12/26/9 с малыми EMA;
+    EMA slow 300; RSI 21; ATR 20; Volume 30);
+  - явное доказательство: нестандартный
+    RSI/EMA/MACD/ATR/Volume + недостаточная история НЕ
+    даёт scoring по фиксированному snapshot (контроль на
+    стандартном config с теми же значениями даёт LONG,
+    guarded-результат — cannot-evaluate);
+  - tolerance цены: относительное расхождение 1e-12
+    проходит, 1% — cannot-evaluate; NaN/Infinity отвергаются;
+  - отсечение свечей после candleTime;
+  - legacy analyzeCandles требует те же 200 свечей, что и
+    minCandlesForParams(default).
+- Обратная совместимость: 54/54 и 48/48 прежних самотестов.
+
+### Результат
+- Ложный scoring при нестандартных периодах невозможен
+  архитектурно: либо расчёт по свечам с периодами config,
+  либо честный отказ (cannot-evaluate).
+
+### Известные ограничения
+- Живой DB-режим test-strategy-periods и поведение на
+  реальных данных — на VPS (§25, шаг 16).
+- Правка находится в Arena-ветке поверх коммитов
+  Signal Engine (edf3732); для переноса Runtime на
+  production достаточно файлов lib/ + тестов — список
+  в PROJECT_CONTEXT §25/докладе ревью; signal-worker.ts
+  и lib/signals переносить не нужно.
+
+### Следующий этап
+- Перенос Strategy Runtime (lib-ядро + тесты) на VPS
+  отдельным набором файлов БЕЗ Signal Engine, живой
+  прогон test-strategy-periods --top=10 --timeframe=1h.

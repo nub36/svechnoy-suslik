@@ -976,8 +976,10 @@ npx prisma format / validate / generate падают по сети —
 
 Затем динамические периоды (§30):
 15. npx tsx scripts/test-strategy-periods.ts --self-test
+    (ожидание: 59/59)
 16. npx tsx scripts/test-strategy-periods.ts --top=10 --timeframe=1h
-    (только чтение; сравнение fallback vs computed)
+    (только чтение; нестандартные периоды строго по свечам,
+    ринки без истории — cannot-evaluate, БЕЗ scoring по snapshot)
 
 Затем Signal Engine (см. §27):
 17. npx tsx scripts/test-signal-engine.ts --self-test
@@ -1395,14 +1397,30 @@ lib/strategies/trend-suslik.ts
   не даёт баллов ни LONG, ни SHORT; в причине видна зона.
   deadZoneRatio = 0 — прежнее поведение.
 
-lib/strategies/runtime.ts
-- evaluateSnapshot(input, config, candles?): если периоды
-  стандартные — snapshot напрямую (как раньше); если
-  нестандартные и передана история — индикаторы считаются
-  по закрытым свечам PostgreSQL точно на candleTime
-  snapshot (свечи «из будущего» отбрасываются; при
-  несовпадении последней свечи — fallback на snapshot
-  с warnings). Никаких обращений к биржам.
+lib/strategies/runtime.ts (УСИЛЕНО ПО РЕЗУЛЬТАТАМ РЕВЬЮ VPS)
+- evaluateSnapshot(input, config, candles?):
+  - стандартные периоды -> значения из IndicatorSnapshot,
+    как раньше;
+  - НЕСТАНДАРТНЫЕ -> ТОЛЬКО закрытые Candle PostgreSQL +
+    analyzeCandlesWithParams с периодами config. FALLBACK
+    НА ФИКСИРОВАННЫЙ SNAPSHOT ПОЛНОСТЬЮ УДАЛЁН:
+    позиционная подстановка RSI14/EMA20/50/200/MACD12-26-9
+    при других периодах давала бы ложный scoring.
+  - при нестандартных периодах и любой проблеме с историей
+    (свечи не переданы / пусто / меньше minCandlesForParams /
+    последняя свеча не на candleTime snapshot / расхождение
+    цены / ошибка расчёта) рынок отсеивается со статусом
+    "cannot-evaluate" (расширен SkippedMarket.status):
+    рынка сейчас нельзя честно оценить, в агрегации он
+    не голосует, направления и баллов у результата НЕТ.
+  - цена сверяется с относительной tolerance 1e-9
+    (priceMatches): input.price и computed.price проходят
+    разные преобразования float8 -> number; candleTime
+    остаётся ТОЧНЫМ ограничением.
+  - свечи ПОСЛЕ candleTime snapshot в расчёте не участвуют
+    никогда (фильтр до анализа; доказано тестом побайтового
+    равенства результата с/без «будущих» свечей).
+  - без обращений к биржам.
 
 scripts/signal-worker.ts (по-прежнему DRY-RUN по умолчанию)
 - Для нестандартных периодов подтягивает свечи из
@@ -1418,17 +1436,56 @@ app/api/admin/strategies/[id]/route.ts
   minimumSignalScore); ошибки по-русски с перечислением.
 
 scripts/test-strategy-periods.ts
-- Самотест 27/27 без БД: распознавание периодов,
+- Самотест 59/59 без БД: распознавание периодов,
   эквивалентность analyzeCandles, границы достаточности
-  свечей, отсечение будущего, fallback-и, мёртвая зона
-  (симметрия, границы, совместимость), валидация
-  deadZoneRatio, аудит чистоты.
+  свечей (ровно N / N-1 для 8 наборов периодов),
+  отсечение будущего, cannot-evaluate при недостатке
+  истории, ЯВНОЕ доказательство «нет scoring по snapshot»,
+  tolerance цены, мёртвая зона (симметрия, границы,
+  совместимость), валидация deadZoneRatio, аудит чистоты.
 - Живой DB-режим для VPS (ТОЛЬКО чтение):
-  --top=10 --timeframe=1h — сравнение fallback (snapshot
-  позиционно, с warnings) vs computed (свечи, без
-  warnings) по всем рынкам. Signal не создаются.
+  --top=10 --timeframe=1h — нестандартные периоды строго
+  по свечам; рынки без достаточной истории —
+  cannot-evaluate. Signal не создаются.
 
-Проверка в песочнице:
-- 27/27 новый самотест; 54/54 и 48/48 прежние
+Проверка в песочнице (после правки по ревью VPS):
+- 59/59 самотест периодов; 54/54 и 48/48 прежние
   (обратная совместимость полная); tsc 0; build exit 0.
-- Живой расчёт по свечам и admin-сохранение — на VPS.
+- minCandlesForParams() аудитирован против реальных
+  реализаций ema/rsi/macd/atr/sma (включая guard macd()
+  N >= slow+signal); boundary-тесты: ровно N — все
+  индикаторы не null, N-1 — null.
+- Явный тест: нестандартный RSI/EMA/MACD/ATR/Volume +
+  недостаточная история НЕ даёт scoring по фиксированному
+  snapshot (контроль на стандартном config с теми же
+  значениями даёт LONG; guarded-результат —
+  cannot-evaluate).
+- Живой расчёт по свечам — на VPS (§25, шаг 16).
+
+СОСТАВ ПЕРЕНОСА STRATEGY RUNTIME НА PRODUCTION
+(БЕЗ Signal Engine: без scripts/signal-worker.ts,
+lib/signals/*, расширения Prisma Signal, app/signals):
+
+1. lib/indicators/index.ts — серийные версии + делегирование
+   (совместим и со старой версией: скалярные сигнатуры
+   не менялись; рекомендуем текущую).
+2. lib/analysis/analyze.ts — AnalysisParams,
+   analyzeCandlesWithParams, minCandlesForParams.
+3. lib/strategies/config.ts — deadZoneRatio,
+   periodsAreStandard, configToAnalysisParams,
+   ActualPeriods, snapshotActualPeriods.
+4. lib/strategies/trend-suslik.ts — dead zone,
+   фактические периоды в warnings.
+5. lib/strategies/runtime.ts — cannot-evaluate,
+   priceMatches, строгое разделение по периодам.
+6. scripts/test-strategy-periods.ts — 59 проверок +
+   read-only DB-режим.
+7. scripts/test-strategy-runtime.ts — исправления
+   configToJson и фикстура deadZoneRatio: 0.
+
+Опционально (не Runtime, но безвредно): app/admin/page.tsx,
+scripts/rank-assets.ts (явные типы, коммит исправления tsc).
+
+Signal Engine (lib/signals/engine.ts, scripts/signal-worker.ts,
+расширение Signal в схеме, app/signals/page.tsx) на
+production НЕ переносится до отдельной команды.
