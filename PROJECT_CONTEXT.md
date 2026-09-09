@@ -915,42 +915,83 @@ app/admin/strategies/[id]/page.tsx
 25. ТЕКУЩАЯ ТОЧКА ПРОДОЛЖЕНИЯ
 ==================================================
 
-OHLCV Worker Top-10 × 5 бирж × 1H успешно проверен.
+OHLCV Worker успешно проверен.
 
-Следующий этап:
+IndicatorSnapshot Engine успешно реализован и проверен.
 
-IndicatorSnapshot Engine.
+Текущее состояние тестового контура:
 
-Первая безопасная цель:
+Candle:
+14442+
 
-Top-10
-× доступные рынки пяти бирж
-× 1H
-× последняя ЗАКРЫТАЯ свеча.
+IndicatorSnapshot:
+48
 
-Нужно:
+Top:
+10 тестовых активов
 
-1. Читать OHLCV из PostgreSQL Candle, а не повторно из API.
-2. Для каждого Market получить достаточную историю закрытых свечей.
-3. Рассчитать:
-   RSI
-   EMA20
-   EMA50
-   EMA200
-   MACD
-   MACD Signal
-   MACD Histogram
-   ATR
-   Volume
-   AvgVolume20
-   VolumeRatio.
-4. Сохранить IndicatorSnapshot.
-5. Один snapshot на:
-   marketId + timeframe + candleTime.
-6. Повторный запуск не должен создавать дубликат.
-7. Не использовать открытую свечу для подтверждённого snapshot.
-8. Проверить BTC на пяти биржах с предыдущими тестовыми значениями.
-9. После успешной проверки заставить runTrendSuslik принимать Strategy.config из PostgreSQL вместо hardcoded config.
-10. Затем переходить к Signal Engine.
+Timeframe:
+1H
 
-Worker пока не запускать постоянно через PM2.
+Рынков:
+48
+
+Биржи:
+Binance
+Bybit
+Gate
+KuCoin
+BingX
+
+Snapshot рассчитывается исключительно из PostgreSQL Candle.
+
+Используются только закрытые свечи.
+
+Повторный запуск Snapshot Engine не создаёт дубликаты.
+
+СЛЕДУЮЩИЙ ЭТАП:
+
+Strategy Runtime.
+
+Необходимо:
+
+1. Убрать зависимость runTrendSuslik от hardcoded trendSuslikConfig.
+
+2. Загружать опубликованную включённую Strategy из PostgreSQL.
+
+3. Использовать Strategy.config, изменяемый через админку.
+
+4. Не доверять JSON напрямую:
+   валидировать конфигурацию перед запуском.
+
+5. Для каждого IndicatorSnapshot рассчитывать отдельно:
+   LONG score
+   SHORT score
+   direction
+   reasons.
+
+6. Группировать результаты по:
+   Asset + timeframe + Strategy version.
+
+7. Применять minExchanges.
+
+Пример:
+
+Binance LONG
+Bybit LONG
+Gate LONG
+KuCoin NEUTRAL
+BingX LONG
+
+При minExchanges=3:
+агрегированный LONG подтверждён 4/5.
+
+8. Пока НЕ создавать Signal автоматически.
+Сначала вывести результаты Strategy Runtime отдельным test script.
+
+9. Проверить Top-10 × 1H.
+
+10. Убедиться, что изменение параметра в /admin/strategies/1 реально изменяет runtime без изменения исходного кода.
+
+После этого:
+Signal Engine.
