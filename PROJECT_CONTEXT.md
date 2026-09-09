@@ -1080,3 +1080,70 @@ Runtime использует их позиционно
   prisma generate собирается.
 - Живой прогон Top-10 × 1H и --prove-db-link выполняются
   на VPS (см. нулевой шаг в разделе 25).
+
+
+==================================================
+27. STRATEGY RUNTIME — ДИНАМИЧЕСКИЕ ПЕРИОДЫ И MACD DEAD ZONE ПРОВЕРЕНЫ НА VPS
+==================================================
+
+Дата: 09.09.2026
+
+Этот раздел заменяет известное ограничение раздела 26 о фиксированных периодах IndicatorSnapshot.
+
+Текущая архитектура:
+
+- если периоды Strategy.config стандартные
+  (EMA 20/50/200, RSI 14, MACD 12/26/9, ATR 14, Volume 20),
+  Strategy Runtime использует готовый IndicatorSnapshot;
+
+- если хотя бы один период нестандартный,
+  Runtime использует только закрытые Candle из PostgreSQL
+  и рассчитывает EMA, RSI, MACD, ATR и Volume с фактическими
+  периодами Strategy.config;
+
+- дополнительных запросов к API бирж для такого расчёта нет;
+
+- Candle после candleTime snapshot в расчёт не попадают;
+
+- если истории недостаточно или данные не синхронизированы,
+  Runtime возвращает cannot-evaluate и НЕ подменяет выбранные
+  периоды значениями фиксированного IndicatorSnapshot.
+
+MACD dead zone:
+
+- Strategy.config поддерживает macd.deadZoneRatio;
+- порог считается относительно цены:
+  deadZone = deadZoneRatio × abs(price);
+- при abs(macdHistogram) <= deadZone MACD не начисляет
+  LONG или SHORT score;
+- старый config без поля валиден и получает deadZoneRatio=0;
+- настройка добавлена в русскую админку;
+- production-значение deadZoneRatio пока сознательно не выбрано.
+
+Проверено на VPS:
+
+- Prisma validate — успешно;
+- Prisma generate 6.19.3 — успешно;
+- TypeScript — 0 ошибок;
+- production build — успешно;
+- индикаторы — 74/74;
+- динамические периоды/dead zone — 59/59;
+- Strategy Runtime self-test — 54/54;
+- реальный PostgreSQL Top-10 × 1H, нестандартные периоды:
+  48 рынков, 46 evaluated по Candle, 0 cannot-evaluate,
+  2 PROM filtered по реальному quoteVolume24h;
+- стандартный PostgreSQL Runtime:
+  minimumSignalScore=72;
+  minExchanges=2;
+  ZEC LONG 4/4;
+  DOGE LONG 5/5;
+  NEAR LONG 5/5;
+  итог LONG=3, SHORT=0, NEUTRAL=7, конфликтов=0;
+- Signal 0 → 0, read-only подтверждён.
+
+Новые тесты:
+
+scripts/test-indicators.ts
+scripts/test-strategy-periods.ts
+
+Signal Engine в production не переносился и на этом этапе не запускается.

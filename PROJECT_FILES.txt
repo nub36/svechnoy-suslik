@@ -44,6 +44,8 @@ PROJECT_CONTEXT.md
 PROJECT_DEPENDENCIES.txt
 PROJECT_FILES.txt
 PROJECT_SCHEMA.prisma
+scripts/test-indicators.ts
+scripts/test-strategy-periods.ts
 scripts/compare-exchanges.ts
 scripts/ohlcv-worker.ts
 scripts/rank-assets.ts

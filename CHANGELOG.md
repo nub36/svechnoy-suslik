@@ -274,3 +274,48 @@ Signal Engine и мультибиржевое подтверждение.
 ### Следующий этап
 
 Signal Engine (после живого прогона Runtime на VPS).
+
+
+==================================================
+
+## 09.09.2026 — Strategy Runtime production-ready: динамические периоды и MACD dead zone
+
+### Сделано
+
+- Устранено ограничение фиксированных периодов IndicatorSnapshot.
+- Стандартные периоды продолжают использовать готовый IndicatorSnapshot.
+- При нестандартных периодах Runtime рассчитывает индикаторы по закрытым Candle из PostgreSQL.
+- Поддерживаются фактические периоды Strategy.config для EMA, RSI, MACD, ATR и Volume.
+- Дополнительные запросы к API бирж для динамического расчёта не выполняются.
+- При недостаточной истории нестандартные параметры не подменяются фиксированным snapshot: рынок получает status=cannot-evaluate и не участвует в scoring.
+- Свечи после candleTime snapshot исключаются из расчёта.
+- Добавлена MACD dead zone: macd.deadZoneRatio как доля цены.
+- Старые Strategy.config без deadZoneRatio остаются валидными; значение по умолчанию 0.
+- Добавлено поле MACD dead zone в русскую админку и серверную валидацию config.
+- Добавлены численные и boundary-тесты индикаторов и динамических периодов.
+- Исправлен DB-тест динамических периодов: quoteVolume24h берётся из реального Market, а не передаётся как null.
+
+### Проверено на VPS
+
+- Prisma schema validate: успешно.
+- Prisma Client 6.19.3 generate: успешно.
+- npx tsc --noEmit: успешно, 0 ошибок.
+- npm run build: успешно.
+- scripts/test-indicators.ts: 74/74.
+- scripts/test-strategy-periods.ts --self-test: 59/59.
+- scripts/test-strategy-runtime.ts --self-test: 54/54.
+- Живой read-only PostgreSQL Top-10 × 1H с нестандартными периодами:
+  48 рынков проверено, 46 рассчитано по Candle, cannot-evaluate=0,
+  два рынка PROM корректно отфильтрованы.
+- Стандартный Strategy Runtime:
+  minimumSignalScore=72, minExchanges=2;
+  ZEC LONG 4/4, DOGE LONG 5/5, NEAR LONG 5/5;
+  LONG=3, SHORT=0, NEUTRAL=7, конфликтов=0.
+- Signal до/после: 0 → 0.
+
+### Важно
+
+- minExchanges=2 автоматически не менялся.
+- MACD dead zone реализована, но старый config получает deadZoneRatio=0. Production-значение порога должно быть выбрано отдельно.
+- Prisma schema не менялась.
+- Signal Engine в production не переносился и не запускался.
