@@ -69,6 +69,15 @@ export type TrendSuslikExecution = {
 
 export type TrendSuslikFilters = {
   minimumQuoteVolume24h: number;
+
+  /**
+   * Legacy-имя поля (production JSON-конфиги уже
+   * существуют в БД — переименование запрещено).
+   * Семантика со ЭТАПА A-fix: true = анализировать
+   * только основной ranked universe проекта (Top-100
+   * по Asset.rank, lib/universe.ts), а НЕ флаг
+   * Asset.top500.
+   */
   top500Only: boolean;
 };
 

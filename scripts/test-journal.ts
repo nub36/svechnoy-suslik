@@ -83,10 +83,40 @@ ok(
   "secrets: token распознан"
 );
 ok(
+  isSensitiveMessage("Bearer eyJhbGciOi...") === true,
+  "secrets: Bearer-заголовок распознан"
+);
+ok(
+  isSensitiveMessage("API_KEY=sk-123") === true,
+  "secrets: API-ключ распознан"
+);
+ok(
+  isSensitiveMessage("apiKey: '...' в query") === true,
+  "secrets: apiKey (camelCase) распознан"
+);
+ok(
+  isSensitiveMessage("SSH_PRIVATE_KEY утек") === true,
+  "secrets: SSH-ключ распознан"
+);
+ok(
+  isSensitiveMessage("ssh-rsa AAAAB3Nza... user@host") === true,
+  "secrets: ssh-rsa строка распознана"
+);
+ok(
+  isSensitiveMessage("PRIVATE_KEY_FILE missing") === true,
+  "secrets: приватный ключ распознан"
+);
+ok(
   isSensitiveMessage(
     "Ошибка запроса рынков: TypeError"
   ) === false,
   "secrets: обычная ошибка не маскируется"
+);
+ok(
+  isSensitiveMessage(
+    "Свечи загружены: 48 рынков, ТФ 1h"
+  ) === false,
+  "secrets: рабочее сообщение не маскируется"
 );
 
 /* ---------- кольцевой буфер ---------- */

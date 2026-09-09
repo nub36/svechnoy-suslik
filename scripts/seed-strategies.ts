@@ -53,6 +53,9 @@ const config = {
 
   filters: {
     minimumQuoteVolume24h: 1000000,
+    // Legacy-имя поля; семантика: только основной
+    // ranked universe (сейчас Top-100, rank 1..100,
+    // см. lib/universe.ts). Значение в БД не меняется.
     top500Only: true
   }
 };

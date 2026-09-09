@@ -14,6 +14,7 @@
 import type {
   MarketAnalysis
 } from "../analysis/analyze";
+import { isInTopUniverse } from "../universe";
 import type { CandleData } from "../exchanges/types";
 import {
   periodsAreStandard,
@@ -39,7 +40,14 @@ export type SnapshotInput = {
   exchange: string;
   exchangeSymbol: string;
   assetSymbol: string;
-  assetTop500: boolean;
+  /**
+   * Место актива в рейтинге (Asset.rank), null —
+   * актив вне рейтинга. Legacy-флаг Asset.top500
+   * рантаймом НЕ используется: фильтр top500Only
+   * проверяет принадлежность основному ranked
+   * universe (Top-100, см. lib/universe.ts).
+   */
+  assetRank: number | null;
   quoteVolume24h: number | null;
 
   timeframe: string;
@@ -114,16 +122,24 @@ export type AssetAggregation = {
  */
 export function applyStrategyFilters(
   input: {
-    assetTop500: boolean;
+    assetRank: number | null;
     quoteVolume24h: number | null;
   },
   config: TrendSuslikConfig
 ): string | null {
+  // Legacy-поле config.filters.top500Only (имя
+  // сохранено для совместимости старых JSON-конфигов):
+  // true = «только основной ranked universe», то есть
+  // Top-100 по rank (lib/universe.ts), а НЕ флаг
+  // Asset.top500.
   if (
     config.filters.top500Only &&
-    !input.assetTop500
+    !isInTopUniverse(input.assetRank)
   ) {
-    return "aktiv vne Top-500 (filtr top500Only)";
+    return (
+      "aktiv vne osnovnogo universa Top-100 " +
+      "(filtr top500Only: trebuetsya rank 1..100)"
+    );
   }
 
   const volume = input.quoteVolume24h ?? 0;
@@ -362,7 +378,7 @@ export function evaluateSnapshot(
 ): MarketStrategyResult {
   const filterReason = applyStrategyFilters(
     {
-      assetTop500: input.assetTop500,
+      assetRank: input.assetRank,
       quoteVolume24h: input.quoteVolume24h
     },
     config

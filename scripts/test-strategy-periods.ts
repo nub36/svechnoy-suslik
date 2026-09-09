@@ -184,7 +184,7 @@ function mkInput(
     exchange: "Binance",
     exchangeSymbol: "BTCUSDT",
     assetSymbol: "BTC",
-    assetTop500: true,
+    assetRank: 42,
     quoteVolume24h: 10_000_000,
     timeframe: "1h",
     candleTime: new Date(
@@ -1161,7 +1161,7 @@ async function runDbMode(
           exchangeSymbol:
             market.exchangeSymbol,
           assetSymbol: asset.symbol,
-          assetTop500: true,
+          assetRank: 42,
           quoteVolume24h: market.quoteVolume24h,
           timeframe,
           candleTime: snap.candleTime,

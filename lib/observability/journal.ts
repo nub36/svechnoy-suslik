@@ -40,7 +40,7 @@ export type JournalEntry = {
 };
 
 const SECRET_PATTERN =
-  /database_url|auth_secret|password|secret|token|cookie|authorization|postgres(ql)?:\/\/|mysql:\/\//i;
+  /database_url|auth_secret|password|secret|token|cookie|authorization|bearer|api[_-]?key|private[_-]?key|ssh[_-]|ssh-rsa|ssh-ed25519|postgres(ql)?:\/\/|mysql:\/\//i;
 
 /** Маскирование записи: секреты не должны попадать в UI. */
 export function isSensitiveMessage(

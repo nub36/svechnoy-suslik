@@ -1,5 +1,5 @@
 import type { Timeframe } from "../exchanges/types";
-import { TOP_UNIVERSE_SIZE } from "../universe";
+import { LEGACY_TOP500_SIZE } from "../universe";
 import {
   parseCliNumber,
   parseTimeframeList,
@@ -17,8 +17,11 @@ import { DEFAULT_SNAPSHOT_OPTIONS } from "./sync";
  *                              снапшоты считаются отдельно
  *                              по каждому ТФ из PostgreSQL Candle)
  *
- * Границы: top 1..100 (основной universe Top-100),
- * history 200..1000,
+ * Границы: top 1..500 (основной universe — Top-100;
+ * верх 500 — исторический максимум для диагностики
+ * --plan --top=500 существующих данных; снапшоты
+ * считаются из PostgreSQL Candle без обращения к API
+ * бирж), history 200..1000,
  * таймфреймы строго по белому списку 5m/15m/1h/4h/1d.
  * Неизвестные флаги — ошибка, --help/-h — справка.
  * Тесты: scripts/test-snapshot-cli.ts.
@@ -101,7 +104,8 @@ export function buildSnapshotHelp(): string {
     "(никаких обращений к API бирж). Схема БД не расширяется.",
     "",
     "Флаги (только форма --имя=значение):",
-    "  --top=N            топ-активов, 1..100 (основной universe), по умолчанию 10",
+    "  --top=N            топ-активов 1..500 (основной universe — Top-100),",
+    "                       по умолчанию 10",
     "  --timeframe=X      один таймфрейм: 5m|15m|1h|4h|1d, по умолчанию 1h",
     "  --timeframes=...   несколько таймфреймов за прогон (каждый — отдельно),",
     "                     например --timeframes=5m,15m,1h,4h,1d",
@@ -133,7 +137,11 @@ export function parseSnapshotArgs(
   const top = parseCliNumber(
     get("top"),
     DEFAULT_SNAPSHOT_OPTIONS.top,
-    { name: "top", min: 1, max: TOP_UNIVERSE_SIZE }
+    {
+      name: "top",
+      min: 1,
+      max: LEGACY_TOP500_SIZE
+    }
   );
 
   const historyLimit = parseCliNumber(

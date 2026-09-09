@@ -203,7 +203,7 @@ async function loadBatches(
               exchangeSymbol:
                 market.exchangeSymbol,
               assetSymbol: asset.symbol,
-              assetTop500: asset.top500,
+              assetRank: asset.rank,
               quoteVolume24h:
                 market.quoteVolume24h,
               timeframe,
@@ -1245,7 +1245,7 @@ function mkInput(
     exchange: "BINANCE",
     exchangeSymbol: "BTCUSDT",
     assetSymbol: "BTC",
-    assetTop500: true,
+    assetRank: 42,
     quoteVolume24h: 50_000_000,
     timeframe: "1h",
     candleTime: new Date(
@@ -1391,38 +1391,54 @@ function runRuntimeChecks(): Check[] {
     detail: `warnings=${long.warnings.length}`
   });
 
-  // --- filtry ---
+  // --- filtry (osnovnoj universe Top-100 po rank) ---
+  // GRANITSA: rank=100 (poslednij v universe) prohodit.
   const passFilter = applyStrategyFilters(
     {
-      assetTop500: true,
+      assetRank: 100,
       quoteVolume24h: 50_000_000
     },
     config
   );
   checks.push({
-    name: "filtr: horoshij rynok prohodit",
+    name: "filtr: rank=100 (granica universe) prohodit",
     pass: passFilter === null,
     detail: passFilter ?? "proshyol"
   });
 
+  // GRANITSA: rank=101 (srazu za universe) otseivaetsya.
   const topFilter = applyStrategyFilters(
     {
-      assetTop500: false,
+      assetRank: 101,
       quoteVolume24h: 50_000_000
     },
     config
   );
   checks.push({
-    name: "filtr: vne Top-500 otseivaetsya",
+    name: "filtr: rank=101 otseivaetsya (Top-100)",
     pass:
       topFilter !== null &&
-      topFilter.includes("Top-500"),
+      topFilter.includes("Top-100"),
     detail: topFilter ?? "NE otseyan?!"
+  });
+
+  // rank=null (vne reitinga) otseivaetsya.
+  const rankNullFilter = applyStrategyFilters(
+    {
+      assetRank: null,
+      quoteVolume24h: 50_000_000
+    },
+    config
+  );
+  checks.push({
+    name: "filtr: rank=null otseivaetsya",
+    pass: rankNullFilter !== null,
+    detail: rankNullFilter ?? "NE otseyan?!"
   });
 
   const volFilter = applyStrategyFilters(
     {
-      assetTop500: true,
+      assetRank: 100,
       quoteVolume24h: 100
     },
     config
@@ -1435,7 +1451,7 @@ function runRuntimeChecks(): Check[] {
 
   const nullVolFilter = applyStrategyFilters(
     {
-      assetTop500: true,
+      assetRank: 100,
       quoteVolume24h: null
     },
     config
@@ -1446,14 +1462,29 @@ function runRuntimeChecks(): Check[] {
     detail: nullVolFilter ?? "NE otseyan?!"
   });
 
-  const evalFiltered = evaluateSnapshot(
-    mkInput({ assetTop500: false }),
+  // GRANITSA cherez evaluateSnapshot: rank=100 NE filtered.
+  const evalRank100 = evaluateSnapshot(
+    mkInput({ assetRank: 100 }),
     config
   );
   checks.push({
-    name: "evaluate: filtr vozvrashchaet status=filtered",
+    name:
+      "evaluate: rank=100 ne otseivaetsya universe-filtrom",
+    pass: evalRank100.status !== "filtered",
+    detail: `status=${evalRank100.status}`
+  });
+
+  // GRANITSA cherez evaluateSnapshot: rank=101 → filtered.
+  const evalFiltered = evaluateSnapshot(
+    mkInput({ assetRank: 101 }),
+    config
+  );
+  checks.push({
+    name:
+      "evaluate: rank=101 poluchaet status=filtered",
     pass:
-      evalFiltered.status === "filtered",
+      evalFiltered.status === "filtered" &&
+      evalFiltered.reason.includes("Top-100"),
     detail: `status=${evalFiltered.status}`
   });
 

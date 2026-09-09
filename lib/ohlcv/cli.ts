@@ -1,5 +1,5 @@
 import type { Timeframe } from "../exchanges/types";
-import { TOP_UNIVERSE_SIZE } from "../universe";
+import { LEGACY_TOP500_SIZE } from "../universe";
 import { DEFAULT_OHLCV_OPTIONS, type OhlcvWorkerOptions } from "./sync";
 
 /**
@@ -9,8 +9,13 @@ import { DEFAULT_OHLCV_OPTIONS, type OhlcvWorkerOptions } from "./sync";
  * без базы данных: scripts/test-ohlcv-cli.ts.
  *
  * Принципы безопасного запуска:
- * - top ограничен 1..100 (основной universe Top-100,
- *   см. lib/universe.ts) и по умолчанию 10;
+ * - top по умолчанию 10; основной universe — Top-100
+ *   (lib/universe.ts). Допустимый диапазон шире —
+ *   1..500 (исторический максимум Top-500): это нужно
+ *   для диагностики --plan --top=500 существующих
+ *   исторических данных. От больших РЕАЛЬНЫХ прогонов
+ *   защищает large-run guard (lib/ohlcv/plan.ts,
+ *   --confirm-large-run), он НЕ ослаблен;
  * - timeframes валидируются по белому списку — опечатка
  *   вида --timeframes=1x падает сразу с понятной ошибкой,
  *   а не превращается в мусорный запрос к адаптеру биржи;
@@ -215,7 +220,8 @@ export function buildOhlcvHelp(): string {
     "  npx tsx scripts/ohlcv-worker.ts [флаги]",
     "",
     "Флаги (только форма --имя=значение):",
-    "  --top=N           сколько топ-активов грузить, 1..100 (основной universe),",
+    "  --top=N           топ-активов 1..500; основной universe — Top-100,",
+    "                       большие РЕАЛЬНЫЕ прогоны защищает large-run guard",
     "                    по умолчанию 10; массовый прогон всего universe НЕ запускается сам",
     "  --timeframes=...  список таймфреймов: 5m,15m,1h,4h,1d, по умолчанию 1h",
     "  --limit=N         свечей истории за один запрос, 50..1000, по умолчанию 300",
@@ -268,7 +274,11 @@ export function parseOhlcvArgs(
     top: parseCliNumber(
       get("top") ?? env.OHLCV_TOP,
       DEFAULT_OHLCV_OPTIONS.top,
-      { name: "top", min: 1, max: TOP_UNIVERSE_SIZE }
+      {
+      name: "top",
+      min: 1,
+      max: LEGACY_TOP500_SIZE
+    }
     ),
     timeframes,
     limit: parseCliNumber(

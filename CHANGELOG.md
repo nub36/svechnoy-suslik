@@ -775,3 +775,39 @@ Signal Engine (после живого прогона Runtime на VPS).
 - убраны ложные статусы «Свечи поступают»,
   «База подключена», «Есть активные сигналы» без
   измерений.
+
+
+### Фикс A1-consistency по VPS-ревью (09.09.2026)
+- Единая модель universe без schema migration:
+  основной universe = Asset.rank 1..100
+  (lib/universe.ts), Asset.top500 — исторический
+  legacy-флаг;
+- Strategy Runtime: SnapshotInput.assetTop500 заменён
+  на assetRank (number | null) — фильтр legacy-поля
+  config.filters.top500Only теперь проверяет
+  принадлежность основному universe (rank 1..100),
+  а НЕ флагу Asset.top500; имя поля top500Only в
+  конфиге СОХРАНЕНО (production JSON-конфиги валидны
+  без изменений в БД); минимальный порог/
+  minExchanges/deadZoneRatio не тронуты;
+- StrategyEditor: метка «Анализировать только основной
+  universe (Top-100)» + пояснение про наследное имя
+  поля; seed: только комментарий, значения не менялись;
+- CLI --top: возвращён диапазон 1..500
+  (LEGACY_TOP500_SIZE) — default по-прежнему 10;
+  --plan --top=500 снова доступен для read-only
+  диагностики исторических данных; large-run guard
+  (порог 500 задач, --confirm-large-run) НЕ ослаблен;
+- Journal: в UI явно указано, что журнал хранится
+  только в памяти Node-процесса, очищается при
+  рестарте/деплое и НЕ является постоянным audit log;
+  SECRET_PATTERN расширен (bearer, api[_-]key,
+  private[_-]key, ssh); instrumentation документировано:
+  headers/cookies/body/query/env не логируются;
+- MarketOverview: «Капитализация Top-500» помечена как
+  ВНЕШНЯЯ метрика CoinGecko, не universe проекта;
+- тесты: journal 30/30, ohlcv-cli 105/105,
+  snapshot-cli 47/47, runtime 56/56 (границы rank=100
+  проходит / rank=101 и rank=null отсеиваются),
+  periods 59/59; tsc — только 12 известных
+  implicit-any rank-assets (baseline).

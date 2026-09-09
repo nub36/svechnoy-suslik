@@ -111,6 +111,10 @@ async function main() {
 
       data: {
         rank: i + 1,
+        // Legacy-флаг для первых 500 мест:
+        // сохраняется ради совместимости старых
+        // данных. Основной universe — rank <= 100
+        // (lib/universe.ts), НЕ этот флаг.
         top500: i < 500,
         exchangeCount: item.exchangeCount,
         totalVolume24h: item.totalVolume,
@@ -120,6 +124,8 @@ async function main() {
     });
   }
 
+  // Историческая сводка Top-500 (legacy, только
+  // информирование); вывод ниже НЕ описание universe.
   const top500 = ranked.slice(0, 500);
 
   console.log("");

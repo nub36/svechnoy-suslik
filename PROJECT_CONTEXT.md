@@ -1810,3 +1810,44 @@ VPS-ревью рендера/admin-auth — на живой БД (песочн�
 stub: admin-страницы дают 500 «did not initialize» —
 ожидаемо). ЭТАП B не начинается до явного
 подтверждения.
+
+---
+
+## §31b. Фикс A1-consistency по VPS-ревью (09.09.2026)
+
+VPS-аудит commits ac044bb..2d51bed нашёл
+семантическую рассинхронизацию: UI заявлял Top-100,
+а Strategy Runtime фильтровал по legacy-флагу
+Asset.top500, CLI был заперт на 100 (потеряна
+--plan --top=500 диагностика).
+
+Решение (коммит поверх 2d51bed, история не
+переписывается):
+- основной ranked universe = rank 1..100 через
+  lib/universe.ts (TOP_UNIVERSE_SIZE, isInTopUniverse);
+- legacy-поле Strategy.config.filters.top500Only
+  СОХРАНЕНО (совместимость production JSON), семантика
+  true = «только основной ranked universe» = Top-100;
+- SnapshotInput.assetTop500 → assetRank (number|null),
+  компилятор заставляет все вызывающие стороны передать
+  rank; рантайм НЕ читает Asset.top500;
+- CLI --top 1..500 (LEGACY_TOP500_SIZE), default 10;
+  large-run guard (500 задач) без изменений;
+- классификация оставшихся Top-500:
+  LEGACY DATA — Asset.top500, rank-assets (поддержка
+  первых 500), статистика «в историческом Top-500» в
+  admin/data, select-поля top500 в chart API/coin
+  (факт данных, не фильтр universe); ВНЕШНЯЯ МЕТРИКА —
+  «Капитализация Top-500» MarketOverview (CoinGecko,
+  помечена); DOC — план Top-500 × 1 ТФ ≈ 2357 задач в
+  lib/ohlcv/plan.ts (масштаб guard);
+- Journal UI: явная эфемерность (память процесса,
+  очистка при рестарте, НЕ audit log); SECRET_PATTERN
+  расширен (bearer/api-key/private-key/ssh);
+  instrumentation: только строки консоли и
+  Error.name/message, env/headers/cookies не читаются.
+
+Snapshot worker: guard добавлен НЕ был (его не
+существовало и до A1; снапшоты считают из локальных
+Candle без API бирж) — поведение не расширяли,
+существующий guard не ослаблен.

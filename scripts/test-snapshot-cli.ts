@@ -126,7 +126,17 @@ throws(
 throws(
   () => parseSnapshotArgs(["--top=501"]),
   "--top",
-  "границы: top=501 отклонён (автопрогона Top-500 нет)"
+  "границы: top=501 отклонён (выше legacy-максимума 500)"
+);
+
+ok(
+  parseSnapshotArgs(["--top=500"]).top === 500,
+  "границы: top=500 (legacy-диагностика) допустим"
+);
+
+ok(
+  parseSnapshotArgs(["--top=100"]).top === 100,
+  "границы: top=100 (основной universe) допустим"
 );
 
 throws(
@@ -238,6 +248,11 @@ ok(
 ok(
   resolveSnapshotInvocation(["--plan", "--top=501"]).kind === "error",
   "snapshot resolve(--plan --top=501): граница проверяется и в плане"
+);
+
+ok(
+  resolveSnapshotInvocation(["--plan", "--top=500"]).kind === "plan",
+  "snapshot resolve(--plan --top=500): read-only диагностика Top-500 допустима"
 );
 
 const planStats: SnapshotPlanStats = {

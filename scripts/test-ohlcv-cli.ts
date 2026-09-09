@@ -140,9 +140,9 @@ throws(
 );
 
 throws(
-  () => parseCliNumber("501", 10, { name: "top", min: 1, max: 100 }),
-  "от 1 до 100",
-  "parseCliNumber: выше максимума universe отклонено"
+  () => parseCliNumber("501", 10, { name: "top", min: 1, max: 500 }),
+  "от 1 до 500",
+  "parseCliNumber: выше legacy-максимума 500 отклонено"
 );
 
 /* ---------- parseOhlcvArgs ---------- */
@@ -205,12 +205,24 @@ throws(
 
 throws(
   () => parseOhlcvArgs(["--top=501"], {}),
-  "от 1 до 100",
-  "parseOhlcvArgs: top>100 (вне universe) отклонён"
+  "от 1 до 500",
+  "parseOhlcvArgs: top>500 (выше legacy-максимума) отклонён"
 );
 ok(
   parseOhlcvArgs(["--top=100"], {}).top === 100,
-  "parseOhlcvArgs: граница universe top=100 разрешена"
+  "parseOhlcvArgs: граница основного universe top=100 разрешена"
+);
+ok(
+  parseOhlcvArgs(["--top=500"], {}).top === 500,
+  "parseOhlcvArgs: top=500 (legacy-диагностика) парсится"
+);
+ok(
+  resolveOhlcvInvocation(["--plan", "--top=500"]).kind === "plan",
+  "resolve: --plan --top=500 допустим (read-only диагностика Top-500)"
+);
+ok(
+  resolveOhlcvInvocation(["--plan", "--top=501"]).kind === "error",
+  "resolve: --plan --top=501 отклонён (выше legacy-максимума)"
 );
 
 throws(

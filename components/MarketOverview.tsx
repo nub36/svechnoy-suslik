@@ -3,7 +3,9 @@ import { getTopCoins } from "@/lib/market";
 /**
  * Сводка на главной: реальные данные.
  *
- - Капитализация Top-500 — сумма CoinGecko (кэш 60 c).
+ - Капитализация Top-500 — ВНЕШНЯЯ метрика CoinGecko
+   (кэш 60 c); это НЕ основной universe проекта
+   (universe — Top-100, lib/universe.ts).
  - Свечи/снимки/сигналы/стратегии — счётчики PostgreSQL.
  *
  * Если база недоступна или данных нет — честно
@@ -96,7 +98,9 @@ export default async function MarketOverview() {
         </div>
 
         <span className="muted">
-          сумма CoinGecko, обновляется раз в минуту
+          внешняя метрика CoinGecko (сумма по их
+          Top-500), обновляется раз в минуту; не
+          является universe проекта
         </span>
       </div>
 
