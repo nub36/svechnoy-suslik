@@ -31,7 +31,8 @@ const ROOT = join(__dirname, "..");
 const TARGETS = [
   "app/api/chart/markets/route.ts",
   "app/coin/[symbol]/page.tsx",
-  "app/admin/data/page.tsx"
+  "app/admin/data/page.tsx",
+  "lib/snapshots/plan.ts"
 ];
 
 /* ---------- разбор schema.prisma ---------- */

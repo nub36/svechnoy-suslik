@@ -12,6 +12,10 @@ import {
   parseSnapshotArgs,
   resolveSnapshotInvocation
 } from "../lib/snapshots/cli";
+import {
+  formatSnapshotPlanReport,
+  type SnapshotPlanStats
+} from "../lib/snapshots/plan";
 
 let passed = 0;
 let total = 0;
@@ -210,6 +214,91 @@ for (const needle of [
     `buildSnapshotHelp: содержит "${needle}"`
   );
 }
+
+/* ---------- --plan snapshot (read-only режим) ---------- */
+
+const snapPlan = resolveSnapshotInvocation(["--plan"]);
+
+ok(snapPlan.kind === "plan", "snapshot resolve(--plan): режим plan");
+ok(
+  snapPlan.kind === "plan" && snapPlan.options.top === 10,
+  "snapshot resolve(--plan): defaults для показа"
+);
+
+ok(
+  resolveSnapshotInvocation(["--help", "--plan"]).kind === "help",
+  "snapshot resolve: --help приоритетнее --plan"
+);
+
+ok(
+  resolveSnapshotInvocation(["--plan", "--foobar"]).kind === "error",
+  "snapshot resolve(--plan --foobar): неизвестный флаг — ошибка"
+);
+
+ok(
+  resolveSnapshotInvocation(["--plan", "--top=501"]).kind === "error",
+  "snapshot resolve(--plan --top=501): граница проверяется и в плане"
+);
+
+const planStats: SnapshotPlanStats = {
+  assets: 10,
+  markets: 48,
+  historyLimit: 300,
+  rows: [
+    {
+      timeframe: "1h",
+      markets: 48,
+      withEnoughHistory: 48,
+      withoutEnoughHistory: 0,
+      createdPotential: 3,
+      updatedPotential: 45
+    },
+    {
+      timeframe: "5m",
+      markets: 48,
+      withEnoughHistory: 0,
+      withoutEnoughHistory: 48,
+      createdPotential: 0,
+      updatedPotential: 0
+    }
+  ]
+};
+
+const planLines = formatSnapshotPlanReport(
+  { top: 10, timeframes: ["1h", "5m"] as never, historyLimit: 300 },
+  planStats
+);
+
+ok(
+  planLines.some((l) => l.includes("Режим PLAN")),
+  "snapshot plan report: баннер «Режим PLAN»"
+);
+ok(
+  planLines.some((l) => l.includes("PostgreSQL не изменяется")),
+  "snapshot plan report: read-only обещание"
+);
+ok(
+  planLines.some((l) => l.includes("IndicatorSnapshot не пишутся")),
+  "snapshot plan report: записи не будет"
+);
+ok(
+  planLines.some((l) => l.startsWith("  1h") && l.includes("создано будет ≈3")),
+  "snapshot plan report: created/updated по ТФ"
+);
+ok(
+  planLines.some((l) => l.startsWith("  5m") && l.includes("не хватает=48")),
+  "snapshot plan report: рынки без истории показываются"
+);
+
+const emptySnapshotPlan = formatSnapshotPlanReport(
+  { top: 10, timeframes: ["1h"] as never, historyLimit: 300 },
+  { assets: 0, markets: 0, historyLimit: 300, rows: [] }
+);
+
+ok(
+  emptySnapshotPlan.some((l) => l.includes("Данных для плана нет")),
+  "snapshot plan report: пустая база — без падения"
+);
 
 /* ---------- итог ---------- */
 

@@ -3,6 +3,10 @@ import {
   buildSnapshotHelp,
   resolveSnapshotInvocation
 } from "../lib/snapshots/cli";
+import {
+  collectSnapshotPlan,
+  formatSnapshotPlanReport
+} from "../lib/snapshots/plan";
 
 /**
  * IndicatorSnapshot Worker — считает снапшоты ТОЛЬКО из
@@ -62,7 +66,7 @@ async function main() {
     return;
   }
 
-  // 2. run-режим.
+  // 2. run/plan-режимы: Prisma подключается только здесь.
   const { PrismaClient } = await import(
     "@prisma/client"
   );
@@ -71,6 +75,24 @@ async function main() {
 
   try {
     const options = invocation.options;
+
+    if (invocation.kind === "plan") {
+      const stats = await collectSnapshotPlan(
+        prisma,
+        options
+      );
+
+      console.log("");
+
+      for (const line of formatSnapshotPlanReport(
+        options,
+        stats
+      )) {
+        console.log(line);
+      }
+
+      return;
+    }
 
     console.log("");
     console.log(

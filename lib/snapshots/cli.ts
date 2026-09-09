@@ -33,6 +33,7 @@ const KNOWN_SNAPSHOT_FLAGS: ReadonlySet<string> = new Set([
   "timeframe",
   "timeframes",
   "history",
+  "plan",
   "help",
   "h"
 ]);
@@ -43,6 +44,7 @@ const SNAPSHOT_FLAGS_HINT =
 export type SnapshotInvocation =
   | { kind: "help" }
   | { kind: "error"; message: string }
+  | { kind: "plan"; options: SnapshotCliOptions }
   | { kind: "run"; options: SnapshotCliOptions };
 
 /**
@@ -68,10 +70,13 @@ export function resolveSnapshotInvocation(
   }
 
   try {
-    return {
-      kind: "run",
-      options: parseSnapshotArgs(argv)
-    };
+    const options = parseSnapshotArgs(argv);
+
+    if (argv.includes("--plan")) {
+      return { kind: "plan", options };
+    }
+
+    return { kind: "run", options };
   } catch (error) {
     return {
       kind: "error",
