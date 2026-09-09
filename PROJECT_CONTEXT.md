@@ -1666,3 +1666,109 @@ exit=1 до runOhlcvSync/API/записи (структурный тест
 на заглушке клиента, компиляция успешна. Workers реально
 не запускались; Signal/schema/Runtime/minExchanges/
 deadZoneRatio не тронуты.
+
+
+==================================================
+31. ЭТАП A: АУДИТ АДМИНКИ И ПЛАН (факт на e14fef0)
+==================================================
+
+Дата: 09.09.2026. База этапа: e14fef0 (= origin/main),
+история ветки чиста от edf3732 (проверено).
+
+АУДИТ ТЕКУЩЕЙ /admin (что реально работает)
+
+Работает (реальные данные/действия):
+- /admin/data — состояние данных на реальных агрегатах
+  PostgreSQL (свежесть по CLOSED, coverage, plan-команды);
+- Стратегии: реальный список Strategy БД (published/
+  enabled — реальные поля); «Настроить» ведёт на
+  /admin/strategies/[id] (StrategyEditor 780 строк)
+  с существующим безопасным API PUT
+  /api/admin/strategies/[id] (ADMIN-only,
+  validateTrendSuslikConfig валидирует config целиком);
+- «Активных сигналов» — реальный COUNT Signal (0);
+- «Новая стратегия» — УЖЕ disabled (create-flow нет);
+- паттерн ADMIN-доступа: auth() + role=ADMIN во всех
+  admin-страницах и admin API.
+
+Условное/неверное (исправляется в A4):
+- «Top активов» = count(top500=true) — счётчик флага,
+  не текущего universe;
+- «Рынков» = count(enabled=true) — без ACTIVE/SPOT/USDT,
+  расходится с остальными страницами;
+- «PostgreSQL: База подключена» — неявное (следует из
+  того, что страница отрисовалась), нет измеримого
+  статуса/задержки;
+- «Биржи: Binance...» с зелёной точкой — вводящее:
+  наличие Markets в БД НЕ доказывает, что API бирж
+  сейчас online;
+- «OHLCV Worker: Свечи поступают» при candleCount>0 —
+  ЛОЖЬ: наличие старых свечей не доказывает запуск
+  worker; web безопасно не может видеть PM2-процессы;
+- «Signal Engine» — формулировка «сканер ещё не запущен»
+  → честнее «не развёрнут».
+
+Мёртвая навигация (исправляется в A2/A3):
+- Индикаторы, Рынки, Мониторинг, Уведомления, Журнал,
+  Бэктесты — ведут на /admin (в никуда);
+- Сигналы — ведёт на /signals (честный экран, ок);
+- Источники данных — /admin/data (реальная, ок).
+
+ИНВЕНТАРИЗАЦИЯ Top-500 (для A1)
+
+Код/CLI:
+- scripts/rank-assets.ts: размечает top500=true для
+  первых 500 (rank-скрипт; флаг остаётся историческим);
+- lib/ohlcv/cli.ts: --top max=500, help «1..500»;
+- lib/snapshots/cli.ts: --top max=500, help «1..500»;
+- lib/ohlcv/plan.ts: комментарий-пример Top-500
+  (порог задач 500 — НЕ меняется, это задачи рынок×ТФ);
+- app/admin/page.tsx: карточка «Top активов» по флагу;
+- app/admin/data/page.tsx: карточка «Суслик Top-500»;
+- app/coin/[symbol]/page.tsx: «Суслик Top-500»,
+  «актив в расчётном/вне текущего Top-500»;
+- app/api/chart/markets: отдаёт поле top500 как факт БД
+  (не меняется);
+- components/admin/StrategyEditor + lib/strategies/config
+  + runtime: ПОЛЕ КОНФИГА top500Only — часть контракта
+  Strategy Runtime: НЕ переименовывается, семантика
+  Runtime не трогается (вопрос трактовки universe в
+  Runtime — предмет ЭТАПА B);
+- components/MarketOverview: «Капитализация Top-500» —
+  факт о данных CoinGecko (сумма капитализаций топ-500
+  CoinGecko), НЕ наш universe — остаётся как есть.
+Docs/tests: PROJECT_CONTEXT §24/§28, ohlcv/snapshot CLI
+тесты (границы «от 1 до 500», кейс 501).
+
+РЕШЕНИЕ A1 (без schema migration):
+основной universe проекта = Asset.rank IS NOT NULL AND
+rank <= 100 (поля rank/top500 в схеме остаются; флаг
+top500 = «входит в исторический Top-500 рейтинг»).
+Ничего в БД не удаляется. Единая константа TOP_UNIVERSE_SIZE=100
+в lib/universe.ts; CLI --top ограничивается 1..100.
+
+ПЛАН ЭТАПА A (коммиты)
+
+1. Документация: аудит и план (этот раздел).
+2. A1: Top-100 universe (lib/universe.ts, CLI-границы,
+   карточки admin/admin-data/coin, тесты CLI).
+3. A2: навигация и честные разделы: /admin/indicators
+   (реальные IndicatorSnapshot-агрегаты), /admin/markets
+   (реальные Market, поиск/фильтр, пагинация, coverage),
+   /admin/backtests и /admin/notifications (честные
+   empty-state), Сигналы — ссылка на /signals.
+4. A3: /admin/journal — реальный журнал событий текущего
+   процесса: instrumentation.ts + ring-buffer (без schema
+   change, без чтения произвольных файлов; PM2-файлы
+   отклонены как непереносимые), уровни/источники/
+   фильтр/пагинация, retention 500 событий, ADMIN-only.
+   Worker-события из web НЕ видны (честно документировано).
+5. A4: Overview — реальные статусы: PostgreSQL (SELECT 1
+   + latency), Биржи (факт о БД, не об API), OHLCV Worker
+   («Состояние процесса не отслеживается» + freshness
+   закрытых свечей), Signal Engine («Не развёрнут»),
+   Top активов (universe), Рынков (активные SPOT USDT).
+6. Документация этапа A.
+
+СТОП после коммитов A — ждём VPS review. ЭТАП B
+(график + Strategy Runtime) не начинается.
