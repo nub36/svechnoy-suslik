@@ -255,6 +255,93 @@ function computeIndicators(
   };
 }
 
+/* ---------- легенда под курсором ---------- */
+
+type LegendMaps = {
+  index: Map<number, number>;
+  candles: RawCandle[];
+  volume: Map<number, number>;
+  ema20: Map<number, number>;
+  ema50: Map<number, number>;
+  ema200: Map<number, number>;
+  sma20: Map<number, number>;
+  rsi14: Map<number, number>;
+  macdM: Map<number, number>;
+  macdS: Map<number, number>;
+  macdH: Map<number, number>;
+  lastTime: number;
+};
+
+function fmtPrice(
+  value: number | null | undefined
+): string {
+  if (
+    value === null ||
+    value === undefined ||
+    !Number.isFinite(value)
+  ) {
+    return "—";
+  }
+
+  const abs = Math.abs(value);
+  const digits =
+    abs >= 1000 ? 2 : abs >= 1 ? 4 : 6;
+
+  return value.toLocaleString("ru-RU", {
+    maximumFractionDigits: digits
+  });
+}
+
+function fmtVolume(
+  value: number | null | undefined
+): string {
+  if (
+    value === null ||
+    value === undefined ||
+    !Number.isFinite(value)
+  ) {
+    return "—";
+  }
+
+  if (value >= 1e9) {
+    return (value / 1e9).toFixed(2) + " млрд";
+  }
+
+  if (value >= 1e6) {
+    return (value / 1e6).toFixed(2) + " млн";
+  }
+
+  if (value >= 1e3) {
+    return (value / 1e3).toFixed(1) + " тыс.";
+  }
+
+  return value.toFixed(2);
+}
+
+function fmtTime(time: number): string {
+  return new Date(time * 1000).toLocaleString(
+    "ru-RU",
+    {
+      day: "2-digit",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit"
+    }
+  );
+}
+
+function valueMap(
+  points: TimePoint[] | undefined
+): Map<number, number> {
+  const map = new Map<number, number>();
+
+  for (const point of points ?? []) {
+    map.set(point.time, point.value);
+  }
+
+  return map;
+}
+
 export default function CandleChart({
   initialSymbol
 }: {
@@ -313,6 +400,10 @@ export default function CandleChart({
     null
   );
   const loadOlderRef = useRef<() => void>(() => {});
+  const legendRef =
+    useRef<HTMLDivElement | null>(null);
+  const legendMapsRef =
+    useRef<LegendMaps | null>(null);
 
   const [historyLoading, setHistoryLoading] =
     useState(false);
@@ -499,6 +590,125 @@ export default function CandleChart({
 
   /* ---------- наполнение серий данными ---------- */
 
+  const rebuildLegendMaps = useCallback(
+    (data: CandlesResponse) => {
+      const index = new Map<number, number>();
+
+      data.candles.forEach((candle, i) => {
+        index.set(candle.time, i);
+      });
+
+      legendMapsRef.current = {
+        index,
+        candles: data.candles,
+        volume: valueMap(data.volume),
+        ema20: valueMap(
+          data.indicators?.ema20
+        ),
+        ema50: valueMap(
+          data.indicators?.ema50
+        ),
+        ema200: valueMap(
+          data.indicators?.ema200
+        ),
+        sma20: valueMap(
+          data.indicators?.sma20
+        ),
+        rsi14: valueMap(
+          data.indicators?.rsi14
+        ),
+        macdM: valueMap(
+          data.indicators?.macd.macd
+        ),
+        macdS: valueMap(
+          data.indicators?.macd.signal
+        ),
+        macdH: valueMap(
+          data.indicators?.macd.histogram
+        ),
+        lastTime:
+          data.candles.length > 0
+            ? data.candles[
+                data.candles.length - 1
+              ].time
+            : 0
+      };
+    },
+    []
+  );
+
+  const renderLegendAt = useCallback(
+    (time: number | null) => {
+      const el = legendRef.current;
+      const maps = legendMapsRef.current;
+
+      if (!el) {
+        return;
+      }
+
+      if (!maps || maps.index.size === 0) {
+        el.innerHTML =
+          '<span class="k">Загрузка данных…</span>';
+
+        return;
+      }
+
+      const t =
+        time !== null && maps.index.has(time)
+          ? time
+          : maps.lastTime;
+      const i = maps.index.get(t);
+      const candle = maps.candles[i ?? -1];
+
+      if (!candle) {
+        el.innerHTML =
+          '<span class="k">Нет данных</span>';
+
+        return;
+      }
+
+      const up = candle.close >= candle.open;
+      const span = (
+        key: string,
+        value: string,
+        cls?: string
+      ) =>
+        `<span class="k">${key}</span> ` +
+        `<b class="${cls ?? ""}">${value}</b>`;
+
+      el.innerHTML = [
+        `<span class="lgTime">${fmtTime(t)}</span>`,
+        span("O", fmtPrice(candle.open)),
+        span("H", fmtPrice(candle.high)),
+        span("L", fmtPrice(candle.low)),
+        span(
+          "C",
+          fmtPrice(candle.close),
+          up ? "up" : "down"
+        ),
+        span(
+          "Объём",
+          fmtVolume(maps.volume.get(t))
+        ),
+        span("EMA20", fmtPrice(maps.ema20.get(t))),
+        span("EMA50", fmtPrice(maps.ema50.get(t))),
+        span("EMA200", fmtPrice(maps.ema200.get(t))),
+        span("SMA20", fmtPrice(maps.sma20.get(t))),
+        span("RSI14", fmtPrice(maps.rsi14.get(t))),
+        span("MACD", fmtPrice(maps.macdM.get(t))),
+        span("сигн.", fmtPrice(maps.macdS.get(t))),
+        span(
+          "гист.",
+          fmtPrice(maps.macdH.get(t)),
+          (maps.macdH.get(t) ?? 0) >= 0
+            ? "up"
+            : "down"
+        )
+      ].join(" ");
+    },
+    []
+  );
+
   const applyData = useCallback(
     (data: CandlesResponse) => {
       dataRef.current = data;
@@ -511,6 +721,8 @@ export default function CandleChart({
         data.candles.length > 0
           ? data.candles[0].time * 1000
           : null;
+
+      rebuildLegendMaps(data);
 
       const colors = readThemeColors();
 
@@ -595,8 +807,9 @@ export default function CandleChart({
       );
 
       chartRef.current?.timeScale().fitContent();
+      renderLegendAt(null);
     },
-    []
+    [rebuildLegendMaps, renderLegendAt]
   );
 
   const applyVisibility = useCallback(() => {
@@ -835,6 +1048,23 @@ export default function CandleChart({
           }
         }
       );
+
+    // Легенда: OHLCV и значения индикаторов под курсором.
+    // Обновление напрямую в DOM — без ре-рендеров React.
+    chart.subscribeCrosshairMove((param) => {
+      const time = param.time
+        ? Number(param.time)
+        : null;
+      const maps = legendMapsRef.current;
+
+      renderLegendAt(
+        time !== null &&
+          maps !== null &&
+          maps.index.has(time)
+          ? time
+          : null
+      );
+    });
 
     // реакция на смену темы
     const observer =
@@ -1220,6 +1450,8 @@ export default function CandleChart({
         };
 
         dataRef.current = merged;
+        rebuildLegendMaps(merged);
+        renderLegendAt(null);
 
         const chart = chartRef.current;
         const colors = readThemeColors();
@@ -1339,7 +1571,7 @@ export default function CandleChart({
         setHistoryLoading(false);
       }
     },
-    [symbol, exchange, timeframe]
+    [symbol, exchange, timeframe, rebuildLegendMaps, renderLegendAt]
   );
 
   useEffect(() => {
@@ -1556,6 +1788,11 @@ export default function CandleChart({
           <div
             ref={containerRef}
             className="chartContainer"
+          />
+
+          <div
+            ref={legendRef}
+            className="chartLegend"
           />
 
           {loading && (

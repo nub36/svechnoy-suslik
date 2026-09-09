@@ -1371,3 +1371,80 @@ td:nth-child(2) {
 .chartResetScale:hover {
   opacity: 1;
 }
+
+/* ===== Легенда под курсором ===== */
+
+.chartLegend {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  max-width: calc(100% - 16px);
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel2) 88%, transparent);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.6;
+  pointer-events: none;
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 10px;
+  row-gap: 2px;
+  align-items: baseline;
+}
+
+.chartLegend .k {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.chartLegend b {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.chartLegend b.up {
+  color: var(--green);
+}
+
+.chartLegend b.down {
+  color: var(--red);
+}
+
+.chartLegend .lgTime {
+  color: var(--text);
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+/* ===== График: узкие экраны (360/390/430) ===== */
+
+@media (max-width: 430px) {
+  .chartLegend {
+    font-size: 11px;
+    padding: 4px 8px;
+    left: 6px;
+    top: 6px;
+  }
+
+  .chartResetScale {
+    right: 6px;
+    bottom: 6px;
+    font-size: 12px;
+  }
+
+  .chartHistoryLoader {
+    font-size: 11px;
+  }
+
+  .chartToggles {
+    flex: 1 1 100%;
+  }
+}
+
+@media (max-width: 360px) {
+  .chartLegend {
+    display: none;
+  }
+}
