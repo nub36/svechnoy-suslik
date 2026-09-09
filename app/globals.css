@@ -1554,3 +1554,23 @@ td:nth-child(2) {
   overflow-x: auto;
   white-space: nowrap;
 }
+
+/* ===== Статус данных графика ===== */
+
+.chartDataStatus {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  align-items: center;
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+.chartStatusMarket {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.chartHistoryError {
+  color: #e8b34b;
+}

@@ -52,11 +52,16 @@ function fmtTime(date: Date): string {
 }
 
 export default async function CoinPage({
-  params
+  params,
+  searchParams
 }: {
   params: Promise<{ symbol: string }>;
+  searchParams: Promise<
+    Record<string, string | string[] | undefined>
+  >;
 }) {
   const { symbol: raw } = await params;
+  const query = await searchParams;
 
   const symbol = decodeURIComponent(raw)
     .trim()
@@ -276,7 +281,19 @@ export default async function CoinPage({
         </div>
       )}
 
-      <CandleChart initialSymbol={symbol} />
+      <CandleChart
+        initialSymbol={symbol}
+        initialExchange={
+          typeof query.exchange === "string"
+            ? query.exchange
+            : undefined
+        }
+        initialTimeframe={
+          typeof query.timeframe === "string"
+            ? query.timeframe
+            : undefined
+        }
+      />
     </main>
   );
 }

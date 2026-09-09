@@ -21,6 +21,12 @@ import {
   smaSeries
 } from "@/lib/indicators";
 import { mergeOlder } from "@/lib/chart/history";
+import { candleFreshness } from "@/lib/data/freshness";
+import {
+  buildChartSearch,
+  CHART_TIMEFRAMES,
+  parseChartUrlState
+} from "@/lib/chart/url-state";
 
 /**
  * Свечной график на lightweight-charts.
@@ -343,9 +349,13 @@ function valueMap(
 }
 
 export default function CandleChart({
-  initialSymbol
+  initialSymbol,
+  initialExchange,
+  initialTimeframe
 }: {
   initialSymbol?: string;
+  initialExchange?: string;
+  initialTimeframe?: string;
 }) {
   const containerRef =
     useRef<HTMLDivElement | null>(null);
@@ -409,6 +419,16 @@ export default function CandleChart({
     useState(false);
   const [historyEnded, setHistoryEnded] =
     useState(false);
+  const [historyError, setHistoryError] =
+    useState(false);
+
+  // метаданные статусной строки: сколько свечей загружено,
+  // время последней закрытой (для freshness)
+  const [dataMeta, setDataMeta] = useState<{
+    count: number;
+    lastTime: number | null;
+    exchangeSymbol: string;
+  } | null>(null);
 
   const [symbols, setSymbols] = useState<
     SymbolInfo[]
@@ -419,10 +439,26 @@ export default function CandleChart({
   const [markets, setMarkets] = useState<
     MarketInfo[]
   >([]);
-  const [exchange, setExchange] =
-    useState("");
-  const [timeframe, setTimeframe] =
-    useState("1h");
+  const [exchange, setExchange] = useState(() => {
+    // валидация URL до загрузки списков: неизвестная
+    // биржа всё равно падёт на fallback при загрузке рынков
+    const parsed = parseChartUrlState(
+      initialExchange,
+      initialTimeframe,
+      []
+    );
+
+    return parsed.exchange ?? "";
+  });
+  const [timeframe, setTimeframe] = useState(() => {
+    const parsed = parseChartUrlState(
+      initialExchange,
+      initialTimeframe,
+      []
+    );
+
+    return parsed.timeframe ?? "1h";
+  });
 
   const [status, setStatus] = useState<
     "loading" | "loading-data" | "ok" | "empty" | "error"
@@ -723,6 +759,16 @@ export default function CandleChart({
           : null;
 
       rebuildLegendMaps(data);
+      setDataMeta({
+        count: data.candles.length,
+        lastTime:
+          data.candles.length > 0
+            ? data.candles[data.candles.length - 1]
+                .time
+            : null,
+        exchangeSymbol:
+          data.market.exchangeSymbol
+      });
 
       const colors = readThemeColors();
 
@@ -1216,9 +1262,21 @@ export default function CandleChart({
           return;
         }
 
-        setExchange(list[0].exchange);
+        // URL-биржа имеет приоритет, если реально есть
+        const urlExchange = parseChartUrlState(
+          initialExchange,
+          initialTimeframe,
+          list.map((m) => m.exchange)
+        ).exchange;
 
-        const first = list[0];
+        setExchange(
+          urlExchange ?? list[0].exchange
+        );
+
+        const first = urlExchange
+          ? list.find((m) => m.exchange === urlExchange) ??
+            list[0]
+          : list[0];
 
         if (
           !first.timeframes.some(
@@ -1273,6 +1331,7 @@ export default function CandleChart({
       loadingOlderRef.current = false;
       setHistoryLoading(false);
       setHistoryEnded(false);
+      setHistoryError(false);
 
       abortRef.current?.abort();
 
@@ -1398,13 +1457,15 @@ export default function CandleChart({
         }
 
         // Ошибка истории не должна ломать график:
-        // прекращаем попытки и честно сообщаем.
+        // прекращаем попытки и честно сообщаем
+        // (отдельно от ошибки основной загрузки).
         if (
           !response.ok ||
           !Array.isArray(data.candles)
         ) {
           hasMoreRef.current = false;
           setHistoryEnded(true);
+          setHistoryError(true);
 
           return;
         }
@@ -1452,6 +1513,17 @@ export default function CandleChart({
         dataRef.current = merged;
         rebuildLegendMaps(merged);
         renderLegendAt(null);
+        setDataMeta({
+          count: merged.candles.length,
+          lastTime:
+            merged.candles.length > 0
+              ? merged.candles[
+                  merged.candles.length - 1
+                ].time
+              : null,
+          exchangeSymbol:
+            data.market.exchangeSymbol
+        });
 
         const chart = chartRef.current;
         const colors = readThemeColors();
@@ -1563,9 +1635,10 @@ export default function CandleChart({
         }
 
         // Сеть/сервер недоступны: не зацикливаемся,
-        // история остаётся как есть.
+        // история остаётся как есть, сообщаем отдельно.
         hasMoreRef.current = false;
         setHistoryEnded(true);
+        setHistoryError(true);
       } finally {
         loadingOlderRef.current = false;
         setHistoryLoading(false);
@@ -1602,6 +1675,30 @@ export default function CandleChart({
   const loading =
     status === "loading" ||
     status === "loading-data";
+
+  // свежесть последней закрытой свечи для статусной строки
+  const lastFreshness =
+    status === "ok" && dataMeta?.lastTime
+      ? candleFreshness(
+          timeframe,
+          dataMeta.lastTime * 1000,
+          new Date()
+        )
+      : null;
+
+  const lastTimeLabel =
+    dataMeta?.lastTime
+      ? new Date(
+          dataMeta.lastTime * 1000
+        ).toLocaleString("ru-RU", {
+          timeZone: "UTC",
+          day: "2-digit",
+          month: "2-digit",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit"
+        }) + " UTC"
+      : null;
 
   return (
     <div className="chartCard">
@@ -1642,9 +1739,15 @@ export default function CandleChart({
           <select
             value={exchange}
             disabled={markets.length === 0}
-            onChange={(e) =>
-              setExchange(e.target.value)
-            }
+            onChange={(e) => {
+              setExchange(e.target.value);
+
+              window.history.replaceState(
+                null,
+                "",
+                `${window.location.pathname}${buildChartSearch(e.target.value, timeframe)}`
+              );
+            }}
           >
             {markets.length === 0 ? (
               <option value="">
@@ -1673,9 +1776,15 @@ export default function CandleChart({
               selectedMarket.timeframes
                 .length === 0
             }
-            onChange={(e) =>
-              setTimeframe(e.target.value)
-            }
+            onChange={(e) => {
+              setTimeframe(e.target.value);
+
+              window.history.replaceState(
+                null,
+                "",
+                `${window.location.pathname}${buildChartSearch(exchange, e.target.value)}`
+              );
+            }}
           >
             {(selectedMarket
               ?.timeframes ?? []).map(
@@ -1794,6 +1903,54 @@ export default function CandleChart({
             ref={legendRef}
             className="chartLegend"
           />
+
+          {dataMeta && (
+            <div className="chartDataStatus muted">
+              <span className="chartStatusMarket">
+                {exchange && selectedMarket
+                  ? `${exchange} · ${dataMeta.exchangeSymbol} · ${timeframeLabel(timeframe)}`
+                  : timeframeLabel(timeframe)}
+              </span>
+
+              <span>
+                Загружено свечей:{" "}
+                {dataMeta.count}
+              </span>
+
+              {lastTimeLabel && (
+                <span>
+                  Последняя: {lastTimeLabel}
+                </span>
+              )}
+
+              {lastFreshness && (
+                <span
+                  className={`freshBadge ${lastFreshness.status}`}
+                >
+                  ● {lastFreshness.label}
+                </span>
+              )}
+
+              {historyLoading && (
+                <span>Загрузка истории…</span>
+              )}
+
+              {historyEnded &&
+                !historyError && (
+                  <span>
+                    История загружена полностью
+                  </span>
+                )}
+
+              {historyError && (
+                <span className="chartHistoryError">
+                  Ошибка загрузки истории —
+                  график остался на
+                  загруженных данных
+                </span>
+              )}
+            </div>
+          )}
 
           {loading && (
             <div className="chartOverlay">
