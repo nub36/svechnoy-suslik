@@ -17,7 +17,7 @@
  *   npx tsx scripts/test-strategy-runtime.ts --prove-db-link
  */
 
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -551,10 +551,10 @@ function cloneJson<T>(value: T): T {
 
 function configToJson(
   config: TrendSuslikConfig
-): Record<string, unknown> {
-  return cloneJson<
-    Record<string, unknown>
-  >(config as unknown as Record<string, unknown>);
+): Prisma.InputJsonValue {
+  return JSON.parse(
+    JSON.stringify(config)
+  ) as Prisma.InputJsonValue;
 }
 
 async function runProveDbLink(

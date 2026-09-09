@@ -5,3 +5,4 @@ node_modules/
 *.db
 prisma/*.db
 .DS_Store
+*.tsbuildinfo
