@@ -5,6 +5,12 @@ import {
   formatTimeframeSummary,
   resolveOhlcvInvocation
 } from "../lib/ohlcv/cli";
+import {
+  buildConfirmCommand,
+  formatPlanReport,
+  collectPlanStats,
+  evaluateRunScale
+} from "../lib/ohlcv/plan";
 
 /**
  * OHLCV Worker — управляемый вручную запуск с бирж.
@@ -15,6 +21,10 @@ import {
  *     справка на русском; БД и биржи НЕ затрагиваются,
  *     клиент Prisma и код синхронизации даже не
  *     импортируются, код выхода 0;
+ *   npx tsx scripts/ohlcv-worker.ts --plan --top=10 --timeframes=5m,15m,1h,4h,1d
+ *     ПЛАН: read-only SELECT по PostgreSQL (Asset/Market),
+ *     оценка задач/свечей/запросов; свечи НЕ пишутся,
+ *     API бирж НЕ вызываются, loop не запускается;
  *   npx tsx scripts/ohlcv-worker.ts --top=10 --timeframes=1h --once
  *     один проход Top-10 по 1h;
  *   npx tsx scripts/ohlcv-worker.ts --top=10 --timeframes=5m,15m,1h,4h,1d --once
@@ -147,18 +157,63 @@ async function main() {
     return;
   }
 
-  // 2. Только в run-режиме загружаем клиент и код синка.
+  // 2. plan/run: загружаем клиент (код синка и адаптеры
+  //    бирж — ТОЛЬКО после предохранителя ниже).
   const options = invocation.options;
 
-  const [{ runOhlcvSync }, { PrismaClient }] =
-    await Promise.all([
-      import("../lib/ohlcv/sync"),
-      import("@prisma/client")
-    ]);
+  const { PrismaClient } = await import(
+    "@prisma/client"
+  );
 
   const prisma = new PrismaClient();
 
   try {
+    // Читаем масштаб прогона (read-only SELECT).
+    const stats = await collectPlanStats(
+      prisma,
+      options
+    );
+
+    for (const line of formatPlanReport(options, stats)) {
+      console.log(line);
+    }
+
+    // Предохранитель от случайного большого запуска.
+    const scale = evaluateRunScale(
+      stats.tasks,
+      options.confirmLargeRun
+    );
+
+    if (invocation.kind === "plan") {
+      console.log("");
+      console.log(
+        `Предохранитель: порог ${scale.allowed ? "не превышен" : "будет превышен"} ` +
+          `(задач: ${stats.tasks}).`
+      );
+
+      return;
+    }
+
+    if (!scale.allowed) {
+      console.error("");
+      console.error(scale.message);
+      console.error(
+        `Команда повтора: ${buildConfirmCommand(options)}`
+      );
+
+      process.exitCode = 1;
+
+      return;
+    }
+
+    if (scale.message) {
+      console.log(scale.message);
+    }
+
+    const { runOhlcvSync } = await import(
+      "../lib/ohlcv/sync"
+    );
+
     console.log("🐿️ OHLCV Worker");
     console.log(
       `top=${options.top} timeframes=${options.timeframes.join(",")} ` +

@@ -18,6 +18,12 @@ import {
   resolveOhlcvInvocation,
   wantsHelp
 } from "../lib/ohlcv/cli";
+import {
+  buildConfirmCommand,
+  evaluateRunScale,
+  formatPlanReport,
+  LARGE_RUN_TASK_THRESHOLD
+} from "../lib/ohlcv/plan";
 
 let passed = 0;
 let total = 0;
@@ -333,6 +339,188 @@ for (const needle of [
     `buildOhlcvHelp: содержит "${needle}"`
   );
 }
+
+/* ---------- --plan и предохранитель большого запуска ---------- */
+
+// --plan обязан давать plan-режим (НЕ run): план не вызывает
+// run/sync-код и не пишет в БД — это гарантируется тем, что
+// воркер импортирует sync только при kind === "run".
+const planCall = resolveOhlcvInvocation(["--plan"]);
+
+ok(planCall.kind === "plan", "resolve(--plan): режим plan");
+ok(
+  planCall.kind === "plan" && planCall.options.top === 10,
+  "resolve(--plan): defaults доступны для показа"
+);
+
+const planWithArgs = resolveOhlcvInvocation([
+  "--plan",
+  "--top=3",
+  "--timeframes=5m,15m",
+  "--limit=100"
+]);
+
+ok(planWithArgs.kind === "plan", "resolve(--plan --top=3 ...): план");
+ok(
+  planWithArgs.kind === "plan" &&
+    planWithArgs.options.top === 3 &&
+    JSON.stringify(planWithArgs.options.timeframes) === '["5m","15m"]' &&
+    planWithArgs.options.limit === 100,
+  "resolve(--plan ...): опции для показа разобраны"
+);
+
+ok(
+  resolveOhlcvInvocation(["--help", "--plan"]).kind === "help",
+  "resolve: --help приоритетнее --plan"
+);
+
+ok(
+  resolveOhlcvInvocation(["--plan", "--foobar"]).kind === "error",
+  "resolve(--plan --foobar): неизвестный флаг остаётся ошибкой"
+);
+
+const confirmCall = resolveOhlcvInvocation(["--confirm-large-run"]);
+
+ok(
+  confirmCall.kind === "run" &&
+    confirmCall.options.confirmLargeRun === true,
+  "resolve(--confirm-large-run): флаг разбирается"
+);
+
+const noConfirmCall =
+  resolveOhlcvInvocation(["--top=3"]);
+
+ok(
+  noConfirmCall.kind === "run" &&
+    noConfirmCall.options.confirmLargeRun === false,
+  "resolve: без флага confirm=false"
+);
+
+// предохранитель
+ok(LARGE_RUN_TASK_THRESHOLD === 500, "порог большого запуска = 500 задач");
+
+ok(
+  evaluateRunScale(240, false).allowed === true,
+  "guard: Top-10 × 5 ТФ (240 задач) разрешён без confirm"
+);
+ok(
+  evaluateRunScale(499, false).allowed === true,
+  "guard: ниже порога — разрешено"
+);
+ok(
+  evaluateRunScale(500, false).allowed === true,
+  "guard: ровно граница (500) — разрешено"
+);
+ok(
+  evaluateRunScale(501, false).allowed === false,
+  "guard: выше порога — отказ"
+);
+ok(
+  evaluateRunScale(2357, false).allowed === false,
+  "guard: Top-500 × 1 ТФ (~2357) — отказ"
+);
+ok(
+  evaluateRunScale(2357, true).allowed === true,
+  "guard: выше порога + confirm — разрешено"
+);
+
+const refusal = evaluateRunScale(1200, false);
+
+ok(
+  refusal.message?.includes("--confirm-large-run") === true,
+  "guard: отказ называет команду подтверждения"
+);
+ok(
+  refusal.message?.includes("1200") === true,
+  "guard: отказ называет число задач"
+);
+
+const confirmNote = evaluateRunScale(1200, true);
+
+ok(
+  confirmNote.message?.includes("--confirm-large-run") === true,
+  "guard: при confirm выводится пометка"
+);
+
+// отчёт плана (чистая функция)
+const planLines = formatPlanReport(
+  {
+    top: 10,
+    timeframes: ["5m", "15m", "1h", "4h", "1d"] as never,
+    limit: 300,
+    requestDelayMs: 250
+  },
+  {
+    assets: 10,
+    markets: 48,
+    tasks: 240,
+    maxCandles: 72000,
+    apiRequests: 240,
+    byExchange: { BINANCE: 10, BYBIT: 10, GATE: 10, KUCOIN: 9, BINGX: 9 }
+  }
+);
+
+ok(
+  planLines.some((l) => l.includes("Режим PLAN")),
+  "plan report: баннер «Режим PLAN»"
+);
+ok(
+  planLines.some((l) => l.includes("PostgreSQL не изменяется")),
+  "plan report: честное обещание read-only"
+);
+ok(
+  planLines.some((l) => l.includes("API бирж не вызываются")),
+  "plan report: API бирж не вызываются"
+);
+ok(
+  planLines.some((l) => l.includes("240")),
+  "plan report: число задач"
+);
+ok(
+  planLines.some((l) => l.includes("≈240")),
+  "plan report: оценка API-запросов"
+);
+ok(
+  planLines.some((l) => l.includes("BINANCE")),
+  "plan report: разбивка по биржам"
+);
+
+const emptyPlan = formatPlanReport(
+  {
+    top: 10,
+    timeframes: ["1h"] as never,
+    limit: 300,
+    requestDelayMs: 250
+  },
+  {
+    assets: 0,
+    markets: 0,
+    tasks: 0,
+    maxCandles: 0,
+    apiRequests: 0,
+    byExchange: {}
+  }
+);
+
+ok(
+  emptyPlan.some((l) => l.includes("рынков не найдено")),
+  "plan report: пустая база — без падения"
+);
+
+// команда повтора
+const cmd = buildConfirmCommand({
+  top: 50,
+  timeframes: ["1h"] as never,
+  limit: 300,
+  requestDelayMs: 250,
+  once: true
+});
+
+ok(
+  cmd.includes("--confirm-large-run") && cmd.includes("--top=50") &&
+    cmd.includes("--once"),
+  "confirm command: содержит флаг подтверждения и исходные опции"
+);
 
 /* ---------- итог ---------- */
 

@@ -96,6 +96,7 @@ export function parseCliNumber(
 export type OhlcvCliOptions = OhlcvWorkerOptions & {
   once: boolean;
   intervalMs: number;
+  confirmLargeRun: boolean;
 };
 
 /* ---------- безопасный разбор вызова ---------- */
@@ -111,6 +112,8 @@ const KNOWN_OHLCV_FLAGS: ReadonlySet<string> = new Set([
   "limit",
   "delay",
   "once",
+  "plan",
+  "confirm-large-run",
   "help",
   "h"
 ]);
@@ -153,6 +156,7 @@ export function validateKnownFlags(
 export type OhlcvInvocation =
   | { kind: "help" }
   | { kind: "error"; message: string }
+  | { kind: "plan"; options: OhlcvCliOptions }
   | { kind: "run"; options: OhlcvCliOptions };
 
 /**
@@ -181,10 +185,16 @@ export function resolveOhlcvInvocation(
   }
 
   try {
-    return {
-      kind: "run",
-      options: parseOhlcvArgs(argv, env)
-    };
+    const options = parseOhlcvArgs(argv, env);
+
+    // --plan: показать план и выйти (read-only,
+    // без sync-кода, бирж и записи). Справка (--help)
+    // имеет приоритет над --plan.
+    if (argv.includes("--plan")) {
+      return { kind: "plan", options };
+    }
+
+    return { kind: "run", options };
   } catch (error) {
     return {
       kind: "error",
@@ -273,6 +283,8 @@ export function parseOhlcvArgs(
     once:
       argv.includes("--once") ||
       env.OHLCV_ONCE === "1",
+    confirmLargeRun:
+      argv.includes("--confirm-large-run"),
     intervalMs: parseCliNumber(
       env.OHLCV_INTERVAL_MS,
       60 * 60 * 1000,
