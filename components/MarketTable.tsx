@@ -14,18 +14,65 @@ function money(n: number) {
   })}`;
 }
 
+type Filter = "all" | "up" | "down";
+
+/**
+ * Таблица рынка: данные CoinGecko (сервер),
+ * клиентские фильтры «Все / Рост / Падение».
+ *
+ * Колонки RSI и «Сигнал» с заглушками удалены:
+ * реальных данных для них пока нет, а выдумывать
+ * значения запрещено.
+ */
 export default function MarketTable({ coins }: { coins: Coin[] }) {
   const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<Filter>("all");
+
+  if (coins.length === 0) {
+    return (
+      <div className="tableBox">
+        <p className="muted" style={{ padding: "1rem" }}>
+          Нет данных: источник рынка временно недоступен.
+        </p>
+      </div>
+    );
+  }
 
   const filtered = useMemo(() => {
     const q = query.toLowerCase();
 
-    return coins.filter(
-      (c) =>
-        c.name.toLowerCase().includes(q) ||
-        c.symbol.toLowerCase().includes(q)
-    );
-  }, [coins, query]);
+    return coins.filter((c) => {
+      if (
+        q &&
+        !c.name.toLowerCase().includes(q) &&
+        !c.symbol.toLowerCase().includes(q)
+      ) {
+        return false;
+      }
+
+      const change =
+        c.price_change_percentage_24h ?? 0;
+
+      if (filter === "up" && change < 0) {
+        return false;
+      }
+
+      if (filter === "down" && change >= 0) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [coins, query, filter]);
+
+  const filters: {
+    id: Filter;
+    label: string;
+  }[] = [
+    { id: "all", label: "Все активы" },
+    { id: "up", label: "Рост" },
+    { id: "down", label: "Падение" }
+  ];
 
   return (
     <>
@@ -37,11 +84,17 @@ export default function MarketTable({ coins }: { coins: Coin[] }) {
           onChange={(e) => setQuery(e.target.value)}
         />
 
-        <button className="chip">Все активы</button>
-        <button className="chip">🔥 С сигналом</button>
-        <button className="chip">Рост</button>
-        <button className="chip">Падение</button>
-        <button className="chip">Настроить колонки</button>
+        {filters.map((f) => (
+          <button
+            key={f.id}
+            className={`chip${
+              filter === f.id ? " chipActive" : ""
+            }`}
+            onClick={() => setFilter(f.id)}
+          >
+            {f.label}
+          </button>
+        ))}
       </div>
 
       <div className="tableBox">
@@ -54,67 +107,68 @@ export default function MarketTable({ coins }: { coins: Coin[] }) {
               <th>24ч</th>
               <th>Объём 24ч</th>
               <th>Капитализация</th>
-              <th>RSI</th>
-              <th>Сигнал</th>
             </tr>
           </thead>
 
           <tbody>
-            {filtered.map((coin, i) => {
-              const change = coin.price_change_percentage_24h ?? 0;
+            {filtered.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="muted" style={{ textAlign: "center", padding: "1.2rem" }}>
+                  Ничего не найдено
+                </td>
+              </tr>
+            ) : (
+              filtered.map((coin, i) => {
+                const change = coin.price_change_percentage_24h ?? 0;
 
-              return (
-                <tr key={coin.id}>
-                  <td className="muted">{i + 1}</td>
+                return (
+                  <tr key={coin.id}>
+                    <td className="muted">{i + 1}</td>
 
-                  <td>
-                    <Link
-                      href={`/coin/${coin.symbol.toUpperCase()}`}
-                      className="asset"
-                    >
-                      {coin.image ? (
-                        <img
-                          src={coin.image}
-                          alt=""
-                          width={31}
-                          height={31}
-                          style={{ borderRadius: "50%" }}
-                        />
-                      ) : (
-                        <span className="coinIcon">
-                          {coin.symbol.slice(0, 2).toUpperCase()}
+                    <td>
+                      <Link
+                        href={`/coin/${coin.symbol.toUpperCase()}`}
+                        className="asset"
+                      >
+                        {coin.image ? (
+                          <img
+                            src={coin.image}
+                            alt=""
+                            width={31}
+                            height={31}
+                            style={{ borderRadius: "50%" }}
+                          />
+                        ) : (
+                          <span className="coinIcon">
+                            {coin.symbol.slice(0, 2).toUpperCase()}
+                          </span>
+                        )}
+
+                        <span>
+                          {coin.symbol.toUpperCase()}
+                          <small
+                            className="muted"
+                            style={{ display: "block", fontWeight: 400 }}
+                          >
+                            {coin.name}
+                          </small>
                         </span>
-                      )}
+                      </Link>
+                    </td>
 
-                      <span>
-                        {coin.symbol.toUpperCase()}
-                        <small
-                          className="muted"
-                          style={{ display: "block", fontWeight: 400 }}
-                        >
-                          {coin.name}
-                        </small>
-                      </span>
-                    </Link>
-                  </td>
+                    <td>{money(coin.current_price)}</td>
 
-                  <td>{money(coin.current_price)}</td>
+                    <td className={change >= 0 ? "positive" : "negative"}>
+                      {change >= 0 ? "+" : ""}
+                      {change.toFixed(2)}%
+                    </td>
 
-                  <td className={change >= 0 ? "positive" : "negative"}>
-                    {change >= 0 ? "+" : ""}
-                    {change.toFixed(2)}%
-                  </td>
-
-                  <td>{money(coin.total_volume)}</td>
-                  <td>{money(coin.market_cap)}</td>
-                  <td className="muted">—</td>
-
-                  <td>
-                    <span className="signal neutral">АНАЛИЗ</span>
-                  </td>
-                </tr>
-              );
-            })}
+                    <td>{money(coin.total_volume)}</td>
+                    <td>{money(coin.market_cap)}</td>
+                  </tr>
+                );
+              })
+            )}
           </tbody>
         </table>
       </div>

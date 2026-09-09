@@ -1,7 +1,7 @@
 import Link from "next/link";
-import { Search } from "lucide-react";
 import ThemeToggle from "./ThemeToggle";
 import UserMenu from "./UserMenu";
+import SearchBox from "./SearchBox";
 
 export default function Header() {
   return (
@@ -18,9 +18,7 @@ export default function Header() {
       </nav>
 
       <div className="actions">
-        <button className="iconBtn" title="Поиск">
-          <Search size={18} />
-        </button>
+        <SearchBox />
 
         <ThemeToggle />
 
