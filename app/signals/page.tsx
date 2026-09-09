@@ -1,9 +1,17 @@
-const signals = [
-  ["BTC/USDT", "LONG", "Тренд + RSI", "4H", "82"],
-  ["SOL/USDT", "SHORT", "Пробой + объём", "1H", "76"],
-  ["ETH/USDT", "LONG", "MACD Momentum", "4H", "71"]
-];
+export const dynamic = "force-dynamic";
 
+/**
+ * Раздел сигналов.
+ *
+ * Production Signal Engine ещё НЕ развёрнут: запись
+ * сигналов в PostgreSQL не выполнялась (разделы §25
+ * и §28 PROJECT_CONTEXT.md), поэтому страница честно
+ * сообщает об этом и НЕ обращается к Prisma Signal.
+ *
+ * Никаких демонстрационных сигналов: покажем реальные
+ * данные, как только Signal Engine будет перенесён
+ * и запущен отдельным этапом.
+ */
 export default function Signals() {
   return (
     <main className="shell">
@@ -16,34 +24,22 @@ export default function Signals() {
         </div>
       </section>
 
-      <div className="tableBox">
-        <table>
-          <thead>
-            <tr>
-              <th>Инструмент</th>
-              <th>Направление</th>
-              <th>Стратегия</th>
-              <th>Таймфрейм</th>
-              <th>Сила</th>
-            </tr>
-          </thead>
+      <div className="muted" style={{ marginBottom: "1rem" }}>
+        Сила — это степень совпадения условий стратегии (0–100),
+        а не вероятность успешной сделки.
+      </div>
 
-          <tbody>
-            {signals.map((s) => (
-              <tr key={s[0]}>
-                <td><b>{s[0]}</b></td>
-                <td>
-                  <span className={`signal ${s[1] === "LONG" ? "long" : "short"}`}>
-                    {s[1]}
-                  </span>
-                </td>
-                <td>{s[2]}</td>
-                <td>{s[3]}</td>
-                <td>{s[4]}/100</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="tableBox">
+        <p className="muted" style={{ padding: "1rem" }}>
+          Нет данных. Signal Engine ещё не развёрнут
+          в production — сигналы пока не формируются.
+        </p>
+
+        <p className="muted" style={{ padding: "0 1rem 1rem" }}>
+          Стратегии и мультибиржевое подтверждение уже
+          работают — смотрите раздел{" "}
+          <a href="/strategies">«Стратегии»</a>.
+        </p>
       </div>
     </main>
   );
