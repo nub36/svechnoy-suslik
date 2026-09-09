@@ -701,3 +701,17 @@ Signal Engine (после живого прогона Runtime на VPS).
   (closed=true) для lastCandleTime и ЗАПРЕЩЁН голый
   MAX(openTime) AS "lastCandleTime" (правило проверено
   на старом коде — ловит).
+
+
+### A1 — Top-100 universe (09.09.2026)
+- lib/universe.ts: TOP_UNIVERSE_SIZE=100, isInTopUniverse,
+  фильтр Prisma; схема НЕ менялась (rank/top500 как были),
+  исторические Top-500 данные сохранены;
+- CLI --top ограничен 1..100 (ohlcv/snapshot, help обновлён);
+- карточки: admin «Top активов (Top-100)» по universe,
+  admin/data «Top-100 (основной universe)» + «в историческом
+  Top-500» раздельно, coin page «Суслик Top-100» с
+  членством по rank<=100;
+- «Капитализация Top-500» (CoinGecko) и поле конфига
+  top500Only (Runtime-контракт) сознательно не тронуты;
+- тесты: ohlcv-cli 101 → 102 (граница 100/вне universe).

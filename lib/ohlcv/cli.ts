@@ -1,4 +1,5 @@
 import type { Timeframe } from "../exchanges/types";
+import { TOP_UNIVERSE_SIZE } from "../universe";
 import { DEFAULT_OHLCV_OPTIONS, type OhlcvWorkerOptions } from "./sync";
 
 /**
@@ -8,8 +9,8 @@ import { DEFAULT_OHLCV_OPTIONS, type OhlcvWorkerOptions } from "./sync";
  * без базы данных: scripts/test-ohlcv-cli.ts.
  *
  * Принципы безопасного запуска:
- * - top ограничен 1..500 и по умолчанию 10 — никакого
- *   автоматического прогона Top-500;
+ * - top ограничен 1..100 (основной universe Top-100,
+ *   см. lib/universe.ts) и по умолчанию 10;
  * - timeframes валидируются по белому списку — опечатка
  *   вида --timeframes=1x падает сразу с понятной ошибкой,
  *   а не превращается в мусорный запрос к адаптеру биржи;
@@ -214,8 +215,8 @@ export function buildOhlcvHelp(): string {
     "  npx tsx scripts/ohlcv-worker.ts [флаги]",
     "",
     "Флаги (только форма --имя=значение):",
-    "  --top=N           сколько топ-активов грузить, 1..500, по умолчанию 10",
-    "                    (Top-500 сам по себе НЕ запускается)",
+    "  --top=N           сколько топ-активов грузить, 1..100 (основной universe),",
+    "                    по умолчанию 10; массовый прогон всего universe НЕ запускается сам",
     "  --timeframes=...  список таймфреймов: 5m,15m,1h,4h,1d, по умолчанию 1h",
     "  --limit=N         свечей истории за один запрос, 50..1000, по умолчанию 300",
     "  --delay=N         пауза между запросами в мс, 0..60000, по умолчанию 250",
@@ -267,7 +268,7 @@ export function parseOhlcvArgs(
     top: parseCliNumber(
       get("top") ?? env.OHLCV_TOP,
       DEFAULT_OHLCV_OPTIONS.top,
-      { name: "top", min: 1, max: 500 }
+      { name: "top", min: 1, max: TOP_UNIVERSE_SIZE }
     ),
     timeframes,
     limit: parseCliNumber(

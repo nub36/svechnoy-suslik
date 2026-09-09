@@ -45,9 +45,14 @@ export default async function AdminPage() {
       ]
     }),
 
+    // основной universe Top-100 (lib/universe.ts)
     prisma.asset.count({
       where: {
-        top500: true
+        enabled: true,
+        rank: {
+          lte: 100,
+          not: null
+        }
       }
     }),
 
@@ -159,10 +164,10 @@ export default async function AdminPage() {
 
         <div className="adminStats">
           <div className="adminStatCard">
-            <span>Top активов</span>
+            <span>Top активов (Top-100)</span>
             <b>{assets}</b>
             <small>
-              включены в основной анализ
+              основной universe анализа
             </small>
           </div>
 

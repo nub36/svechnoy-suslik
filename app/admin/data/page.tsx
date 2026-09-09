@@ -99,6 +99,7 @@ async function loadHealthData() {
   const [
     assetsTotal,
     assetsEnabled,
+    assetsUniverse,
     assetsTop500,
     assetsRanked,
     rankedUpdatedAt,
@@ -113,6 +114,17 @@ async function loadHealthData() {
     prisma.asset.count({
       where: { enabled: true }
     }),
+    // основной universe Top-100 (lib/universe.ts)
+    prisma.asset.count({
+      where: {
+        enabled: true,
+        rank: {
+          lte: 100,
+          not: null
+        }
+      }
+    }),
+    // исторический флаг Top-500 (факт БД)
     prisma.asset.count({
       where: { top500: true }
     }),
@@ -245,6 +257,7 @@ async function loadHealthData() {
     assets: {
       total: assetsTotal,
       enabled: assetsEnabled,
+      universe: assetsUniverse,
       top500: assetsTop500,
       ranked: assetsRanked,
       rankedUpdatedAt:
@@ -342,10 +355,19 @@ export default async function AdminDataPage() {
 
           <div className="healthCard">
             <div className="healthValue">
+              {fmtInt(data.assets.universe)}
+            </div>
+            <div className="healthLabel">
+              Top-100 (основной universe)
+            </div>
+          </div>
+
+          <div className="healthCard">
+            <div className="healthValue">
               {fmtInt(data.assets.top500)}
             </div>
             <div className="healthLabel">
-              Суслик Top-500
+              в историческом Top-500
             </div>
           </div>
 

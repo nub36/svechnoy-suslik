@@ -1,5 +1,6 @@
 import CandleChart from "@/components/chart/CandleChart";
 import { newestClosedCandleTime } from "@/lib/data/freshness";
+import { isInTopUniverse } from "@/lib/universe";
 
 export const dynamic = "force-dynamic";
 
@@ -200,7 +201,7 @@ export default async function CoinPage({
         <div className="cards">
           <div className="card">
             <div className="cardTitle">
-              Суслик Top-500
+              Суслик Top-100
             </div>
 
             <div className="bigValue">
@@ -210,9 +211,9 @@ export default async function CoinPage({
             </div>
 
             <span className="muted">
-              {info.top500
-                ? "актив в расчётном Top-500"
-                : "актив вне текущего Top-500"}
+              {isInTopUniverse(info.rank)
+                ? "актив в основном universe (Top-100)"
+                : "актив вне основного Top-100"}
             </span>
           </div>
 

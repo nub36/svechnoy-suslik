@@ -140,9 +140,9 @@ throws(
 );
 
 throws(
-  () => parseCliNumber("501", 10, { name: "top", min: 1, max: 500 }),
-  "от 1 до 500",
-  "parseCliNumber: выше максимума отклонено"
+  () => parseCliNumber("501", 10, { name: "top", min: 1, max: 100 }),
+  "от 1 до 100",
+  "parseCliNumber: выше максимума universe отклонено"
 );
 
 /* ---------- parseOhlcvArgs ---------- */
@@ -205,8 +205,12 @@ throws(
 
 throws(
   () => parseOhlcvArgs(["--top=501"], {}),
-  "от 1 до 500",
-  "parseOhlcvArgs: top>500 отклонён (автопрогона Top-500 нет)"
+  "от 1 до 100",
+  "parseOhlcvArgs: top>100 (вне universe) отклонён"
+);
+ok(
+  parseOhlcvArgs(["--top=100"], {}).top === 100,
+  "parseOhlcvArgs: граница universe top=100 разрешена"
 );
 
 throws(
