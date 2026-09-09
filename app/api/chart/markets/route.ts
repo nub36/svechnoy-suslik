@@ -12,7 +12,22 @@ export const dynamic = "force-dynamic";
  *
  * Никаких обращений к биржам — только существующие
  * PostgreSQL Candle/Market/Asset.
+ *
+ * Таймфреймы считаются ОДНИМ агрегированным SQL-запросом
+ * (GROUP BY на стороне PostgreSQL) — вместо N+1 запросов
+ * и без загрузки свечей в Node.js. Prisma groupBy не
+ * используется из-за проблем типов на реальном
+ * сгенерированном клиенте.
  */
+
+type ChartRow = {
+  marketId: number;
+  exchange: string;
+  exchangeSymbol: string;
+  timeframe: string;
+  candleCount: number;
+  lastCandleTime: Date;
+};
 
 export async function GET(
   request: Request
@@ -92,59 +107,72 @@ export async function GET(
       );
     }
 
-    const markets =
-      await prisma.market.findMany({
-        where: {
-          assetId: asset.id,
-          enabled: true,
-          status: "ACTIVE",
-          quote: "USDT",
-          marketType: "SPOT",
-          candles: { some: {} }
-        },
-        select: {
-          id: true,
-          exchange: true,
-          exchangeSymbol: true
-        },
-        orderBy: {
-          exchange: "asc"
-        }
-      });
+    const queryRaw =
+      prisma.$queryRaw as unknown as (
+        query: TemplateStringsArray,
+        ...values: unknown[]
+      ) => Promise<ChartRow[]>;
 
-    const result = [];
+    const rows = await queryRaw`
+      SELECT
+        m.id AS "marketId",
+        m.exchange AS "exchange",
+        m."exchangeSymbol" AS "exchangeSymbol",
+        c.timeframe AS "timeframe",
+        COUNT(*)::int AS "candleCount",
+        MAX(c."openTime") AS "lastCandleTime"
+      FROM "Candle" c
+      JOIN "Market" m ON m.id = c."marketId"
+      WHERE m."assetId" = ${asset.id}
+        AND m.enabled = true
+        AND m.status = 'ACTIVE'
+        AND m.quote = 'USDT'
+        AND m."marketType" = 'SPOT'
+      GROUP BY
+        m.id, m.exchange,
+        m."exchangeSymbol", c.timeframe
+      ORDER BY m.exchange, c.timeframe
+    `;
 
-    for (const market of markets) {
-      const grouped =
-        await prisma.candle.groupBy({
-          by: ["timeframe"],
-          where: {
-            marketId: market.id
-          },
-          _count: { _all: true },
-          _max: {
-            openTime: true
-          }
-        });
+    const byMarket = new Map<
+      number,
+      {
+        marketId: number;
+        exchange: string;
+        exchangeSymbol: string;
+        timeframes: {
+          timeframe: string;
+          count: number;
+          lastCandleTime: Date;
+        }[];
+      }
+    >();
 
-      result.push({
-        marketId: market.id,
-        exchange: market.exchange,
-        exchangeSymbol:
-          market.exchangeSymbol,
-        timeframes: grouped
-          .map((g: { timeframe: string; _count: { _all: number }; _max: { openTime: Date | null } }) => ({
-            timeframe: g.timeframe,
-            count: g._count._all,
-            lastCandleTime: g._max.openTime
-          }))
-          .sort((a: { timeframe: string }, b: { timeframe: string }) =>
-            a.timeframe.localeCompare(
-              b.timeframe
-            )
-          )
+    for (const row of rows) {
+      let entry = byMarket.get(
+        row.marketId
+      );
+
+      if (!entry) {
+        entry = {
+          marketId: row.marketId,
+          exchange: row.exchange,
+          exchangeSymbol:
+            row.exchangeSymbol,
+          timeframes: []
+        };
+
+        byMarket.set(row.marketId, entry);
+      }
+
+      entry.timeframes.push({
+        timeframe: row.timeframe,
+        count: row.candleCount,
+        lastCandleTime: row.lastCandleTime
       });
     }
+
+    const result = [...byMarket.values()];
 
     if (result.length === 0) {
       return NextResponse.json(
