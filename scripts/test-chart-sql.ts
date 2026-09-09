@@ -377,6 +377,40 @@ function main(): number {
     );
   }
 
+  // Специальное правило (регрессия VPS a8da7db): в coin page
+  // карточка «Последняя закрытая свеча» обязана считаться
+  // ТОЛЬКО по закрытым свечам — без голого MAX(openTime).
+  const coinPageText = (() => {
+    const p = join(ROOT, "app/coin/[symbol]/page.tsx");
+
+    return existsSync(p)
+      ? readFileSync(p, "utf8")
+      : "";
+  })();
+
+  if (coinPageText.length > 0) {
+    const filteredRe =
+      /MAX\(c\."openTime"\)\s+FILTER\s*\(\s*WHERE\s+c\.closed\s*=\s*true\s*\)\s+AS\s+"lastCandleTime"/;
+
+    if (!filteredRe.test(coinPageText)) {
+      allProblems.push(
+        "app/coin/[symbol]/page.tsx: lastCandleTime обязан быть " +
+          'MAX(c."openTime") FILTER (WHERE c.closed = true) — ' +
+          "открытая свеча не может называться закрытой"
+      );
+    }
+
+    const bareMaxRe =
+      /MAX\(c\."openTime"\)\s+AS\s+"lastCandleTime"/;
+
+    if (bareMaxRe.test(coinPageText)) {
+      allProblems.push(
+        'app/coin/[symbol]/page.tsx: голый MAX(c."openTime") ' +
+          'AS "lastCandleTime" запрещён (включает открытые свечи)'
+      );
+    }
+  }
+
   if (allProblems.length > 0) {
     console.error(
       `chart-sql: найдено проблем: ${allProblems.length}`

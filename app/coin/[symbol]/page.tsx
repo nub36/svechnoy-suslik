@@ -1,4 +1,5 @@
 import CandleChart from "@/components/chart/CandleChart";
+import { newestClosedCandleTime } from "@/lib/data/freshness";
 
 export const dynamic = "force-dynamic";
 
@@ -41,7 +42,9 @@ type ChartRow = {
   exchangeSymbol: string;
   timeframe: string;
   candleCount: number;
-  lastCandleTime: Date;
+  /** Последняя ЗАКРЫТАЯ (SQL FILTER closed=true);
+   * null — если по рынку/ТФ есть только открытая свеча. */
+  lastCandleTime: Date | null;
 };
 
 function fmtTime(date: Date): string {
@@ -121,7 +124,9 @@ export default async function CoinPage({
           m."exchangeSymbol" AS "exchangeSymbol",
           c.timeframe AS "timeframe",
           COUNT(*)::int AS "candleCount",
-          MAX(c."openTime") AS "lastCandleTime"
+          MAX(c."openTime") FILTER (
+            WHERE c.closed = true
+          ) AS "lastCandleTime"
         FROM "Candle" c
         JOIN "Market" m ON m.id = c."marketId"
         WHERE m."assetId" = ${asset.id}
@@ -165,17 +170,13 @@ export default async function CoinPage({
         )
       : [];
 
+  // ТОЛЬКО закрытые свечи: подпись карточки —
+  // «Последняя закрытая свеча», открытая не участвует
   const lastCandleTime =
     info && info.rows.length > 0
-      ? info.rows
-          .map((r) => r.lastCandleTime)
-          .reduce<Date | null>(
-            (acc, t) =>
-              acc === null || t.getTime() > acc.getTime()
-                ? t
-                : acc,
-            null
-          )
+      ? newestClosedCandleTime(
+          info.rows.map((r) => r.lastCandleTime)
+        )
       : null;
 
   return (

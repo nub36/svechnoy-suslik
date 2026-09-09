@@ -7,6 +7,7 @@
 
 import {
   candleFreshness,
+  newestClosedCandleTime,
   DELAYED_WITHIN_INTERVALS,
   FRESH_WITHIN_INTERVALS,
   planCommandForTimeframe,
@@ -286,6 +287,59 @@ ok(
   ok(split.lastOpenCandleOpenTime === null,
     "split: пустой open-список");
 }
+
+/* ---------- карточка coin page «Последняя закрытая свеча» (регрессия VPS a8da7db) ---------- */
+
+// Факт VPS: карточка получала MAX(openTime) без фильтра
+// closed и показывала 17:00 ОТКРЫТОЙ свечи вместо 16:00
+// закрытой. После фикса SQL отдаёт MAX FILTER (closed=true):
+// рынок A = 16:00, рынок B (только открытая) = null.
+{
+  const closed16 = new Date("2026-09-09T16:00:00Z");
+
+  const card = newestClosedCandleTime([
+    closed16,
+    null
+  ]);
+
+  ok(
+    card !== null &&
+      card.getTime() === Date.parse("2026-09-09T16:00:00Z"),
+    "coin card: CLOSED=16:00, OPEN=17:00 → карточка показывает 16:00"
+  );
+  ok(
+    card !== null &&
+      card.getTime() !== Date.parse("2026-09-09T17:00:00Z"),
+    "coin card: открытая 17:00 не может стать «закрытой»"
+  );
+}
+
+// несколько закрытых рынков + null/мусор:
+// берётся максимум по ЗАКРЫТЫМ
+{
+  const card = newestClosedCandleTime([
+    new Date("2026-09-09T12:00:00Z"),
+    null,
+    undefined,
+    new Date("2026-09-09T16:00:00Z")
+  ]);
+
+  ok(
+    card !== null &&
+      card.getTime() === Date.parse("2026-09-09T16:00:00Z"),
+    "coin card: максимум по ЗАКРЫТЫМ нескольким рынкам"
+  );
+}
+
+// нет закрытых вовсе (только открытая на рынке) → честное null
+ok(
+  newestClosedCandleTime([null, undefined]) === null,
+  "coin card: закрытых нет — null (не подменяется открытой)"
+);
+ok(
+  newestClosedCandleTime([]) === null,
+  "coin card: пустой список — null"
+);
 
 /* ---------- итог ---------- */
 

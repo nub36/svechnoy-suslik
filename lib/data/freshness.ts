@@ -143,6 +143,30 @@ export function planCommandForTimeframe(
   return `npx tsx scripts/ohlcv-worker.ts --plan --top=10 --timeframes=${timeframe} --limit=300`;
 }
 
+/**
+ * Новейшая ЗАКРЫТАЯ свеча из значений, которые уже
+ * прошли фильтр closed=true (SQL FILTER / findMany).
+ * Null/мусор пропускаются (рынок только с открытой
+ * свечой даёт NULL после FILTER).
+ *
+ * Регрессия VPS: карточка coin page «Последняя закрытая
+ * свеча» получала MAX(openTime) без фильтра closed и
+ * показывала 17:00 ОТКРЫТОЙ свечи вместо 16:00 закрытой.
+ */
+export function newestClosedCandleTime(
+  values: (
+    | Date
+    | number
+    | string
+    | null
+    | undefined
+  )[]
+): Date | null {
+  const ms = maxMs(values);
+
+  return ms === null ? null : new Date(ms);
+}
+
 /* ---------- разделение закрытых и открытых свечей ---------- */
 
 export type SplitFreshness = {

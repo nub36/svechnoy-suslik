@@ -678,3 +678,26 @@ Signal Engine (после живого прогона Runtime на VPS).
   ДО runOhlcvSync/API/записи (проверено структурно: guard
   в исходнике раньше динамического импорта sync).
 - test-ohlcv-cli 94 → 101.
+
+
+==================================================
+
+## 09.09.2026 — Fix: карточка coin page «Последняя закрытая свеча» только по закрытым свечам
+
+### Реальный VPS-баг (тот же класс, что /admin/data)
+- SQL карточки /coin/[SYMBOL] брал MAX(openTime) без
+  фильтра closed → показывал 17:00 ОТКРЫТОЙ 1h-свечи
+  под подписью «Последняя закрытая свеча» (закрытая —
+  16:00). Chart при этом работал корректно.
+- Исправление: MAX(c."openTime") FILTER (WHERE c.closed
+  = true) AS "lastCandleTime"; тип lastCandleTime —
+  Date | null (рынок только с открытой свечой);
+  итог по рынкам — чистый newestClosedCandleTime
+  (lib/data/freshness), null/мусор пропускает, закрытых
+  нет — честное «—».
+- Regression: test-freshness 47 → 52 (16:00/17:00,
+  несколько рынков, null); структурное правило в
+  test-chart-sql: coin page ОБЯЗАН иметь FILTER
+  (closed=true) для lastCandleTime и ЗАПРЕЩЁН голый
+  MAX(openTime) AS "lastCandleTime" (правило проверено
+  на старом коде — ловит).
