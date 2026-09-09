@@ -30,6 +30,8 @@ lib/exchanges/kucoin.ts
 lib/exchanges/types.ts
 lib/indicators/index.ts
 lib/market.ts
+lib/ohlcv/retry.ts
+lib/ohlcv/sync.ts
 lib/prisma.ts
 lib/strategies/trend-suslik.ts
 next.config.ts
@@ -40,6 +42,7 @@ PROJECT_DEPENDENCIES.txt
 PROJECT_FILES.txt
 PROJECT_SCHEMA.prisma
 scripts/compare-exchanges.ts
+scripts/ohlcv-worker.ts
 scripts/rank-assets.ts
 scripts/seed-strategies.ts
 scripts/sync-markets.ts
