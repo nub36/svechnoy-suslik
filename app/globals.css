@@ -1574,3 +1574,31 @@ td:nth-child(2) {
 .chartHistoryError {
   color: #e8b34b;
 }
+
+/* ===== Админка: фильтры и пагинация ===== */
+
+.adminFilters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.adminFilters select,
+.adminFilters input {
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.adminPagination {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 12px;
+  font-size: 13px;
+}

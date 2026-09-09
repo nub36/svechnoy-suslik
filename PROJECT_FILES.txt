@@ -1,4 +1,8 @@
+app/admin/backtests/page.tsx
 app/admin/data/page.tsx
+app/admin/indicators/page.tsx
+app/admin/markets/page.tsx
+app/admin/notifications/page.tsx
 app/admin/page.tsx
 app/admin/strategies/[id]/page.tsx
 app/api/admin/strategies/[id]/route.ts
@@ -22,6 +26,7 @@ components/MarketTable.tsx
 components/SearchBox.tsx
 components/ThemeToggle.tsx
 components/UserMenu.tsx
+components/admin/AdminNav.tsx
 components/admin/StrategyEditor.tsx
 components/chart/CandleChart.tsx
 lib/analysis/analyze.ts
@@ -51,6 +56,7 @@ lib/snapshots/sync.ts
 lib/strategies/config.ts
 lib/strategies/runtime.ts
 lib/strategies/trend-suslik.ts
+lib/universe.ts
 prisma/schema.prisma
 scripts/compare-exchanges.ts
 scripts/ohlcv-worker.ts

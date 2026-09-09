@@ -1,4 +1,5 @@
 import Link from "next/link";
+import AdminNav from "@/components/admin/AdminNav";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
@@ -80,64 +81,7 @@ export default async function AdminPage() {
 
   return (
     <main className="adminPage">
-      <aside className="adminNavigation">
-        <div className="adminNavTitle">
-          Администрирование
-        </div>
-
-        <Link
-          href="/admin"
-          className="adminNavActive"
-        >
-          <Gauge size={17} />
-          Обзор
-        </Link>
-
-        <a href="#strategies">
-          <SlidersHorizontal size={17} />
-          Стратегии
-        </a>
-
-        <Link href="/admin">
-          <CandlestickChart size={17} />
-          Индикаторы
-        </Link>
-
-        <Link href="/admin/data">
-          <Database size={17} />
-          Источники данных
-        </Link>
-
-        <Link href="/admin">
-          <BarChart3 size={17} />
-          Рынки
-        </Link>
-
-        <Link href="/admin">
-          <FlaskConical size={17} />
-          Бэктесты
-        </Link>
-
-        <Link href="/signals">
-          <Zap size={17} />
-          Сигналы
-        </Link>
-
-        <Link href="/admin">
-          <Activity size={17} />
-          Мониторинг
-        </Link>
-
-        <Link href="/admin">
-          <BellRing size={17} />
-          Уведомления
-        </Link>
-
-        <Link href="/admin">
-          <BookOpen size={17} />
-          Журнал
-        </Link>
-      </aside>
+      <AdminNav active="overview" />
 
       <section className="adminDashboard">
         <div className="adminWelcome">

@@ -1,4 +1,4 @@
-import Link from "next/link";
+import AdminNav from "@/components/admin/AdminNav";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
@@ -292,22 +292,7 @@ export default async function AdminDataPage() {
 
   return (
     <main className="adminPage">
-      <aside className="adminNavigation">
-        <div className="adminNavTitle">
-          Администрирование
-        </div>
-
-        <Link href="/admin">
-          ← Обзор
-        </Link>
-
-        <Link
-          href="/admin/data"
-          className="adminNavActive"
-        >
-          Состояние данных
-        </Link>
-      </aside>
+      <AdminNav active="data" />
 
       <section className="adminDashboard">
         <div className="adminWelcome">
