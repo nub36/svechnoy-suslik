@@ -91,28 +91,40 @@ model Strategy {
 }
 
 model Signal {
-  id          Int       @id @default(autoincrement())
-  symbol      String
-  timeframe   String
-  direction   String
-  score       Float
-  entry       Float
-  stopLoss    Float?
-  takeProfit1 Float?
-  takeProfit2 Float?
-  takeProfit3 Float?
-  status      String    @default("ACTIVE")
-  reason      String
-  strategyId  Int
-  createdAt   DateTime  @default(now())
-  closedAt    DateTime?
+  id              Int       @id @default(autoincrement())
+  strategyId      Int
+  strategyVersion Int       @default(1)
+  symbol          String
+  marketId        Int
+  exchange        String
+  exchangeSymbol  String
+  timeframe       String
+  direction       String
+  score           Float
+  entry           Float
+  stopLoss        Float?
+  takeProfit1     Float?
+  takeProfit2     Float?
+  takeProfit3     Float?
+  atr14           Float?
+  status          String    @default("ACTIVE")
+  reason          String
+  reasonsJson     Json?
+  warningsJson    Json?
+  indicatorsJson  Json?
+  candleTime      DateTime
+  createdAt       DateTime  @default(now())
+  closedAt        DateTime?
 
   strategy Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  market   Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
 
+  @@unique([strategyId, strategyVersion, marketId, timeframe, candleTime, direction])
   @@index([symbol, timeframe])
   @@index([status])
   @@index([strategyId])
   @@index([createdAt])
+  @@index([marketId, timeframe, direction, candleTime])
 }
 
 model Asset {
@@ -159,6 +171,7 @@ model Market {
   asset     Asset               @relation(fields: [assetId], references: [id], onDelete: Cascade)
   candles   Candle[]
   snapshots IndicatorSnapshot[]
+  signals   Signal[]
 
   @@unique([exchange, exchangeSymbol, marketType])
   @@index([assetId])

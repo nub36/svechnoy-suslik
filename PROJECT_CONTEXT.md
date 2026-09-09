@@ -924,13 +924,23 @@ OHLCV Worker успешно проверен.
 
 IndicatorSnapshot Engine успешно реализован и проверен.
 
-Текущее состояние тестового контура:
+Strategy Runtime успешно реализован и проверен.
+
+Signal Engine: ядро + prod-worker реализованы,
+самотест 48/48 (без БД). Запись в PostgreSQL ещё
+НЕ выполнялась: сначала db push на VPS, затем
+dry-run и только потом --apply (см. нулевой шаг ниже).
+
+Текущее состояние тестового контура (VPS):
 
 Candle:
 14442+
 
 IndicatorSnapshot:
 48
+
+Signal:
+0 (создание ещё не запускалось)
 
 Top:
 10 тестовых активов
@@ -954,37 +964,62 @@ Snapshot рассчитывается исключительно из PostgreSQL
 
 Повторный запуск Snapshot Engine не создаёт дубликаты.
 
-Strategy Runtime успешно реализован и проверен.
+В модели Signal теперь есть всё для Engine:
+strategyVersion + marketId + exchange + exchangeSymbol +
+candleTime + atr14 + reasonsJson/warningsJson/indicatorsJson,
+UNIQUE от дублей
+(strategyId, strategyVersion, marketId, timeframe,
+candleTime, direction).
 
-СЛЕДУЮЩИЙ ЭТАП:
+ВНИМАНИЕ: в песочнице binaries.prisma.sh недоступен,
+поэтому prisma generate / db push / format / validate
+выполняются на VPS. Изменение схемы уже в Git.
 
-Signal Engine.
+НУЛЕВОЙ ШАГ НА VPS (строго по порядку):
 
-Нулевой шаг перед Signal Engine (на VPS, 5 минут):
 1. cd ~/svechnoy-suslik && git pull
-2. npx tsx scripts/ohlcv-worker.ts --top=10 --timeframes=1h --once
-3. npx tsx scripts/snapshot-worker.ts --top=10 --timeframe=1h
-4. npx tsx scripts/test-strategy-runtime.ts --top=10 --timeframe=1h
-5. npx tsx scripts/test-strategy-runtime.ts --prove-db-link --top=10 --timeframe=1h
-6. Убедиться: Signal count не изменился, config восстановлен.
+2. npx prisma format && npx prisma validate
+3. npx prisma generate
+4. Проверка перед db push:
+   psql: SELECT COUNT(*) FROM "Signal";
+   ожидается 0 (никакой код раньше сигналы не создавал).
+5. npx prisma db push
+   (расширяет Signal, данные Candle/Snapshot/Strategy
+   не трогает; --force-reset запрещён).
+6. npm run build
+7. pm2 restart svechnoy-suslik --update-env
 
-После живого подтверждения — Signal Engine:
+Затем живой прогон Runtime (нулевой шаг §26):
 
-1. Создавать Signal в PostgreSQL из подтверждённых agregacij
-   Strategy Runtime (только enabled + PUBLISHED стратегии).
-2. Каждый Signal хранит: монету, рынок, биржу, таймфрейм,
-   направление, стратегию + версию, candleTime, entry,
-   SL/TP1/TP2/TP3 (через ATR multipliers из config),
-   score, причины, значения индикаторов, время создания.
-3. Учитывать execution.closedCandleOnly и execution.cooldownCandles.
-4. Защита от дубликатов: один Signal на
-   Strategy version + Market + timeframe + candleTime + direction.
-5. Статусы ACTIVE/CLOSED и фиксация результата позже
-   (движение к TP/SL), но не в первом коммите Engine.
-6. Сначала dry-run режим (вывод без INSERT), потом боевой проход
-   Top-10 × 1H.
-7. После Engine: реальные счётчики /admin и главной,
-   график монеты, метки LONG/SHORT, история сигналов.
+8. npx tsx scripts/ohlcv-worker.ts --top=10 --timeframes=1h --once
+9. npx tsx scripts/snapshot-worker.ts --top=10 --timeframe=1h
+10. npx tsx scripts/test-strategy-runtime.ts --top=10 --timeframe=1h
+11. npx tsx scripts/test-strategy-runtime.ts --prove-db-link --top=10 --timeframe=1h
+    (убедиться: Signal count не изменился, config восстановлен)
+
+Затем Signal Engine:
+
+12. npx tsx scripts/test-signal-engine.ts --self-test
+    (ожидается 48/48)
+13. DRY-RUN:
+    npx tsx scripts/signal-worker.ts --top=10 --timeframe=1h
+    убедиться, что записей нет: Signal count остался 0.
+14. Боевой проход:
+    npx tsx scripts/signal-worker.ts --top=10 --timeframe=1h --apply
+15. Повторить шаг 13 (--apply ещё раз или dry-run):
+    дубликатов быть не должно (UNIQUE + skipDuplicates).
+
+СЛЕДУЮЩИЙ ЭТАП (после успешного боевого прохода):
+
+Подключить реальные Signal к интерфейсу:
+- реальные счётчики /admin и главной;
+- график монеты, метки LONG/SHORT;
+- история сигналов, статусы ACTIVE/CLOSED
+  (фиксация результата по движению к TP/SL — отдельный этап).
+
+Страница /signals УЖЕ переведена на реальные данные
+из PostgreSQL: пока сигналов нет, честно показывает
+«Нет данных». Демо-сигналы удалены.
 
 ==================================================
 26. STRATEGY RUNTIME — РЕАЛИЗОВАН И ПРОВЕРЕН
@@ -1080,3 +1115,134 @@ Runtime использует их позиционно
   prisma generate собирается.
 - Живой прогон Top-10 × 1H и --prove-db-link выполняются
   на VPS (см. нулевой шаг в разделе 25).
+
+==================================================
+27. SIGNAL ENGINE — ЯДРО + WORKER РЕАЛИЗОВАНЫ, DRY-RUN ПРОВЕРЕН
+==================================================
+
+Дата: 09.09.2026
+
+Контур завершён до черновиков сигналов:
+
+PostgreSQL IndicatorSnapshot
+→ Strategy Runtime (оценка каждой биржи)
+→ мультибиржевое подтверждение (minExchanges)
+→ Signal Engine (планирование сигналов)
+→ scripts/signal-worker.ts (dry-run / --apply в PostgreSQL).
+
+Запись в PostgreSQL на этом этапе НЕ выполнялась:
+сначала npx prisma db push на VPS, затем dry-run,
+и только потом --apply (см. §25, шаги 4-15).
+
+Созданные файлы:
+
+lib/signals/engine.ts
+- Чистые функции БЕЗ БД и сети
+  (аудит отсутствия @prisma/client, fetch, create/upsert
+  встроен в самотест).
+- timeframeMs: длительность свечи 5m/15m/1h/4h/1d.
+- computeRiskLevels: SL/TP1/TP2/TP3 через ATR multipliers
+  из config (LONG: SL ниже входа, TP выше; SHORT зеркально).
+  Без ATR14 уровни НЕ выдумываются — всё null.
+- isCandleClosed: execution.closedCandleOnly.
+- isCooldownActive: execution.cooldownCandles
+  (пауза в свечах после последнего сигнала той же
+  стратегии + рынка + timeframe + направления;
+  кандидат старее последнего сигнала тоже запрещён).
+- planSignals: агрегация → черновики SignalDraft:
+  - только подтверждённые LONG/SHORT;
+    NEUTRAL и KONFLIKT сигналов не дают (глобальная причина);
+  - сигнал получает только рынок, который САМ проголосовал
+    за подтверждённое направление;
+  - отказы фиксируются с причиной (фильтр, нет snapshot,
+    незакрытая свеча, cooldown, нет ATR, дубликат);
+  - в черновик входят: стратегия+версия, монета, marketId,
+    биржа, рынок, timeframe, направление, score, entry,
+    SL/TP1/TP2/TP3, atr14, reason (сводка), reasons[],
+    warnings[], indicatorsJson (все значения snapshot),
+    candleTime.
+- signalKey: marketId|candleTime ISO|direction.
+- score = сила совпадения условий, НЕ вероятность успеха.
+
+scripts/signal-worker.ts
+- Prod-worker Signal Engine.
+- По умолчанию DRY-RUN: полный цикл до черновиков,
+  записи в БД НЕТ (явно печатается).
+- Запись только при --apply: writeSignals →
+  signal.createMany(..., skipDuplicates: true).
+  Единственное место записи в файле; вызов только внутри
+  if (apply) — это проверяет самотест по исходнику.
+- Только enabled=true + status=PUBLISHED стратегии;
+  config через validateStrategyRuntime, невалидные
+  стратегии пропускаются с выводом ошибок.
+- Cooldown-карта: signal.groupBy(marketId, _max candleTime)
+  по стратегии+версии+timeframe+направлению.
+- Существующие ключи из БД → планSignals отсекает дубли
+  ещё до записи; в БД дубль невозможен и по UNIQUE.
+
+scripts/test-signal-engine.ts
+- Самотест БЕЗ БД и сети: 48/48.
+- Покрывают: длительности таймфреймов, уровни риска
+  LONG/SHORT и их порядок, отказ при ATR null/0,
+  границы закрытия свечи, границы cooldown (включая
+  ровно N свечей и кандидата старее последнего сигнала),
+  NEUTRAL → нет сигналов, KONFLIKT → нет сигналов,
+  только голосовавшие рынки, passthrough отказов фильтров,
+  целостность черновика, closedCandleOnly вкл/выкл,
+  cooldown в планировании, dedup, SHORT-поток,
+  неизвестный таймфрейм, отсутствие snapshot,
+  аудиты чистоты engine.ts и worker'а.
+
+Изменённые файлы:
+
+prisma/schema.prisma
+- Модель Signal расширена (старые поля сохранены):
+  strategyVersion Int @default(1), marketId Int (FK Market,
+  onDelete Cascade), exchange, exchangeSymbol, atr14 Float?,
+  candleTime DateTime, reasonsJson Json?, warningsJson Json?,
+  indicatorsJson Json?.
+- UNIQUE(strategyId, strategyVersion, marketId, timeframe,
+  candleTime, direction) — защита от дублей по правилу
+  «один Signal на Strategy version + Market + timeframe +
+  candleTime + direction».
+- @@index([marketId, timeframe, direction, candleTime])
+  под cooldown-запросы.
+- Market: добавлена обратная связь signals Signal[].
+- generate/db push/format/validate — на VPS (песочница без
+  доступа к binaries.prisma.sh, ограничение известное).
+  Перед db push: SELECT COUNT(*) FROM "Signal" — ожидается 0.
+
+app/signals/page.tsx
+- УДАЛЕНЫ выдуманные демо-сигналы (нарушение правила
+  честных торговых данных).
+- Страница читает реальные ACTIVE сигналы из PostgreSQL
+  (последние 50), показывает биржу, направление,
+  стратегию+версию, ТФ, силу, вход, SL, TP1, время свечи.
+- Нет сигналов → «Нет данных. Signal Engine ещё не
+  создал сигналов»; БД недоступна → «Нет данных:
+  база временно недоступна».
+- Добавлена честная пометка: сила — степень совпадения
+  условий, а не вероятность успешной сделки.
+
+Проверка в песочнице:
+- npx tsx scripts/test-signal-engine.ts --self-test → 48/48.
+- npx tsc --noEmit → 16 ошибок, ВСЕ старые и задокументированные
+  (14 implicit-any в app/admin и rank-assets + 2 InputJsonValue
+  в test-strategy-runtime) — следствие отсутствующего
+  prisma generate; НОВЫХ ошибок 0.
+- npm run build → падает на той же первой старой ошибке
+  (app/admin, implicit any) — известное ограничение песочницы;
+  компиляция при этом успешна, на VPS после prisma generate
+  собирается (см. §25, шаги 3 и 6).
+- Живой dry-run, боевой проход и проверка дубликатов — на VPS.
+
+Известные ограничения:
+- В БД сигналы ещё не создавались ни разу — боевой проход
+  впереди (§25).
+- Cooldown опирается на историю Signal в PostgreSQL:
+  ручное удаление сигналов «забывает» cooldown.
+- Статусы ACTIVE/CLOSED и фиксация результата (движение
+  к TP/SL) — следующий отдельный этап, в Engine пока
+  только ACTIVE по умолчанию.
+- Score стратегии — сила совпадения условий, а не
+  вероятность успешной сделки (пометка выведена в UI).

@@ -274,3 +274,118 @@ Signal Engine и мультибиржевое подтверждение.
 ### Следующий этап
 
 Signal Engine (после живого прогона Runtime на VPS).
+
+==================================================
+
+## 09.09.2026 — Signal Engine (ядро + worker, dry-run)
+
+### Сделано
+
+- Создан lib/signals/engine.ts — чистое ядро без БД и сети:
+  - computeRiskLevels: SL/TP1/TP2/TP3 через ATR
+    multipliers из config (LONG/SHORT зеркально);
+    без ATR14 уровни не выдумываются (null);
+  - isCandleClosed: execution.closedCandleOnly;
+  - isCooldownActive: execution.cooldownCandles;
+  - planSignals: подтверждённая агрегация → черновики
+    сигналов; NEUTRAL и KONFLIKT сигналов не дают;
+    сигнал получает только рынок, голосовавший за
+    подтверждённое направление; каждый отказ — с причиной;
+  - signalKey: marketId | candleTime | direction.
+- Создан scripts/signal-worker.ts — prod-worker:
+  - по умолчанию DRY-RUN (записей в БД нет);
+  - запись только при --apply: createMany +
+    skipDuplicates, единственное место записи,
+    вызов только внутри if (apply) — проверяется
+    самотестом по исходнику;
+  - только enabled=true + status=PUBLISHED,
+    config через validateStrategyRuntime;
+  - cooldown и существующие ключи читаются из PostgreSQL.
+- Создан scripts/test-signal-engine.ts — самотест
+  48 проверок без БД и сети.
+- prisma/schema.prisma: модель Signal расширена
+  (strategyVersion, marketId FK, exchange, exchangeSymbol,
+  atr14, candleTime, reasonsJson, warningsJson,
+  indicatorsJson), UNIQUE от дублей
+  (strategyId, strategyVersion, marketId, timeframe,
+  candleTime, direction), индекс под cooldown,
+  у Market обратная связь signals. Старые поля сохранены.
+- app/signals/page.tsx: УДАЛЕНЫ выдуманные демо-сигналы;
+  страница читает реальные ACTIVE сигналы из PostgreSQL,
+  без данных показывает честное «Нет данных»;
+  добавлена пометка, что сила — степень совпадения
+  условий, а не вероятность успеха.
+- Обновлены PROJECT_CONTEXT.md (§25 переписан, добавлен §27),
+  PROJECT_FILES.txt, PROJECT_SCHEMA.prisma.
+
+### Изменённые/созданные файлы
+
+- Созданы: lib/signals/engine.ts,
+  scripts/signal-worker.ts, scripts/test-signal-engine.ts.
+- Изменены: prisma/schema.prisma, app/signals/page.tsx,
+  PROJECT_CONTEXT.md, PROJECT_FILES.txt,
+  PROJECT_SCHEMA.prisma, CHANGELOG.md.
+- package.json / зависимости НЕ менялись.
+
+### База данных
+
+- Схема: расширение модели Signal (см. выше); данные
+  Candle/IndicatorSnapshot/Strategy/User не затрагиваются.
+- npx prisma format / validate / generate / db push
+  в песочнице НЕ выполнялись: binaries.prisma.sh
+  недоступен (то же ограничение, что на этапе Runtime).
+  Выполняются на VPS: формат/валидация → generate →
+  проверка SELECT COUNT(*) FROM "Signal" (ожидается 0)
+  → db push (без force-reset).
+- Запись сигналов пока нигде не выполнялась: Signal = 0.
+
+### Проверка
+
+- Самотест ядра: npx tsx scripts/test-signal-engine.ts
+  --self-test → 48/48:
+  уровни риска и их порядок, ATR null/0, границы закрытия
+  свечи, границы cooldown, NEUTRAL/конфликт без сигналов,
+  только голосовавшие рынки, passthrough фильтров,
+  целостность черновика, closedCandleOnly вкл/выкл,
+  cooldown в планировании, dedup, SHORT-поток,
+  неизвестный ТФ, нет snapshot, аудиты чистоты
+  engine (нет Prisma/fetch/create) и worker
+  (единственный createMany внутри if (apply)).
+- npx tsc --noEmit: 16 ошибок — все старые и
+  задокументированные (14 implicit-any + 2 InputJsonValue,
+  следствие отсутствующего prisma generate в песочнице);
+  новых ошибок 0.
+- npm run build: падает на той же первой старой ошибке
+  app/admin (implicit any) — известное ограничение
+  песочницы; компиляция при этом успешна, на VPS после
+  prisma generate собирается.
+- Живой dry-run и боевой проход Top-10 × 1H — на VPS
+  (§25, шаги 12–15).
+
+### Результат
+
+- Этап завершён на уровне ядра и dry-run-контура:
+  48/48 самотестов, 0 новых ошибок tsc,
+  схема расширена и скопирована в PROJECT_SCHEMA.prisma.
+- Боевой записи сигналов ещё нет — это осознанный
+  следующий шаг на VPS.
+
+### Известные ограничения
+
+- prisma generate/db push/format/validate в песочнице
+  недоступны (нет доступа к binaries.prisma.sh).
+- Cooldown опирается на историю Signal в БД: ручное
+  удаление сигналов сбрасывает cooldown.
+- Статусы ACTIVE/CLOSED и фиксация результата по TP/SL —
+  следующий отдельный этап; пока все сигналы ACTIVE.
+- Score — сила совпадения условий, НЕ вероятность успеха.
+
+### Следующий этап
+
+1. Нулевой шаг на VPS (§25): db push расширения Signal,
+   build, pm2 restart, живой прогон Runtime.
+2. Signal Engine на VPS: dry-run → --apply Top-10 × 1H →
+   проверка отсутствия дубликатов.
+3. После боевого прохода: реальные счётчики /admin и
+   главной, метки LONG/SHORT, график монеты, история
+   сигналов; затем статусы ACTIVE/CLOSED.
