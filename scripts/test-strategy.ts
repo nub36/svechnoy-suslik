@@ -1,6 +1,23 @@
+/**
+ * Zhivoj test strategii na svezhih svechah birzh.
+ *
+ * V otlichie ot test-strategy-runtime (kotoryj chitaet
+ * IndicatorSnapshot iz BD), etot skript beret svechi
+ * napryamuyu s 5 birzh i schitaet analiz na letu.
+ *
+ * Konfiguraciya VSEGDA iz PostgreSQL Strategy.config
+ * (enabled + PUBLISHED), posle strogoj validacii.
+ */
+
+import { PrismaClient } from "@prisma/client";
 import { exchanges } from "../lib/exchanges";
 import { analyzeCandles } from "../lib/analysis/analyze";
+import {
+  validateStrategyRuntime
+} from "../lib/strategies/config";
 import { runTrendSuslik } from "../lib/strategies/trend-suslik";
+
+const prisma = new PrismaClient();
 
 const symbols: Record<string, string> = {
   BINANCE: "BTCUSDT",
@@ -11,9 +28,53 @@ const symbols: Record<string, string> = {
 };
 
 async function main() {
+  const strategy =
+    await prisma.strategy.findFirst({
+      where: {
+        slug: "trend-suslik",
+        enabled: true,
+        status: "PUBLISHED"
+      },
+      orderBy: { version: "desc" }
+    });
+
+  if (!strategy) {
+    throw new Error(
+      "Strategiya trend-suslik (enabled+PUBLISHED) " +
+        "ne najdena v PostgreSQL"
+    );
+  }
+
+  const validation = validateStrategyRuntime({
+    config: strategy.config,
+    timeframes: strategy.timeframes,
+    minExchanges: strategy.minExchanges
+  });
+
+  if (!validation.ok) {
+    console.error(
+      "❌ Strategy.config nevaliden:"
+    );
+
+    for (const e of validation.errors) {
+      console.error(`   - ${e}`);
+    }
+
+    throw new Error(
+      "validaciya Strategy.config ne proshla"
+    );
+  }
+
+  const { config, minExchanges } = validation;
+
   console.log("");
   console.log(
     "🐿️ Трендовый Суслик • BTC/USDT • 1H"
+  );
+  console.log(
+    `config: ${strategy.slug} v${strategy.version}, ` +
+      `minScore=${config.minimumSignalScore}, ` +
+      `minExchanges=${minExchanges}`
   );
   console.log("");
 
@@ -41,26 +102,26 @@ async function main() {
         );
       }
 
-      const strategy =
-        runTrendSuslik(analysis);
+      const strategyResult =
+        runTrendSuslik(analysis, config);
 
       results.push({
         exchange: exchange.name,
-        direction: strategy.direction,
-        score: strategy.score
+        direction: strategyResult.direction,
+        score: strategyResult.score
       });
 
       console.log(
         `${exchange.name.padEnd(8)} ` +
-        `${strategy.direction.padEnd(7)} ` +
-        `сила=${String(strategy.score).padEnd(3)} ` +
-        `LONG=${String(strategy.longScore).padEnd(3)} ` +
-        `SHORT=${String(strategy.shortScore).padEnd(3)} ` +
+        `${strategyResult.direction.padEnd(7)} ` +
+        `сила=${String(strategyResult.score).padEnd(3)} ` +
+        `LONG=${String(strategyResult.longScore).padEnd(3)} ` +
+        `SHORT=${String(strategyResult.shortScore).padEnd(3)} ` +
         `RSI=${analysis.rsi14?.toFixed(2)} ` +
         `объём=${analysis.volumeRatio?.toFixed(2)}x`
       );
 
-      for (const reason of strategy.reasons) {
+      for (const reason of strategyResult.reasons) {
         const state =
           reason.long
             ? "LONG ✓"
@@ -74,6 +135,10 @@ async function main() {
           `[${reason.weight}] ` +
           `${reason.value ?? ""}`
         );
+      }
+
+      for (const w of strategyResult.warnings) {
+        console.log(`    ⚠ ${w}`);
       }
 
       console.log("");
@@ -108,11 +173,11 @@ async function main() {
     `NEUTRAL ${neutral}/5`
   );
 
-  if (long >= 3) {
+  if (long >= minExchanges) {
     console.log(
       "ИТОГ: LONG подтверждён биржами"
     );
-  } else if (short >= 3) {
+  } else if (short >= minExchanges) {
     console.log(
       "ИТОГ: SHORT подтверждён биржами"
     );
@@ -125,4 +190,11 @@ async function main() {
   console.log("----------------------------");
 }
 
-main().catch(console.error);
+main()
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });
