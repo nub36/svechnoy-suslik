@@ -7,9 +7,10 @@ import {
 } from "../lib/ohlcv/cli";
 import {
   buildConfirmCommand,
-  formatPlanReport,
   collectPlanStats,
-  evaluateRunScale
+  evaluateRunScale,
+  formatPlanReport,
+  preflightTitle
 } from "../lib/ohlcv/plan";
 
 /**
@@ -172,6 +173,14 @@ async function main() {
     const stats = await collectPlanStats(
       prisma,
       options
+    );
+
+    // семантика заголовка: «Режим PLAN» — только при
+    // явном --plan; обычный запуск — «Предварительная
+    // оценка запуска» (регрессия UX: PLAN-баннер писался
+    // и обычному запуску, заблокированному guard-ом)
+    console.log(
+      preflightTitle(invocation.kind === "plan")
     );
 
     for (const line of formatPlanReport(options, stats)) {

@@ -10,6 +10,7 @@ import {
   DELAYED_WITHIN_INTERVALS,
   FRESH_WITHIN_INTERVALS,
   planCommandForTimeframe,
+  splitClosedOpenFreshness,
   TIMEFRAME_MINUTES
 } from "../lib/data/freshness";
 
@@ -173,6 +174,118 @@ ok(
     "npx tsx scripts/ohlcv-worker.ts --plan --top=10 --timeframes=5m --limit=300",
   "команда plan для отсутствующего ТФ"
 );
+
+/* ---------- разделение closed/open (регрессия VPS) ---------- */
+
+// Факт VPS: последняя ЗАКРЫТАЯ 1h свеча = 16:00 UTC,
+// текущая ОТКРЫТАЯ = 17:00 UTC; freshness обязан
+// считаться от 16:00, open — только отдельной строкой.
+{
+  const now = new Date("2026-09-09T17:10:00Z");
+  const closed16 = Date.parse("2026-09-09T16:00:00Z");
+  const open17 = Date.parse("2026-09-09T17:00:00Z");
+
+  const split = splitClosedOpenFreshness(
+    "1h",
+    [closed16],
+    [open17],
+    now
+  );
+
+  ok(split.lastClosedOpenTime === closed16,
+    "split: freshness timestamp = 16:00 (закрытая)");
+  ok(split.lastOpenCandleOpenTime === open17,
+    "split: open 17:00 хранится отдельно");
+  ok(split.freshness.ageMinutes === 70,
+    "split: возраст считается от ЗАКРЫТОЙ (70 минут)");
+  ok(split.freshness.status === "fresh",
+    "split: закрытые данные актуальны (70м ≤ 2D)");
+  // контрольный факт: если бы open влез в freshness,
+  // возраст был бы 10 минут — «свежее», чем правда
+  ok(split.freshness.ageMinutes !== 10,
+    "split: открытая свеча НЕ омолаживает freshness");
+}
+
+// только closed (open отсутствует)
+{
+  const now = new Date("2026-09-09T17:10:00Z");
+  const split = splitClosedOpenFreshness(
+    "1h",
+    [Date.parse("2026-09-09T16:00:00Z")],
+    [],
+    now
+  );
+
+  ok(split.lastClosedOpenTime === Date.parse("2026-09-09T16:00:00Z"),
+    "split: только closed — freshness от неё");
+  ok(split.lastOpenCandleOpenTime === null,
+    "split: открытой свечи нет — честный null");
+}
+
+// закрытые + более новая открытая; несколько значений
+{
+  const now = new Date("2026-09-09T17:10:00Z");
+  const split = splitClosedOpenFreshness(
+    "1h",
+    [
+      Date.parse("2026-09-09T12:00:00Z"),
+      Date.parse("2026-09-09T16:00:00Z")
+    ],
+    [
+      Date.parse("2026-09-09T15:00:00Z"),
+      Date.parse("2026-09-09T17:00:00Z")
+    ],
+    now
+  );
+
+  ok(split.lastClosedOpenTime === Date.parse("2026-09-09T16:00:00Z"),
+    "split: максимум по ЗАКРЫТЫМ");
+  ok(split.lastOpenCandleOpenTime === Date.parse("2026-09-09T17:00:00Z"),
+    "split: максимум по открытым отдельно");
+}
+
+// закрытых нет вовсе, но открытая есть:
+// freshness закрытых данных — честное НЕТ ДАННЫХ
+{
+  const now = new Date("2026-09-09T17:10:00Z");
+  const split = splitClosedOpenFreshness(
+    "1h",
+    [],
+    [Date.parse("2026-09-09T17:00:00Z")],
+    now
+  );
+
+  ok(split.freshness.status === "missing",
+    "split: закрытых нет — НЕТ ДАННЫХ, open не спасает");
+  ok(split.lastOpenCandleOpenTime !== null,
+    "split: открытая показывается отдельно");
+}
+
+// свечей нет вообще
+{
+  const split = splitClosedOpenFreshness("1h", [], []);
+
+  ok(split.freshness.status === "missing",
+    "split: нет свечей — НЕТ ДАННЫХ");
+  ok(split.lastClosedOpenTime === null &&
+    split.lastOpenCandleOpenTime === null,
+    "split: оба timestamp null");
+}
+
+// мусор/null в списках переносится
+{
+  const split = splitClosedOpenFreshness(
+    "1h",
+    [null, "мусор", Date.parse("2026-09-09T16:00:00Z")],
+    [undefined],
+    new Date("2026-09-09T17:10:00Z")
+  );
+
+  ok(split.lastClosedOpenTime === Date.parse("2026-09-09T16:00:00Z"),
+    "split: null/мусор игнорируются");
+  ok(split.lastOpenCandleOpenTime === null,
+    "split: пустой open-список");
+}
 
 /* ---------- итог ---------- */
 

@@ -142,3 +142,91 @@ export function planCommandForTimeframe(
 ): string {
   return `npx tsx scripts/ohlcv-worker.ts --plan --top=10 --timeframes=${timeframe} --limit=300`;
 }
+
+/* ---------- разделение закрытых и открытых свечей ---------- */
+
+export type SplitFreshness = {
+  /** Свежесть ЗАКРЫТЫХ данных (open-свечи не влияют). */
+  freshness: Freshness;
+  /** openTime последней ЗАКРЫТОЙ свечи, мс (или null). */
+  lastClosedOpenTime: number | null;
+  /** openTime текущей ОТКРЫТОЙ свечи, мс (или null) —
+   * показывается отдельно, freshness не касается. */
+  lastOpenCandleOpenTime: number | null;
+};
+
+function toMsOrNull(
+  value:
+    | Date
+    | number
+    | string
+    | null
+    | undefined
+): number | null {
+  return toMs(value);
+}
+
+function maxMs(
+  values: (
+    | Date
+    | number
+    | string
+    | null
+    | undefined
+  )[]
+): number | null {
+  let max: number | null = null;
+
+  for (const value of values) {
+    const ms = toMsOrNull(value);
+
+    if (ms !== null && (max === null || ms > max)) {
+      max = ms;
+    }
+  }
+
+  return max;
+}
+
+/**
+ * Свежесть считается ТОЛЬКО по последней ЗАКРЫТОЙ свече
+ * (регрессия VPS: MAX(openTime) без фильтра closed давал
+ * 17:00 открытой свечи вместо 16:00 закрытой и делал
+ * закрытые данные «свежее», чем они есть).
+ *
+ * Открытая свеча (незакрытый интервал) НЕ участвует
+ * в freshness вообще: она не доказывает наличие
+ * закрытых данных. Её время возвращается отдельно
+ * для показа «Текущая открытая свеча».
+ */
+export function splitClosedOpenFreshness(
+  timeframe: string,
+  closedOpenTimes: (
+    | Date
+    | number
+    | string
+    | null
+    | undefined
+  )[],
+  openCandleOpenTimes: (
+    | Date
+    | number
+    | string
+    | null
+    | undefined
+  )[],
+  now: Date = new Date()
+): SplitFreshness {
+  const lastClosed = maxMs(closedOpenTimes);
+  const lastOpen = maxMs(openCandleOpenTimes);
+
+  return {
+    freshness: candleFreshness(
+      timeframe,
+      lastClosed,
+      now
+    ),
+    lastClosedOpenTime: lastClosed,
+    lastOpenCandleOpenTime: lastOpen
+  };
+}

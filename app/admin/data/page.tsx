@@ -6,8 +6,8 @@ import {
   ALLOWED_TIMEFRAMES
 } from "@/lib/ohlcv/cli";
 import {
-  candleFreshness,
-  planCommandForTimeframe
+  planCommandForTimeframe,
+  splitClosedOpenFreshness
 } from "@/lib/data/freshness";
 
 export const dynamic = "force-dynamic";
@@ -79,7 +79,11 @@ type CandleTfRow = {
   open: number;
   markets: number;
   firstCandle: Date | null;
-  lastCandle: Date | null;
+  /** Последняя ЗАКРЫТАЯ свеча — только она задаёт freshness. */
+  lastClosedCandle: Date | null;
+  /** Текущая ОТКРЫТАЯ свеча — показывается отдельно,
+   * на freshness закрытых данных не влияет. */
+  lastOpenCandle: Date | null;
 };
 
 type SnapshotTfRow = {
@@ -146,7 +150,12 @@ async function loadHealthData() {
         COUNT(*) FILTER (WHERE c.closed = false)::int AS "open",
         COUNT(DISTINCT c."marketId")::int AS "markets",
         MIN(c."openTime") AS "firstCandle",
-        MAX(c."openTime") AS "lastCandle"
+        MAX(c."openTime") FILTER (
+          WHERE c.closed = true
+        ) AS "lastClosedCandle",
+        MAX(c."openTime") FILTER (
+          WHERE c.closed = false
+        ) AS "lastOpenCandle"
       FROM "Candle" c
       GROUP BY c.timeframe
     ` as unknown as CandleTfRow[],
@@ -422,8 +431,9 @@ export default async function AdminDataPage() {
                 <th>Открытых</th>
                 <th>Рынков со свечами</th>
                 <th>Первая свеча</th>
-                <th>Последняя свеча</th>
-                <th>Свежесть</th>
+                <th>Последняя закрытая</th>
+                <th>Текущая открытая</th>
+                <th>Свежесть (по закрытой)</th>
               </tr>
             </thead>
 
@@ -439,12 +449,18 @@ export default async function AdminDataPage() {
               )}
 
               {data.candleRows.map((row) => {
-                const freshness =
-                  candleFreshness(
+                // ТОЛЬКО закрытые свечи задают freshness;
+                // открытая — отдельно, не омолаживает данные
+                const split =
+                  splitClosedOpenFreshness(
                     row.timeframe,
-                    row.lastCandle,
+                    [row.lastClosedCandle],
+                    [row.lastOpenCandle],
                     data.now
                   );
+
+                const freshness =
+                  split.freshness;
 
                 return (
                   <tr
@@ -474,7 +490,12 @@ export default async function AdminDataPage() {
                     </td>
                     <td>
                       {fmtUtc(
-                        row.lastCandle
+                        row.lastClosedCandle
+                      )}
+                    </td>
+                    <td>
+                      {fmtUtc(
+                        row.lastOpenCandle
                       )}
                     </td>
                     <td>
@@ -517,11 +538,12 @@ export default async function AdminDataPage() {
         </div>
 
         <p className="muted healthNote">
-          Свежесть рассчитывается относительно длительности
-          таймфрейма: АКТУАЛЬНО — последняя закрытая свеча не
-          старше 2 интервалов, ЗАДЕРЖКА — не старше 6,
-          иначе УСТАРЕЛО. 1-дневная свеча возрастом даже
-          несколько часов считается актуальной.
+          Свежесть рассчитывается ТОЛЬКО по последней
+          закрытой свече относительно длительности
+          таймфрейма: АКТУАЛЬНО — не старше 2 интервалов,
+          ЗАДЕРЖКА — не старше 6, иначе УСТАРЕЛО.
+          Текущая открытая свеча показывается отдельно и
+          freshness закрытых данных не меняет.
         </p>
 
         {/* ---------- SNAPSHOT ---------- */}

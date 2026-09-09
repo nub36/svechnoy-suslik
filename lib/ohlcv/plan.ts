@@ -114,7 +114,23 @@ export function evaluateRunScale(
   };
 }
 
-/** Строки отчёта плана (чистая функция). */
+/**
+ * Заголовок предварительной оценки — семантика вывода:
+ * ТОЛЬКО явный --plan имеет право писать «Режим PLAN»
+ * (read-only до конца процесса). Обычный запуск без
+ * --plan перед предохранителем пишет честное
+ * «Предварительная оценка запуска» — БД при оценке
+ * не меняется, но дальше будет обращение к API бирж.
+ */
+export function preflightTitle(
+  isPlan: boolean
+): string {
+  return isPlan
+    ? "Режим PLAN: PostgreSQL не изменяется, API бирж не вызываются"
+    : "Предварительная оценка запуска (read-only по PostgreSQL; далее, при запуске — обращение к API бирж)";
+}
+
+/** Строки отчёта оценки (чистая функция, без заголовка). */
 export function formatPlanReport(
   options: Pick<
     OhlcvWorkerOptions,
@@ -124,7 +140,6 @@ export function formatPlanReport(
 ): string[] {
   const lines: string[] = [];
 
-  lines.push("Режим PLAN: PostgreSQL не изменяется, API бирж не вызываются");
   lines.push(`Top-N: ${options.top}`);
   lines.push(`Таймфреймы: ${options.timeframes.join(", ")}`);
   lines.push(`Свечей истории за запрос (limit): ${options.limit}`);

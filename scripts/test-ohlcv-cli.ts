@@ -22,8 +22,10 @@ import {
   buildConfirmCommand,
   evaluateRunScale,
   formatPlanReport,
-  LARGE_RUN_TASK_THRESHOLD
+  LARGE_RUN_TASK_THRESHOLD,
+  preflightTitle
 } from "../lib/ohlcv/plan";
+import { readFileSync } from "node:fs";
 
 let passed = 0;
 let total = 0;
@@ -460,17 +462,30 @@ const planLines = formatPlanReport(
   }
 );
 
+// семантика заголовка: «Режим PLAN» — ТОЛЬКО при явном --plan
 ok(
-  planLines.some((l) => l.includes("Режим PLAN")),
-  "plan report: баннер «Режим PLAN»"
+  preflightTitle(true).includes("Режим PLAN") &&
+    preflightTitle(true).includes("PostgreSQL не изменяется") &&
+    preflightTitle(true).includes("API бирж не вызываются"),
+  "preflight title(--plan): Режим PLAN + read-only обещания"
 );
 ok(
-  planLines.some((l) => l.includes("PostgreSQL не изменяется")),
-  "plan report: честное обещание read-only"
+  preflightTitle(false).startsWith(
+    "Предварительная оценка запуска"
+  ),
+  "preflight title(run): «Предварительная оценка запуска»"
 );
 ok(
-  planLines.some((l) => l.includes("API бирж не вызываются")),
-  "plan report: API бирж не вызываются"
+  !preflightTitle(false).includes("Режим PLAN"),
+  "preflight title(run): НЕ называет себя PLAN-режимом"
+);
+ok(
+  !planLines.some((l) => l.includes("Режим PLAN")),
+  "plan report: заголовок отделён от тела отчёта"
+);
+ok(
+  planLines.some((l) => l.includes("Top-N: 10")),
+  "plan report: тело отчёта сохранено"
 );
 ok(
   planLines.some((l) => l.includes("240")),
@@ -520,6 +535,49 @@ ok(
   cmd.includes("--confirm-large-run") && cmd.includes("--top=50") &&
     cmd.includes("--once"),
   "confirm command: содержит флаг подтверждения и исходные опции"
+);
+
+/* ---------- структурные гарантии воркера (без его запуска) ---------- */
+
+// Регрессия UX/безопасности: при блокировке большим
+// запуском worker НЕ должен успеть ни импортировать
+// sync/биржи, ни начать запись. Проверяем порядок в
+// исходнике: предохранитель стоит РАНЬШЕ динамического
+// импорта lib/ohlcv/sync, заголовок — через preflightTitle.
+const workerSource = readFileSync(
+  "scripts/ohlcv-worker.ts",
+  "utf8"
+);
+
+const guardIdx = workerSource.indexOf(
+  "evaluateRunScale("
+);
+const syncImportIdx = workerSource.indexOf(
+  '"../lib/ohlcv/sync"'
+);
+const titleIdx = workerSource.indexOf(
+  "preflightTitle("
+);
+
+ok(
+  guardIdx >= 0,
+  "worker source: предохранитель присутствует"
+);
+ok(
+  syncImportIdx >= 0,
+  "worker source: sync импортируется динамически"
+);
+ok(
+  guardIdx < syncImportIdx,
+  "worker source: guard ДО импорта sync/бирж (exit=1 раньше API)"
+);
+ok(
+  titleIdx >= 0,
+  "worker source: заголовок через preflightTitle"
+);
+ok(
+  !workerSource.includes('console.log("Режим PLAN'),
+  "worker source: PLAN-баннер только через preflightTitle"
 );
 
 /* ---------- итог ---------- */
