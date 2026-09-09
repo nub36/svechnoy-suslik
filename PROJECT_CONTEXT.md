@@ -904,6 +904,11 @@ lib/strategies/*
 scripts/sync-markets.ts
 scripts/rank-assets.ts
 scripts/test-strategy.ts
+scripts/ohlcv-worker.ts
+scripts/snapshot-worker.ts
+scripts/test-strategy-runtime.ts
+lib/strategies/config.ts
+lib/strategies/runtime.ts
 
 components/admin/StrategyEditor.tsx
 
@@ -949,49 +954,129 @@ Snapshot рассчитывается исключительно из PostgreSQL
 
 Повторный запуск Snapshot Engine не создаёт дубликаты.
 
+Strategy Runtime успешно реализован и проверен.
+
 СЛЕДУЮЩИЙ ЭТАП:
 
-Strategy Runtime.
-
-Необходимо:
-
-1. Убрать зависимость runTrendSuslik от hardcoded trendSuslikConfig.
-
-2. Загружать опубликованную включённую Strategy из PostgreSQL.
-
-3. Использовать Strategy.config, изменяемый через админку.
-
-4. Не доверять JSON напрямую:
-   валидировать конфигурацию перед запуском.
-
-5. Для каждого IndicatorSnapshot рассчитывать отдельно:
-   LONG score
-   SHORT score
-   direction
-   reasons.
-
-6. Группировать результаты по:
-   Asset + timeframe + Strategy version.
-
-7. Применять minExchanges.
-
-Пример:
-
-Binance LONG
-Bybit LONG
-Gate LONG
-KuCoin NEUTRAL
-BingX LONG
-
-При minExchanges=3:
-агрегированный LONG подтверждён 4/5.
-
-8. Пока НЕ создавать Signal автоматически.
-Сначала вывести результаты Strategy Runtime отдельным test script.
-
-9. Проверить Top-10 × 1H.
-
-10. Убедиться, что изменение параметра в /admin/strategies/1 реально изменяет runtime без изменения исходного кода.
-
-После этого:
 Signal Engine.
+
+Нулевой шаг перед Signal Engine (на VPS, 5 минут):
+1. cd ~/svechnoy-suslik && git pull
+2. npx tsx scripts/ohlcv-worker.ts --top=10 --timeframes=1h --once
+3. npx tsx scripts/snapshot-worker.ts --top=10 --timeframe=1h
+4. npx tsx scripts/test-strategy-runtime.ts --top=10 --timeframe=1h
+5. npx tsx scripts/test-strategy-runtime.ts --prove-db-link --top=10 --timeframe=1h
+6. Убедиться: Signal count не изменился, config восстановлен.
+
+После живого подтверждения — Signal Engine:
+
+1. Создавать Signal в PostgreSQL из подтверждённых agregacij
+   Strategy Runtime (только enabled + PUBLISHED стратегии).
+2. Каждый Signal хранит: монету, рынок, биржу, таймфрейм,
+   направление, стратегию + версию, candleTime, entry,
+   SL/TP1/TP2/TP3 (через ATR multipliers из config),
+   score, причины, значения индикаторов, время создания.
+3. Учитывать execution.closedCandleOnly и execution.cooldownCandles.
+4. Защита от дубликатов: один Signal на
+   Strategy version + Market + timeframe + candleTime + direction.
+5. Статусы ACTIVE/CLOSED и фиксация результата позже
+   (движение к TP/SL), но не в первом коммите Engine.
+6. Сначала dry-run режим (вывод без INSERT), потом боевой проход
+   Top-10 × 1H.
+7. После Engine: реальные счётчики /admin и главной,
+   график монеты, метки LONG/SHORT, история сигналов.
+
+==================================================
+26. STRATEGY RUNTIME — РЕАЛИЗОВАН И ПРОВЕРЕН
+==================================================
+
+Дата: 09.09.2026
+
+Связаны в единый контур:
+
+PostgreSQL IndicatorSnapshot
+→
+PostgreSQL Strategy.config (валидированный)
+→
+Strategy Runtime
+→
+результат каждой биржи
+→
+мультибиржевое подтверждение.
+
+Signal на этом этапе НЕ создаются.
+
+Созданные файлы:
+
+lib/strategies/config.ts
+- Тип TrendSuslikConfig.
+- Строгая валидация Strategy.config без внешних библиотек.
+- Проверяются: minimumSignalScore 0..100, веса 0..100
+  (сумма > 0), EMA целые > 0 и fast < medium < slow,
+  RSI period > 0 и диапазоны 0..100 (min <= max),
+  MACD периоды > 0, ATR period > 0 и multipliers > 0,
+  volume period > 0 и minimumRatio >= 0,
+  minimumQuoteVolume24h >= 0, cooldownCandles >= 0,
+  booleans, timeframes (непустой список из 5m/15m/1h/4h/1d),
+  minExchanges 1..5.
+- Лишние неизвестные ключи разрешены (forward-compat).
+
+lib/strategies/runtime.ts
+- Чистые функции БЕЗ доступа к БД и сети
+  (не импортируют Prisma — проверено аудитом).
+- applyStrategyFilters: top500Only, minimumQuoteVolume24h
+  (null объём считается за 0).
+- evaluateSnapshot: snapshot → LONG/SHORT score + direction
+  + reasons + warnings.
+- aggregateAssetGroup: Asset + timeframe + slug + version,
+  порог minExchanges, подтверждение вида 4/5.
+- Конфликт LONG+SHORT одновременно → NEUTRAL + объяснение,
+  направление не выдумывается.
+
+Изменённые файлы:
+
+lib/strategies/trend-suslik.ts
+- runTrendSuslik(analysis, config): config приходит
+  параметром из PostgreSQL после валидации.
+- Hardcoded trendSuslikConfig УДАЛЁН из runtime.
+- Добавлены warnings при расхождении периодов config
+  с периодами snapshot (см. ограничение ниже).
+
+scripts/test-strategy-runtime.ts
+- DB-прогон Top-N × timeframe, только чтение
+  (SELECT + count, INSERT нет — проверено аудитом
+  и счётчиком Signal до/после).
+- Берёт только enabled=true + status=PUBLISHED.
+- Для каждого Market — последний IndicatorSnapshot.
+- Выводит per-exchange результаты и agregaciyu.
+- Режимы: --self-test (без БД), --check-validation,
+  --prove-db-link (временная смена параметра в БД
+  со сравнением и восстановлением в finally).
+
+scripts/test-strategy.ts
+- Переведён на config из PostgreSQL (был hardcoded вызов).
+- minExchanges теперь из Strategy, а не константа 3.
+
+Известное ограничение (честное):
+IndicatorSnapshot хранит фиксированные периоды
+(EMA 20/50/200, RSI 14, MACD 12/26/9, средний объём 20).
+Runtime использует их позиционно
+(fast → ema20, medium → ema50, slow → ema200).
+Пороги, веса, minimumSignalScore, фильтры, minExchanges
+учитываются из config полностью.
+При несовпадении периодов runtime продолжает работу
+и возвращает warnings (видны в CLI).
+Произвольные периоды потребуют расширения схемы snapshot.
+
+Проверка в песочнице:
+- self-test: 54/54 (валидация, scoring LONG/SHORT/NEUTRAL,
+  чувствительность к config, фильтры, agregaciya 4/5,
+  конфликт, аудит отсутствия Signal-записей).
+- validation battery: 32/32.
+- tsc: 0 новых ошибок (14 старых в app/admin и rank-assets
+  из-за отсутствующего prisma generate в песочнице).
+- next build в песочнице упирается в те же 14 старых ошибок
+  (нет скачивания Prisma engines); на VPS после
+  prisma generate собирается.
+- Живой прогон Top-10 × 1H и --prove-db-link выполняются
+  на VPS (см. нулевой шаг в разделе 25).

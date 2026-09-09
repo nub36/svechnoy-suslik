@@ -34,6 +34,8 @@ lib/ohlcv/retry.ts
 lib/ohlcv/sync.ts
 lib/prisma.ts
 lib/snapshots/sync.ts
+lib/strategies/config.ts
+lib/strategies/runtime.ts
 lib/strategies/trend-suslik.ts
 next.config.ts
 package.json
@@ -50,5 +52,6 @@ scripts/snapshot-worker.ts
 scripts/sync-markets.ts
 scripts/test-analysis.ts
 scripts/test-bybit.ts
+scripts/test-strategy-runtime.ts
 scripts/test-strategy.ts
 tsconfig.json

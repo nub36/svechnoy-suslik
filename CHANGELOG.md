@@ -229,3 +229,48 @@ IndicatorSnapshot = 48.
 
 После этого:
 Signal Engine и мультибиржевое подтверждение.
+
+==================================================
+
+## 09.09.2026 — Strategy Runtime
+
+### Сделано
+
+- Создан lib/strategies/config.ts.
+- Создан lib/strategies/runtime.ts.
+- Создан scripts/test-strategy-runtime.ts.
+- runTrendSuslik переведён на config параметром из PostgreSQL.
+- Hardcoded trendSuslikConfig удалён из runtime.
+- Добавлена строгая валидация Strategy.config без внешних библиотек.
+- Runtime берёт только enabled=true + status=PUBLISHED.
+- Результат считается по последнему IndicatorSnapshot каждого Market.
+- Добавлено мультибиржевое подтверждение с minExchanges.
+- Конфликт LONG+SHORT одновременно даёт NEUTRAL с объяснением.
+- Учитываются фильтры top500Only и minimumQuoteVolume24h.
+- scripts/test-strategy.ts переведён на config из PostgreSQL.
+- Signal на этапе не создаются (read-only контур).
+
+### Проверка
+
+- Self-test без БД: 54/54.
+- Батарея валидации: 32/32.
+- Чувствительность к config доказана:
+  порог 70→30 переворачивает NEUTRAL→LONG на тех же данных,
+  смена веса RSI меняет баллы 40→20.
+- Agregaciya: 4/5 LONG, 2/3 NEUTRAL, 3/3 конфликт, 5/5 SHORT.
+- TypeScript: 0 новых ошибок.
+- Аудит: scoring-ядро без доступа к БД,
+  в скрипте нет Signal create/update/upsert/delete.
+- Живой прогон Top-10 × 1H и --prove-db-link — на VPS,
+  где есть PostgreSQL с данными.
+
+### Известные ограничения
+
+- Snapshot хранит фиксированные периоды индикаторов,
+  runtime использует их позиционно + warnings.
+- next build в песочнице без prisma generate упирается
+  в старые implicit-any ошибки; на VPS собирается.
+
+### Следующий этап
+
+Signal Engine (после живого прогона Runtime на VPS).
