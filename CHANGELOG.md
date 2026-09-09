@@ -819,3 +819,73 @@ signalSeries[j - (signalPeriod - 1)], как и реализовано.
 - MACD dead zone реализована, но старый config получает deadZoneRatio=0. Production-значение порога должно быть выбрано отдельно.
 - Prisma schema не менялась.
 - Signal Engine в production не переносился и не запускался.
+
+==================================================
+
+## 09.09.2026 — Синхронизация с production main и правки по VPS-проверке графика
+
+### Сделано
+
+- Синхронизация с origin/main (30f0463 + 4db41af):
+  production-ветка содержит production-ready Strategy
+  Runtime (идентично Arena-коммитам) и его документацию;
+  их §27 (Runtime проверен на VPS) сохранён, мои разделы
+  перенумерованы в §28-§31; их улучшение DB-теста
+  (quoteVolume24h из реального Market) принято.
+- /coin/[symbol]: ПОЛНОСТЬЮ убран Prisma Signal
+  (signal count, карточка «Активные сигналы») — страница
+  монеты больше не зависит от Signal Engine; добавлена
+  карточка «Суслик Top-500» (место актива, вне рейтинга);
+  asset.findUnique теперь выбирает id (использовался,
+  но отсутствовал в select); биржи, таймфреймы и последняя
+  закрытая свеча считаются ОДНИМ агрегированным SQL-запросом
+  (GROUP BY на стороне PostgreSQL) — вместо N+1
+  prisma.groupBy и без загрузки свечей в Node.js
+  (проблема типов groupBy на реальном клиенте также снята).
+- app/api/chart/markets: тот же единый SQL вместо
+  findMany + groupBy в цикле (N+1 → 1 запрос).
+- /signals: честный статический раздел «Signal Engine
+  ещё не развёрнут» — страница больше не обращается к
+  Prisma Signal (production-схема Signal старой структуры,
+  расширение на VPS не переносилось).
+- Таймфреймы: UI поддерживает 5m/15m/1h/4h/1d и показывает
+  только реально существующие в Candle (подтверждено на
+  VPS: сейчас в БД в основном 1H).
+- PROJECT_CONTEXT.md: §25 переписан под новое состояние
+  (production main = Runtime ready; Arena = график/UI-правки),
+  разделы 28-31.
+
+### Изменённые/созданные файлы
+
+- app/coin/[symbol]/page.tsx, app/api/chart/markets/route.ts,
+  app/signals/page.tsx, PROJECT_CONTEXT.md, CHANGELOG.md,
+  PROJECT_FILES.txt; merge origin/main
+  (scripts/test-strategy-periods.ts — их версия).
+
+### База данных
+
+- Изменений нет. Signal schema, minExchanges, Signal Engine
+  не тронуты.
+
+### Проверка
+
+- В песочнице: npx tsc --noEmit 0 ошибок; npm run build
+  exit 0; test-indicators 74/74; test-strategy-periods
+  --self-test 59/59; test-strategy-runtime --self-test
+  54/54; dev-сервер: все страницы 200 (/profile → 307
+  без сессии), /api/chart/markets честный 503, /coin/BTC
+  без карточки сигналов, /signals с честным сообщением.
+- npx prisma validate / generate в песочнице недоступны
+  (binaries.prisma.sh закрыт) — выполнить на VPS.
+- Живая проверка с PostgreSQL — на VPS.
+
+### Результат
+
+- Страница монеты и раздел сигналов полностью работают
+  без Signal Engine; запросы таймфреймов эффективные
+  (один GROUP BY в PostgreSQL).
+
+### Следующий этап
+
+- VPS-проверка этой ветки; далее — решение по переносу
+  Signal Engine (§28).

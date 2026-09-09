@@ -920,86 +920,71 @@ app/admin/strategies/[id]/page.tsx
 25. ТЕКУЩАЯ ТОЧКА ПРОДОЛЖЕНИЯ
 ==================================================
 
-Реализовано и проверено в песочнице (см. §26-§30):
+СОСТОЯНИЕ PRODUCTION (main 4db41af, 30f0463):
 
-- OHLCV Worker (VPS, живой прогон ранее).
-- IndicatorSnapshot Engine (VPS, живой прогон ранее).
-- Strategy Runtime (самотесты 54/54; живой прогон — на VPS).
-- Signal Engine: ядро + worker DRY-RUN (самотест 48/48;
-  запись в PostgreSQL по-прежнему НЕ выполнялась).
-- Свечной график рынка (§29, проверен на VPS): tsc 0, build green,
-  живой вид с реальными свечами НЕ проверен (в песочнице
-  нет PostgreSQL с Candle) — проверить на VPS.
-- UI-заглушки заменены реальной функциональностью (§30).
-- Динамические периоды + MACD dead zone (§31): самотесты
-  27/27; живой DB-режим — scripts/test-strategy-periods.ts
-  на VPS.
+- OHLCV Worker, IndicatorSnapshot Engine — работают на VPS.
+- Strategy Runtime production-ready: динамические периоды,
+  MACD dead zone, cannot-evaluate (§27); 74/74, 59/59, 54/54;
+  живой прогон Top-10 × 1H: 48 рынков, 46 рассчитано,
+  cannot-evaluate=0; Signal 0 → 0; minExchanges не менялся.
 
-Текущее состояние тестового контура (VPS, до Signal Engine):
+СОСТОЯНИЕ ARENA-ВЕТКИ (не в main):
 
-Candle: 14442+, IndicatorSnapshot: 48, Signal: 0.
-Top-10 тестовых активов, 1H, 48 рынков,
-биржи Binance/Bybit/Gate/KuCoin/BingX.
+- Свечной график — проверен на VPS (§29): работают
+  lightweight-charts, реальные Candle, выбор бирж,
+  EMA/RSI/MACD/Volume, HTTP API, /coin/BTC, build.
+- По результатам VPS-проверки исправлено (эта ветка):
+  1) /coin/[symbol] полностью БЕЗ Prisma Signal: карточка
+     «Суслик Top-500» (место), биржи, таймфреймы, последняя
+     закрытая свеча; id добавлен в asset.select;
+  2) таймфреймы считаются ОДНИМ агрегированным SQL
+     (GROUP BY в PostgreSQL) вместо N+1 prisma.groupBy —
+     эффективный вариант без загрузки свечей в Node.js;
+  3) /signals — честный статический раздел без обращения
+     к Signal (production-схема Signal старой структуры,
+     новые колонки туда не переносились).
+- UI-этап выполнен ранее (§30): фейки убраны, поиск,
+  фильтры, профиль, темы, состояния — на месте.
+- Signal Engine (§28): ядро + worker в Arena-ветке,
+  НЕ переносятся (см. §25 запреты и §28).
 
-В песочнице binaries.prisma.sh недоступен:
-npx prisma format / validate / generate падают по сети —
-выполнять на VPS. Схема prisma/schema.prisma в Git,
-изменений в этой серии этапов НЕ было.
+НУЛЕВОЙ ШАГ НА VPS ДЛЯ ЭТОЙ ВЕТКИ (только проверка):
 
-НУЛЕВОЙ ШАГ НА VPS (строго по порядку, ~15 минут):
+1. Перенести коммиты Arena-ветки после 4db41af.
+2. npm install (lightweight-charts уже в package.json).
+3. npx prisma validate && npx prisma generate
+4. npm run build && pm2 restart svechnoy-suslik --update-env
+5. Проверить в браузере /coin/BTC: карточка Top-500,
+   биржи, таймфреймы (реально существующие), последняя
+   свеча; график; тёмная/светлая тема; мобильный вид.
+6. /signals — честное «Нет данных».
+7. Self-тесты: test-indicators (74), test-strategy-periods
+   (59), test-strategy-runtime (54).
 
-1. cd ~/svechnoy-suslik && git pull
-   (после переноса Arena-ветки в main)
-2. npm install
-   (новая зависимость lightweight-charts ^5.2.1)
-3. npx prisma format && npx prisma validate
-4. npx prisma generate
-5. psql: SELECT COUNT(*) FROM "Signal"; — ожидание 0.
-6. npx prisma db push
-   (расширение Signal из этапа Signal Engine;
-   Candle/Snapshot/Strategy не трогаются;
-   --force-reset запрещён)
-7. npm run build && pm2 restart svechnoy-suslik --update-env
+ПОДДЕРЖКА ТАЙМФРЕЙМОВ:
 
-Затем проверки UI и графика в браузере:
-8. /coin/BTC — график: выбор биржи, ТФ, индикаторы,
-   zoom/прокрутка, тёмная/светлая тема, телефон.
-9. /strategies — реальные стратегии из БД.
-10. /, /signals, /profile — честные состояния.
+UI поддерживает 5m/15m/1h/4h/1d, но отображает только
+те, по которым реально есть Candle (проверено на VPS:
+сейчас в БД в основном 1H — показывается «1 час»).
+Никаких синтетических таймфреймов.
 
-Затем живой прогон Strategy Runtime:
-11. npx tsx scripts/ohlcv-worker.ts --top=10 --timeframes=1h --once
-12. npx tsx scripts/snapshot-worker.ts --top=10 --timeframe=1h
-13. npx tsx scripts/test-strategy-runtime.ts --top=10 --timeframe=1h
-14. npx tsx scripts/test-strategy-runtime.ts --prove-db-link --top=10 --timeframe=1h
-    (Signal count не меняется, config восстанавливается)
+ЗАПРЕЩЕНО до отдельной команды:
 
-Затем динамические периоды (§30):
-15. npx tsx scripts/test-strategy-periods.ts --self-test
-    (ожидание: 59/59)
-16. npx tsx scripts/test-strategy-periods.ts --top=10 --timeframe=1h
-    (только чтение; нестандартные периоды строго по свечам,
-    ринки без истории — cannot-evaluate, БЕЗ scoring по snapshot)
+- production Signal Engine; любые prisma.signal в
+  публичных страницах; запись Signal; fake сигналы;
+  перенос lib/signals и signal-worker в production;
+  автоматическое изменение minExchanges; push/merge в
+  main; ручное редактирование кода на VPS (только
+  проверка и перенос готовых commits).
 
-Затем Signal Engine (см. §28):
-17. npx tsx scripts/test-signal-engine.ts --self-test
-18. npx tsx scripts/signal-worker.ts --top=10 --timeframe=1h
-    DRY-RUN: Signal остаётся 0.
-19. npx tsx scripts/signal-worker.ts --top=10 --timeframe=1h --apply
-20. Повторить шаг 18: дубликатов быть не должно.
+СЛЕДУЮЩИЙ ЭТАП:
 
-СЛЕДУЮЩИЙ ЭТАП (после боевого прохода Signal Engine):
-
-Реальные сигналы в интерфейсе: счётчики /admin и главной,
-метки LONG/SHORT на графике монеты, история сигналов,
-затем статусы ACTIVE/CLOSED с фиксацией результата
-по движению к TP/SL.
-
-Запрещено без явной команды: production Signal Engine,
-запись Signal, изменение minExchanges автоматически,
-push/merge в main, изменения VPS.
+После VPS-проверки этой ветки — по решению владельца:
+либо перенос Signal Engine (§28: db push расширения
+Signal, dry-run, --apply), либо дальнейший UI.
 
 ==================================================
+
 26. STRATEGY RUNTIME — РЕАЛИЗОВАН И ПРОВЕРЕН
 ==================================================
 
