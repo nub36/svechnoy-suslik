@@ -736,3 +736,19 @@ Signal Engine (после живого прогона Runtime на VPS).
 - Ограничение песочницы: admin-страницы проверены на
   компиляцию (stub Prisma даёт ожидаемый 500 на
   инициализации клиента — на VPS работает).
+
+
+### A3 — Журнал (09.09.2026)
+- instrumentation.ts: перехват console.error/warn/log +
+  unhandledRejection/uncaughtException в кольцевой буфер
+  (оригинальный вывод сохранён);
+- lib/observability/journal.ts: буфер 500 записей,
+  нормализация сообщений, извлечение источника из тега
+  [src], МАСКИРОВАНИЕ записей с признаками секретов
+  (DATABASE_URL/AUTH_SECRET/password/token/cookie/
+  authorization/соединительные строки);
+- /admin/journal: фильтр уровень/источник, пагинация,
+  ADMIN-only, честные ограничения (только текущий
+  процесс web; worker'ы не видны; очистка при
+  рестарте); без schema change, без чтения файлов;
+- тесты: test-journal 23/23.

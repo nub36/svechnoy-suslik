@@ -1,6 +1,7 @@
 app/admin/backtests/page.tsx
 app/admin/data/page.tsx
 app/admin/indicators/page.tsx
+app/admin/journal/page.tsx
 app/admin/markets/page.tsx
 app/admin/notifications/page.tsx
 app/admin/page.tsx
@@ -45,6 +46,7 @@ lib/exchanges/kucoin.ts
 lib/exchanges/types.ts
 lib/indicators/index.ts
 lib/market.ts
+lib/observability/journal.ts
 lib/ohlcv/cli.ts
 lib/ohlcv/plan.ts
 lib/ohlcv/retry.ts
@@ -71,6 +73,7 @@ scripts/test-chart-params.ts
 scripts/test-chart-sql.ts
 scripts/test-freshness.ts
 scripts/test-indicators.ts
+scripts/test-journal.ts
 scripts/test-ohlcv-cli.ts
 scripts/test-snapshot-cli.ts
 scripts/test-strategy-periods.ts

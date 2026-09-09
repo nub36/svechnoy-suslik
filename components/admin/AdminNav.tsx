@@ -6,6 +6,7 @@ import {
   Database,
   FlaskConical,
   Gauge,
+  ScrollText,
   SlidersHorizontal,
   Zap
 } from "lucide-react";
@@ -71,6 +72,12 @@ const ITEMS: {
     href: "/admin/monitoring",
     label: "Мониторинг",
     icon: Activity
+  },
+  {
+    key: "journal",
+    href: "/admin/journal",
+    label: "Журнал",
+    icon: ScrollText
   }
 ];
 
