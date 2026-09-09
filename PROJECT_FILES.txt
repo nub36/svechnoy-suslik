@@ -10,6 +10,7 @@ app/login/page.tsx
 app/page.tsx
 app/signals/page.tsx
 app/strategies/page.tsx
+CHANGELOG.md
 components/admin/StrategyEditor.tsx
 components/AuthProvider.tsx
 components/Header.tsx
@@ -31,7 +32,13 @@ lib/indicators/index.ts
 lib/market.ts
 lib/prisma.ts
 lib/strategies/trend-suslik.ts
+next.config.ts
+package.json
 prisma/schema.prisma
+PROJECT_CONTEXT.md
+PROJECT_DEPENDENCIES.txt
+PROJECT_FILES.txt
+PROJECT_SCHEMA.prisma
 scripts/compare-exchanges.ts
 scripts/rank-assets.ts
 scripts/seed-strategies.ts
@@ -39,3 +46,4 @@ scripts/sync-markets.ts
 scripts/test-analysis.ts
 scripts/test-bybit.ts
 scripts/test-strategy.ts
+tsconfig.json
