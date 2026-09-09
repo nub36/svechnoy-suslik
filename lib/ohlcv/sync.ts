@@ -96,9 +96,25 @@ export type SyncStats = {
   markets: number;
   fetched: number;
   written: number;
+  /** Новых свечей (по дельте count до/после upsert). */
+  created: number;
+  /** Перезаписанных существующих свечей. */
+  updated: number;
   skippedInvalid: number;
   errors: number;
   byExchange: Record<string, { markets: number; written: number; errors: number }>;
+  byTimeframe: Record<
+    string,
+    {
+      markets: number;
+      fetched: number;
+      written: number;
+      created: number;
+      updated: number;
+      skippedInvalid: number;
+      errors: number;
+    }
+  >;
 };
 
 export async function runOhlcvSync(
@@ -136,13 +152,28 @@ export async function runOhlcvSync(
     markets: 0,
     fetched: 0,
     written: 0,
+    created: 0,
+    updated: 0,
     skippedInvalid: 0,
     errors: 0,
-    byExchange: {}
+    byExchange: {},
+    byTimeframe: {}
   };
 
   for (const name of adapterByName.keys()) {
     stats.byExchange[name] = { markets: 0, written: 0, errors: 0 };
+  }
+
+  for (const timeframe of options.timeframes) {
+    stats.byTimeframe[timeframe] = {
+      markets: 0,
+      fetched: 0,
+      written: 0,
+      created: 0,
+      updated: 0,
+      skippedInvalid: 0,
+      errors: 0
+    };
   }
 
   for (const asset of assets) {
@@ -169,6 +200,9 @@ export async function runOhlcvSync(
         stats.markets += 1;
         exchangeStats.markets += 1;
 
+        const tfStats = stats.byTimeframe[timeframe];
+        tfStats.markets += 1;
+
         try {
           const last = await prisma.candle.findFirst({
             where: { marketId: market.id, timeframe },
@@ -193,6 +227,17 @@ export async function runOhlcvSync(
             : candles;
 
           stats.fetched += incoming.length;
+          tfStats.fetched += incoming.length;
+
+          // created/updated по дельте count до/после upsert:
+          // сам upsert не сообщает, создана строка или обновлена.
+          // Запросы дешёвые (уникальный индекс market+tf+openTime).
+          const countBefore =
+            incoming.length > 0
+              ? await prisma.candle.count({
+                  where: { marketId: market.id, timeframe }
+                })
+              : null;
 
           const result = await upsertCandles(
             prisma,
@@ -201,9 +246,32 @@ export async function runOhlcvSync(
             incoming
           );
 
+          let created = 0;
+
+          if (countBefore !== null) {
+            const countAfter = await prisma.candle.count({
+              where: { marketId: market.id, timeframe }
+            });
+
+            created = Math.min(
+              Math.max(countAfter - countBefore, 0),
+              result.written
+            );
+          } else {
+            created = result.written;
+          }
+
+          const updated = result.written - created;
+
           stats.written += result.written;
+          stats.created += created;
+          stats.updated += updated;
           stats.skippedInvalid += result.skipped;
           exchangeStats.written += result.written;
+          tfStats.written += result.written;
+          tfStats.created += created;
+          tfStats.updated += updated;
+          tfStats.skippedInvalid += result.skipped;
 
           await prisma.market.update({
             where: { id: market.id },
@@ -219,11 +287,13 @@ export async function runOhlcvSync(
             `  ${market.exchange.padEnd(8)} ${market.exchangeSymbol.padEnd(16)} ` +
               `${timeframe} получено=${incoming.length} ` +
               `закрытых=${closed} записано=${result.written} ` +
+              `создано=${created} обновлено=${updated} ` +
               `${first} → ${lastOpen}`
           );
         } catch (error) {
           stats.errors += 1;
           exchangeStats.errors += 1;
+          tfStats.errors += 1;
           console.error(
             `  ✗ ${market.exchange} ${market.exchangeSymbol} ${timeframe}:`,
             error instanceof Error ? error.message : error
