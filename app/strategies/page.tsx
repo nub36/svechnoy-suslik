@@ -1,14 +1,58 @@
-const strategies = [
-  ["Трендовый Суслик", "EMA + ADX + RSI", "Ищет продолжение устойчивого тренда."],
-  ["Пробой Норы", "Уровни + объём + ATR", "Ищет подтверждённый выход цены из диапазона."],
-  ["RSI Разворот", "RSI + трендовый фильтр", "Ищет перепроданность и перекупленность."],
-  ["MACD Импульс", "MACD + объём", "Следит за изменением рыночного импульса."],
-  ["Полосатый Суслик", "Bollinger Bands", "Работает с отклонениями цены от диапазона."],
-  ["EMA Cross", "EMA 50 / EMA 200", "Классическое подтверждение направления тренда."],
-  ["Мультитаймфрейм", "15m + 1H + 4H", "Проверяет несколько периодов."]
-];
+export const dynamic = "force-dynamic";
 
-export default function Strategies() {
+/**
+ * Публичный список стратегий — ТОЛЬКО реальные данные
+ * из PostgreSQL (enabled + PUBLISHED видны как активные).
+ *
+ * Выдуманный список из 7 стратегий удалён:
+ * в базе пока существует только «Трендовый Суслик»,
+ * и честно показывается только он.
+ */
+
+type StrategyRow = {
+  id: number;
+  name: string;
+  slug: string;
+  description: string;
+  version: number;
+  enabled: boolean;
+  status: string;
+  timeframes: string[];
+  minExchanges: number;
+};
+
+export default async function Strategies() {
+  let strategies: StrategyRow[] | null = null;
+
+  try {
+    // Ленивый импорт: недоступность базы
+    // даёт честное «Нет данных», а не падение страницы.
+    const { prisma: db } = await import(
+      "@/lib/prisma"
+    );
+
+    strategies = await db.strategy.findMany({
+      where: { status: "PUBLISHED" },
+      orderBy: [
+        { slug: "asc" },
+        { version: "desc" }
+      ],
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        description: true,
+        version: true,
+        enabled: true,
+        status: true,
+        timeframes: true,
+        minExchanges: true
+      }
+    });
+  } catch {
+    strategies = null;
+  }
+
   return (
     <main className="shell">
       <section className="hero">
@@ -20,21 +64,57 @@ export default function Strategies() {
         </div>
       </section>
 
-      {strategies.map((s, i) => (
-        <div className="strategy" key={s[0]}>
-          <div className="strategyHead">
-            <div>
-              <b>{s[0]}</b>
-              <div className="muted">{s[1]}</div>
+      {strategies === null ? (
+        <div className="tableBox">
+          <p className="muted" style={{ padding: "1rem" }}>
+            Нет данных: база временно недоступна.
+          </p>
+        </div>
+      ) : strategies.length === 0 ? (
+        <div className="tableBox">
+          <p className="muted" style={{ padding: "1rem" }}>
+            Опубликованных стратегий пока нет.
+            Создайте их в админке или запустите
+            scripts/seed-strategies.ts на сервере.
+          </p>
+        </div>
+      ) : (
+        strategies.map((s) => (
+          <div className="strategy" key={s.id}>
+            <div className="strategyHead">
+              <div>
+                <b>{s.name}</b>
+
+                <div className="muted">
+                  Версия {s.version} ·{" "}
+                  {s.timeframes
+                    .map((tf) => tf.toUpperCase())
+                    .join(" + ")}
+                </div>
+              </div>
+
+              <span
+                className={`signal ${
+                  s.enabled ? "long" : "neutral"
+                }`}
+              >
+                {s.enabled ? "АКТИВНА" : "ВЫКЛЮЧЕНА"}
+              </span>
             </div>
 
-            <span className="signal long">АКТИВНА</span>
-          </div>
+            <p>{s.description}</p>
 
-          <p>{s[2]}</p>
-          <small className="muted">Версия 1.{i} · LONG + SHORT</small>
-        </div>
-      ))}
+            <small className="muted">
+              Подтверждение минимум{" "}
+              {s.minExchanges}{" "}
+              {s.minExchanges === 1
+                ? "биржей"
+                : "биржами"}{" "}
+              · расчёт по закрытым свечам PostgreSQL
+            </small>
+          </div>
+        ))
+      )}
     </main>
   );
 }

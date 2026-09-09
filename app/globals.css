@@ -1257,3 +1257,87 @@ td:nth-child(2) {
     height: 340px;
   }
 }
+
+/* ===== Поиск в шапке ===== */
+
+.searchBox {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.searchBoxRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.searchBoxInput {
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+  width: 180px;
+  max-width: 52vw;
+}
+
+.searchBoxHint {
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 60;
+}
+
+.searchBoxList {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 60;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.searchBoxList a {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.searchBoxList a:hover {
+  background: var(--line);
+}
+
+.searchBoxList .muted {
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .searchBoxInput {
+    width: 42vw;
+  }
+}
+
+.chipActive {
+  border-color: var(--accent);
+  color: var(--accent);
+}

@@ -24,7 +24,17 @@ export default async function Home() {
           Стратегии следят за рынком. Суслик следит за стратегиями.
         </div>
 
-        <MarketTable coins={coins} />
+        {coins.length === 0 ? (
+          <div className="tableBox">
+            <p className="muted" style={{ padding: "1rem" }}>
+              Нет данных: источник рынка (CoinGecko)
+              временно недоступен. Попробуйте обновить
+              страницу позже.
+            </p>
+          </div>
+        ) : (
+          <MarketTable coins={coins} />
+        )}
       </section>
     </main>
   );

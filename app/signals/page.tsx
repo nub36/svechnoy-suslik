@@ -1,5 +1,3 @@
-import { prisma } from "@/lib/prisma";
-
 export const dynamic = "force-dynamic";
 
 type SignalRow = {
@@ -34,6 +32,12 @@ function fmtTime(value: Date): string {
 
 async function loadSignals(): Promise<SignalRow[] | null> {
   try {
+    // Ленивый импорт: недоступность базы
+    // даёт честное «Нет данных», а не падение страницы.
+    const { prisma } = await import(
+      "@/lib/prisma"
+    );
+
     return await prisma.signal.findMany({
       where: { status: "ACTIVE" },
       orderBy: { createdAt: "desc" },
