@@ -98,7 +98,7 @@ export default async function AdminPage() {
           Индикаторы
         </Link>
 
-        <Link href="/admin">
+        <Link href="/admin/data">
           <Database size={17} />
           Источники данных
         </Link>

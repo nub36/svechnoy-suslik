@@ -1448,3 +1448,109 @@ td:nth-child(2) {
     display: none;
   }
 }
+
+/* ===== Админка: состояние данных ===== */
+
+.healthSectionTitle {
+  margin: 26px 0 10px;
+  font-size: 17px;
+}
+
+.healthGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.healthCard {
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.healthValue {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.healthLabel {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.healthNote {
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+.healthTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.healthTable th,
+.healthTable td {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.healthTable th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12px;
+}
+
+.healthTotalRow td {
+  font-weight: 600;
+  border-top: 2px solid var(--line);
+}
+
+.freshBadge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid currentColor;
+}
+
+.freshBadge.fresh {
+  color: var(--green);
+}
+
+.freshBadge.delayed {
+  color: #e8b34b;
+}
+
+.freshBadge.stale {
+  color: var(--red);
+}
+
+.freshBadge.missing {
+  color: var(--muted);
+}
+
+.healthCommands {
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.healthCommand {
+  display: block;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
