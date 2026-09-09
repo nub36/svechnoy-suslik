@@ -2,6 +2,48 @@ import CandleChart from "@/components/chart/CandleChart";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Страница монеты — ТОЛЬКО реальные данные из
+ * PostgreSQL Asset/Market/Candle.
+ *
+ * Prisma Signal здесь НЕ используется: production
+ * Signal Engine ещё не развёрнут (разделы §28, §25).
+ *
+ * Таймфреймы и последняя закрытая свеча берутся ОДНИМ
+ * агрегированным SQL-запросом на стороне PostgreSQL
+ * (GROUP BY по рынку и таймфрейму) — никаких загрузок
+ * всех свечей актива в Node.js.
+ */
+
+const TIMEFRAME_ORDER = [
+  "5m",
+  "15m",
+  "1h",
+  "4h",
+  "1d"
+];
+
+const TIMEFRAME_LABELS: Record<string, string> = {
+  "5m": "5 минут",
+  "15m": "15 минут",
+  "1h": "1 час",
+  "4h": "4 часа",
+  "1d": "1 день"
+};
+
+function timeframeLabel(tf: string): string {
+  return TIMEFRAME_LABELS[tf] ?? tf;
+}
+
+type ChartRow = {
+  marketId: number;
+  exchange: string;
+  exchangeSymbol: string;
+  timeframe: string;
+  candleCount: number;
+  lastCandleTime: Date;
+};
+
 function fmtTime(date: Date): string {
   return (
     date.toISOString().replace("T", " ").slice(0, 16) +
@@ -39,10 +81,8 @@ export default async function CoinPage({
     | {
         name: string | null;
         rank: number | null;
-        exchanges: string[];
-        timeframes: string[];
-        lastCandleTime: Date | null;
-        signalCount: number;
+        top500: boolean;
+        rows: ChartRow[];
       }
     | null = null;
 
@@ -57,78 +97,77 @@ export default async function CoinPage({
 
     const asset = await prisma.asset.findUnique({
       where: { symbol },
-      select: { name: true, rank: true }
+      select: {
+        id: true,
+        name: true,
+        rank: true,
+        top500: true
+      }
     });
 
     if (asset) {
-      const markets: { exchange: string }[] =
-        await prisma.market.findMany({
-          where: {
-            assetId: asset.id,
-            enabled: true,
-            status: "ACTIVE",
-            quote: "USDT",
-            marketType: "SPOT",
-            candles: { some: {} }
-          },
-          select: {
-            exchange: true
-          },
-          orderBy: { exchange: "asc" }
-        });
+      const queryRaw =
+        prisma.$queryRaw as unknown as (
+          query: TemplateStringsArray,
+          ...values: unknown[]
+        ) => Promise<ChartRow[]>;
 
-      const grouped: { timeframe: string; _max: { openTime: Date | null } }[] =
-        await prisma.candle.groupBy({
-          by: ["timeframe"],
-          where: {
-            market: { assetId: asset.id }
-          },
-          _max: { openTime: true }
-        });
-
-      const signalCount =
-        await prisma.signal.count({
-          where: {
-            symbol,
-            status: "ACTIVE"
-          }
-        });
-
-      const lastTimes = grouped
-        .map(
-          (g: { _max: { openTime: Date | null } }) =>
-            g._max.openTime
-        )
-        .filter(
-          (t): t is Date => t !== null
-        );
+      const rows = await queryRaw`
+        SELECT
+          m.id AS "marketId",
+          m.exchange AS "exchange",
+          m."exchangeSymbol" AS "exchangeSymbol",
+          c.timeframe AS "timeframe",
+          COUNT(*)::int AS "candleCount",
+          MAX(c."openTime") AS "lastCandleTime"
+        FROM "Candle" c
+        JOIN "Market" m ON m.id = c."marketId"
+        WHERE m."assetId" = ${asset.id}
+          AND m.enabled = true
+          AND m.status = 'ACTIVE'
+          AND m.quote = 'USDT'
+          AND m."marketType" = 'SPOT'
+        GROUP BY
+          m.id, m.exchange,
+          m."exchangeSymbol", c.timeframe
+        ORDER BY m.exchange, c.timeframe
+      `;
 
       info = {
         name: asset.name,
         rank: asset.rank,
-        exchanges: markets.map(
-          (m) => m.exchange
-        ),
-        timeframes: grouped
-          .map(
-            (g: { timeframe: string }) =>
-              g.timeframe
-          )
-          .sort(),
-        lastCandleTime:
-          lastTimes.length > 0
-            ? lastTimes.reduce((a: Date, b: Date) =>
-                a.getTime() > b.getTime()
-                  ? a
-                  : b
-              )
-            : null,
-        signalCount
+        top500: asset.top500,
+        rows
       };
     }
   } catch {
     dbError = true;
   }
+
+  const exchanges =
+    info && info.rows.length > 0
+      ? [...new Set(info.rows.map((r) => r.exchange))]
+      : [];
+
+  const timeframes =
+    info && info.rows.length > 0
+      ? TIMEFRAME_ORDER.filter((tf) =>
+          info.rows.some((r) => r.timeframe === tf)
+        )
+      : [];
+
+  const lastCandleTime =
+    info && info.rows.length > 0
+      ? info.rows
+          .map((r) => r.lastCandleTime)
+          .reduce<Date | null>(
+            (acc, t) =>
+              acc === null || t.getTime() > acc.getTime()
+                ? t
+                : acc,
+            null
+          )
+      : null;
 
   return (
     <main className="shell">
@@ -151,18 +190,36 @@ export default async function CoinPage({
         <div className="cards">
           <div className="card">
             <div className="cardTitle">
+              Суслик Top-500
+            </div>
+
+            <div className="bigValue">
+              {info.rank !== null
+                ? `#${info.rank}`
+                : "Вне рейтинга"}
+            </div>
+
+            <span className="muted">
+              {info.top500
+                ? "актив в расчётном Top-500"
+                : "актив вне текущего Top-500"}
+            </span>
+          </div>
+
+          <div className="card">
+            <div className="cardTitle">
               Биржи с данными
             </div>
 
             <div className="bigValue">
-              {info.exchanges.length > 0
-                ? info.exchanges.length
+              {exchanges.length > 0
+                ? exchanges.length
                 : "—"}
             </div>
 
             <span className="muted">
-              {info.exchanges.length > 0
-                ? info.exchanges.join(", ")
+              {exchanges.length > 0
+                ? exchanges.join(", ")
                 : "Рынков со свечами нет"}
             </span>
           </div>
@@ -172,15 +229,21 @@ export default async function CoinPage({
               Таймфреймы
             </div>
 
-            <div className="bigValue">
-              {info.timeframes.length > 0
-                ? info.timeframes
-                    .map((tf) =>
-                      tf.toUpperCase()
-                    )
+            <div className="bigValue" style={{ fontSize: "1rem" }}>
+              {timeframes.length > 0
+                ? timeframes
+                    .map((tf) => tf.toUpperCase())
                     .join(" · ")
                 : "—"}
             </div>
+
+            <span className="muted">
+              {timeframes.length > 0
+                ? timeframes
+                    .map((tf) => timeframeLabel(tf))
+                    .join(", ")
+                : "по активу пока нет свечей"}
+            </span>
           </div>
 
           <div className="card">
@@ -189,29 +252,13 @@ export default async function CoinPage({
             </div>
 
             <div className="bigValue" style={{ fontSize: "1rem" }}>
-              {info.lastCandleTime
-                ? fmtTime(
-                    info.lastCandleTime
-                  )
+              {lastCandleTime
+                ? fmtTime(lastCandleTime)
                 : "—"}
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="cardTitle">
-              Активные сигналы
-            </div>
-
-            <div className="bigValue">
-              {info.signalCount > 0
-                ? info.signalCount
-                : "Нет"}
             </div>
 
             <span className="muted">
-              {info.signalCount > 0
-                ? "По всем стратегиям"
-                : "Signal Engine ещё не запускался в продакшн"}
+              по всем рынкам актива
             </span>
           </div>
         </div>
