@@ -1,18 +1,19 @@
-svechnoy-suslik@0.1.0 /root/svechnoy-suslik
-├── @auth/prisma-adapter@2.11.3
-├── @emnapi/runtime@1.11.3 extraneous
-├── @img/sharp-wasm32@0.35.4 extraneous
-├── @prisma/client@6.19.3
-├── @types/node@22.20.1
-├── @types/react-dom@19.2.7
-├── @types/react@19.2.18
-├── bcryptjs@3.0.3
-├── lucide-react@0.544.0
-├── next-auth@5.0.0-beta.32
-├── next@15.5.25
-├── prisma@6.19.3
-├── react-dom@19.2.8
-├── react@19.2.8
-├── tsx@4.23.13
-└── typescript@5.9.3
+svechnoy-suslik@0.1.0 /home/user/svechnoy-suslik
++-- @auth/prisma-adapter@2.11.3
++-- @emnapi/runtime@1.11.3 extraneous
++-- @img/sharp-wasm32@0.35.4 extraneous
++-- @prisma/client@6.19.3
++-- @types/node@22.20.1
++-- @types/react-dom@19.2.7
++-- @types/react@19.2.18
++-- bcryptjs@3.0.3
++-- lightweight-charts@5.2.1
++-- lucide-react@0.544.0
++-- next-auth@5.0.0-beta.32
++-- next@15.5.25
++-- prisma@6.19.3
++-- react-dom@19.2.8
++-- react@19.2.8
++-- tsx@4.23.13
+`-- typescript@5.9.3
 
