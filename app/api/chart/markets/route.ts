@@ -45,16 +45,26 @@ export async function GET(
     ?.trim()
     .toUpperCase();
 
-  const symbolCheck = parseSymbolParam(symbol);
+  // Режим БЕЗ symbol — легитимный: это список активов для
+  // селектора графика. Валидируем symbol ТОЛЬКО если он
+  // передан (регрессия 89e2671: строгая проверка давала 400
+  // на запрос списка и ломала селектор «Монета»).
+  // Внимание: get() без параметра даёт undefined, а не null.
+  const symbolCheck = symbol
+    ? parseSymbolParam(symbol)
+    : null;
 
-  if (!symbolCheck.ok) {
+  if (symbolCheck !== null && !symbolCheck.ok) {
     return NextResponse.json(
       { error: symbolCheck.message },
       { status: 400 }
     );
   }
 
-  const symbolValue = symbolCheck.value;
+  const symbolValue =
+    symbolCheck !== null && symbolCheck.ok
+      ? symbolCheck.value
+      : null;
 
   try {
     // Ленивый импорт: ошибка клиента Prisma

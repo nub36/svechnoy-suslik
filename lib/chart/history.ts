@@ -125,3 +125,63 @@ export function mergeOlder<
     added: kept.length
   };
 }
+
+/* ---------- чистые функции состояния графика ---------- */
+
+export type ChartStatus =
+  | "loading"
+  | "loading-data"
+  | "ok"
+  | "empty"
+  | "error";
+
+/**
+ * Выбор символа после загрузки списка активов:
+ * предпочитаемый (URL/страница) остаётся, если реально
+ * есть в списке; иначе первый из списка; пустой список
+ * НЕ сбрасывает уже выбранный символ (точка B ревью).
+ */
+export function resolveSymbolFromList(
+  preferred: string | null | undefined,
+  list: readonly { symbol: string }[]
+): string | null {
+  if (
+    preferred &&
+    list.some((item) => item.symbol === preferred)
+  ) {
+    return preferred;
+  }
+
+  return list[0]?.symbol ?? null;
+}
+
+/**
+ * Ошибка/пустота СПИСКА активов не должна затирать
+ * рабочий график: статус "ok" «липкий» (точка C ревью —
+ * гонка list-fetch против успешных candles).
+ */
+export function nextStatusAfterListFailure(
+  current: ChartStatus
+): ChartStatus {
+  return current === "ok" ? current : "error";
+}
+
+/**
+ * Целостность ответа (точка F ревью): если сервер сообщил
+ * count > 0, итоговый массив свечей не может быть пустым.
+ */
+export function candlesIntegrityOk(
+  count: number | null | undefined,
+  candles: readonly unknown[]
+): boolean {
+  if (
+    count !== null &&
+    count !== undefined &&
+    count > 0 &&
+    candles.length === 0
+  ) {
+    return false;
+  }
+
+  return true;
+}

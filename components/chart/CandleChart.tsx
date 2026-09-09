@@ -20,7 +20,12 @@ import {
   rsiSeries,
   smaSeries
 } from "@/lib/indicators";
-import { mergeOlder } from "@/lib/chart/history";
+import {
+  candlesIntegrityOk,
+  mergeOlder,
+  nextStatusAfterListFailure,
+  resolveSymbolFromList
+} from "@/lib/chart/history";
 import { candleFreshness } from "@/lib/data/freshness";
 import {
   buildChartSearch,
@@ -100,6 +105,7 @@ type CandlesResponse = {
   error?: string;
   hasMore?: boolean;
   nextCursor?: number | null;
+  count?: number;
 };
 
 type ThemeColors = {
@@ -433,6 +439,8 @@ export default function CandleChart({
   const [symbols, setSymbols] = useState<
     SymbolInfo[]
   >([]);
+  const [symbolsFailed, setSymbolsFailed] =
+    useState(false);
   const [symbol, setSymbol] = useState(
     initialSymbol?.toUpperCase() ?? ""
   );
@@ -747,6 +755,27 @@ export default function CandleChart({
 
   const applyData = useCallback(
     (data: CandlesResponse) => {
+      // точка F ревью: успешный ответ с count > 0
+      // не имеет права превратиться в пустой график
+      if (
+        !candlesIntegrityOk(
+          data.count ?? data.candles.length,
+          data.candles
+        )
+      ) {
+        console.error(
+          "[CandleChart] Противоречивый ответ API:",
+          "count > 0 при пустом массиве свечей — данные не применены"
+        );
+
+        setStatus("error");
+        setErrorMessage(
+          "Сервер вернул противоречивые данные свечей"
+        );
+
+        return;
+      }
+
       dataRef.current = data;
 
       // база для последующей подгрузки истории
@@ -1165,44 +1194,61 @@ export default function CandleChart({
         }
 
         if (!response.ok) {
-          setStatus("error");
-          setErrorMessage(
-            data.error ??
-              "Не удалось загрузить список активов"
-          );
+          if (!cancelled) {
+            setSymbolsFailed(true);
+            setStatus((prev) =>
+              nextStatusAfterListFailure(prev)
+            );
+            setErrorMessage(
+              data.error ??
+                "Не удалось загрузить список активов"
+            );
+          }
 
           return;
         }
 
         const list = data.symbols ?? [];
 
-        setSymbols(list);
-
         if (list.length === 0) {
-          setStatus("empty");
-          setErrorMessage(
-            "Нет данных: в PostgreSQL пока нет свечей. Запустите OHLCV worker."
-          );
+          if (!cancelled) {
+            setSymbolsFailed(true);
+            setStatus((prev) =>
+              nextStatusAfterListFailure(prev)
+            );
+            setErrorMessage(
+              "Нет данных: в PostgreSQL пока нет свечей. Запустите OHLCV worker."
+            );
+          }
 
           return;
         }
 
-        const preferred =
-          initialSymbol?.toUpperCase();
+        if (cancelled) {
+          return;
+        }
 
-        if (
-          preferred &&
-          list.some(
-            (s) => s.symbol === preferred
-          )
-        ) {
-          setSymbol(preferred);
-        } else {
-          setSymbol(list[0].symbol);
+        setSymbols(list);
+        setSymbolsFailed(false);
+
+        // выбранный (URL/страница) символ не сбрасывается:
+        // пустой/частичный список ему не хозяин
+        const nextSymbol =
+          resolveSymbolFromList(
+            initialSymbol?.toUpperCase() ??
+              null,
+            list
+          );
+
+        if (nextSymbol) {
+          setSymbol(nextSymbol);
         }
       } catch {
         if (!cancelled) {
-          setStatus("error");
+          setSymbolsFailed(true);
+          setStatus((prev) =>
+            nextStatusAfterListFailure(prev)
+          );
           setErrorMessage(
             "Ошибка соединения с сервером"
           );
@@ -1240,11 +1286,15 @@ export default function CandleChart({
         }
 
         if (!response.ok) {
-          setStatus("error");
-          setErrorMessage(
-            data.error ??
-              "Не удалось загрузить рынки"
-          );
+          if (!cancelled) {
+            setStatus((prev) =>
+              nextStatusAfterListFailure(prev)
+            );
+            setErrorMessage(
+              data.error ??
+                "Не удалось загрузить рынки"
+            );
+          }
 
           return;
         }
@@ -1297,7 +1347,9 @@ export default function CandleChart({
         }
       } catch {
         if (!cancelled) {
-          setStatus("error");
+          setStatus((prev) =>
+            nextStatusAfterListFailure(prev)
+          );
           setErrorMessage(
             "Ошибка соединения с сервером"
           );
@@ -1715,7 +1767,9 @@ export default function CandleChart({
           >
             {symbols.length === 0 ? (
               <option value="">
-                Нет активов
+                {symbolsFailed
+                  ? "Список недоступен"
+                  : "Нет активов"}
               </option>
             ) : (
               symbols.map((s) => (

@@ -7,9 +7,13 @@
  */
 
 import {
+  candlesIntegrityOk,
   mergeOlder,
+  nextStatusAfterListFailure,
   parseHistoryLimit,
-  validateCursor
+  resolveSymbolFromList,
+  validateCursor,
+  type ChartStatus
 } from "../lib/chart/history";
 
 let passed = 0;
@@ -204,6 +208,78 @@ type P = { time: number; value: number };
 
   ok(sorted, "merge: строгий ASC на всей последовательности");
 }
+
+/* ---------- состояние графика (регрессия VPS: «Нет активов» + пустой canvas) ---------- */
+
+// resolveSymbolFromList: выбранный символ не сбрасывается пустым списком
+ok(
+  resolveSymbolFromList("BTC", [
+    { symbol: "BTC" },
+    { symbol: "ETH" }
+  ]) === "BTC",
+  "symbol: предпочтительный есть в списке — остаётся"
+);
+ok(
+  resolveSymbolFromList("BTC", [
+    { symbol: "ETH" },
+    { symbol: "SOL" }
+  ]) === "ETH",
+  "symbol: предпочтительного нет в списке — первый из списка"
+);
+ok(
+  resolveSymbolFromList("BTC", []) === null,
+  "symbol: пустой список — null (НЕ сброс выбранного)"
+);
+ok(
+  resolveSymbolFromList(null, [{ symbol: "ZEC" }]) === "ZEC",
+  "symbol: без предпочтительного — первый"
+);
+ok(
+  resolveSymbolFromList(undefined, []) === null,
+  "symbol: ничего ниоткуда — null"
+);
+
+// «липкость» статуса: list-failure не убивает рабочий график
+const sticky: ChartStatus[] = [
+  "loading",
+  "loading-data",
+  "empty",
+  "error",
+  "ok"
+];
+
+ok(
+  nextStatusAfterListFailure("ok") === "ok",
+  "status: ok «липкий» — список не роняет график (гонка VPS)"
+);
+for (const s of sticky.filter((x) => x !== "ok")) {
+  ok(
+    nextStatusAfterListFailure(s) === "error",
+    `status: ${s} + ошибка списка → error`
+  );
+}
+
+// целостность: count > 0 при пустом массиве — запрещено
+ok(
+  candlesIntegrityOk(306, [{ time: 1 }]) === true,
+  "integrity: count>0 и свечи есть — ОК"
+);
+ok(
+  candlesIntegrityOk(306, []) === false,
+  "integrity: count>0 при пустом массиве — НАРУШЕНО (не применять)"
+);
+ok(
+  candlesIntegrityOk(0, []) === true,
+  "integrity: честный пустой ответ — ОК"
+);
+ok(
+  candlesIntegrityOk(null, []) === true,
+  "integrity: count нет — решение по массиву"
+);
+ok(
+  candlesIntegrityOk(undefined, [{ time: 1 }]) === true,
+  "integrity: count нет, свечи есть — ОК"
+);
 
 /* ---------- итог ---------- */
 
