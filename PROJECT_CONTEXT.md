@@ -1147,3 +1147,108 @@ scripts/test-indicators.ts
 scripts/test-strategy-periods.ts
 
 Signal Engine в production не переносился и на этом этапе не запускается.
+
+
+==================================================
+28. UI/CHART — ЧИСТАЯ ИНТЕГРАЦИОННАЯ ВЕТКА ОТ 4db41af
+==================================================
+
+Дата: 09.09.2026
+
+Чистая интеграционная ветка arena/ui-chart-clean,
+собранная СТРОГО от origin/main (4db41af) без merge
+старой Arena-истории. Содержит только проверенную
+на VPS функциональность графика и честный UI.
+
+Основа ветки — production main:
+
+30f0463 Доработан Strategy Runtime (production-ready)
+4db41af Обновлена документация production-ready Runtime
+
+Runtime (§26-§27) в этой ветке НЕ менялся:
+lib/indicators, lib/analysis, lib/strategies,
+scripts/test-indicators.ts, test-strategy-periods.ts,
+test-strategy-runtime.ts — идентичны origin/main.
+
+1. Свечной график (проверен на VPS):
+
+- lightweight-charts ^5.2.1 (минимальная зависимость,
+  без peer-зависимостей, Next 15 + React 19);
+- app/api/chart/candles — закрытые свечи PostgreSQL
+  + индикаторы (EMA 20/50/200, SMA 20, RSI 14,
+  MACD 12/26/9) существующим слоем lib/indicators;
+- app/api/chart/markets — активы/биржи/таймфреймы
+  ОДНИМ агрегированным GROUP BY SQL в PostgreSQL
+  (без N+1 запросов и без загрузки свечей в Node.js);
+- components/chart/CandleChart — свечи, объём,
+  EMA/SMA, панели RSI и MACD, переключатели, выбор
+  монеты/биржи/таймфрейма (только реально существующие
+  в БД; сейчас в основном 1H — показывается он),
+  zoom/прокрутка, тёмная/светлая тема, русский UI,
+  loading/error/empty, защита от гонок запросов;
+- VPS-проверка: BTC/ETH/DOGE/ZEC/NEAR, переключение
+  бирж, EMA/RSI/MACD/Volume, HTTP API, /coin/BTC,
+  npm run build — работают.
+
+2. Страница монеты /coin/[SYMBOL] — БЕЗ Signal:
+
+- полностью убран prisma.signal (count и карточка
+  «Активные сигналы») — страница не зависит от
+  Signal Engine;
+- реальные данные: место в Суслик Top-500 (или
+  «Вне рейтинга»), биржи с данными, таймфреймы
+  (только существующие в Candle), последняя закрытая
+  свеча (UTC);
+- asset.id добавлен в findUnique select;
+- таймфреймы/счётчики/последняя свеча — единый
+  GROUP BY SQL на стороне PostgreSQL.
+
+3. Честный UI (без выдуманных значений):
+
+- главная: капитализация Top-500 (CoinGecko, кэш 60 c),
+  свечи/снимки/активные рынки/стратегии — счётчики
+  PostgreSQL; демо-монеты CoinGecko-фолбэка удалены;
+- /strategies — реальные PUBLISHED-стратегии из БД;
+- поиск по активам (иконка в шапке) — рабочий,
+  /api/search по PostgreSQL, переход на /coin/SYMBOL;
+- фильтры таблицы «Все активы / Рост / Падение» —
+  рабочие; колонки-заглушки RSI/«АНАЛИЗ» удалены;
+- /profile — реальные данные сессии (имя, email, роль);
+- /signals — честный статический экран «Signal Engine
+  ещё не развёрнут» БЕЗ prisma.signal, lib/signals и
+  каких-либо предположений о Signal schema;
+- все состояния: loading / error с «Повторить» /
+  честное «Нет данных», русский интерфейс,
+  тёмная/светлая тема, мобильная вёрстка.
+
+4. Что СОЗНАТЕЛЬНО НЕ перенесено из старой ветки:
+
+- Signal Engine: lib/signals/*, scripts/signal-worker.ts,
+  scripts/test-signal-engine.ts — отсутствуют;
+- расширение Prisma Signal — prisma/schema.prisma и
+  PROJECT_SCHEMA.prisma идентичны origin/main;
+- ленивый Prisma-клиент (Proxy) в lib/prisma.ts —
+  оставлен production singleton из main (в песочнице
+  без prisma generate это даёт известное ограничение
+  сборки, см. ниже);
+- sandbox type fixes app/admin / rank-assets —
+  не переносились (на VPS с реальным клиентом
+  типизация зелёная, проверено на 30f0463).
+
+5. Проверки ветки (песочница):
+
+- scripts/test-indicators.ts: 74/74;
+- scripts/test-strategy-periods.ts --self-test: 59/59;
+- scripts/test-strategy-runtime.ts --self-test: 54/54;
+- npx tsc --noEmit: 14 ошибок — ВСЕ старые implicit-any
+  в app/admin и scripts/rank-assets (следствие stub-клиента
+  @prisma/client без prisma generate в песочнице;
+  на VPS с реальным клиентом эти же файлы дают 0 —
+  проверено на 30f0463); ошибок в новых UI/chart файлах нет;
+- npm run build: компиляция и проверка типов успешны;
+  финальный сбор страниц упирается в отсутствие
+  сгенерированного клиента (та же песочница);
+  этот же код графика на VPS собирался успешно;
+- npx prisma validate / generate: binaries.prisma.sh
+  недоступен из песочницы — выполнить на VPS
+  (schema.prisma не менялась относительно main).

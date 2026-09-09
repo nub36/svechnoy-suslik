@@ -319,3 +319,75 @@ Signal Engine (после живого прогона Runtime на VPS).
 - MACD dead zone реализована, но старый config получает deadZoneRatio=0. Production-значение порога должно быть выбрано отдельно.
 - Prisma schema не менялась.
 - Signal Engine в production не переносился и не запускался.
+
+==================================================
+
+## 09.09.2026 — Чистая интеграционная ветка UI/Chart от 4db41af
+
+### Сделано
+
+- Создана ветка arena/ui-chart-clean СТРОГО от
+  origin/main (4db41af) — без merge старой Arena-ветки.
+- Перенесён только проверенный на VPS функционал:
+  1) свечной график (lightweight-charts, API Candle,
+  CandleChart, страница монеты, CSS графика);
+  2) честный UI (сводка, стратегии, поиск, профиль,
+  фильтры, header, honest empty/error states);
+  3) /signals — честный пустой экран.
+- Страница монеты: без prisma.signal, с asset.id в
+  select, единый GROUP BY SQL для таймфреймов.
+- Сводка главной: карточка «Активные сигналы» заменена
+  на «Активные рынки» (prisma.market.count) — счётчик
+  сигналов не использует отсутствующий Signal Engine.
+- lib/prisma.ts оставлен production-версией main
+  (ленивый Proxy не переносился).
+- app/admin/page.tsx и scripts/rank-assets.ts не
+  переносились (type fixes были нужны только песочнице).
+
+### Изменённые/созданные файлы
+
+- Commit 1 (chart/API/coin): app/api/chart/candles/route.ts,
+  app/api/chart/markets/route.ts,
+  components/chart/CandleChart.tsx,
+  app/coin/[symbol]/page.tsx, app/globals.css (график),
+  package.json, package-lock.json.
+- Commit 2 (market UI/search/profile):
+  components/MarketOverview.tsx, MarketTable.tsx,
+  Header.tsx, SearchBox.tsx, app/api/search/route.ts,
+  app/strategies/page.tsx, app/profile/page.tsx,
+  app/page.tsx, lib/market.ts,
+  app/globals.css (поиск).
+- Commit 3: app/signals/page.tsx.
+- Commit 4: PROJECT_CONTEXT.md (§28), CHANGELOG.md,
+  PROJECT_FILES.txt, PROJECT_DEPENDENCIES.txt.
+
+### База данных
+
+- prisma/schema.prisma и PROJECT_SCHEMA.prisma
+  идентичны origin/main — НЕ менялись.
+- Signal Engine (lib/signals, signal-worker,
+  test-signal-engine) в ветке отсутствует.
+
+### Проверка
+
+- test-indicators 74/74; test-strategy-periods --self-test
+  59/59; test-strategy-runtime --self-test 54/54.
+- tsc --noEmit: 14 старых implicit-any (app/admin,
+  rank-assets) — класс «в песочнице нет prisma generate»,
+  на VPS эти файлы дают 0 (проверено на 30f0463);
+  в новых UI/chart файлах ошибок нет.
+- npm run build: компиляция и типы успешны; сбор страниц
+  требует сгенерированного клиента (песочница); на VPS
+  этот же код графика собирался успешно.
+- prisma validate/generate: binaries.prisma.sh закрыт
+  из песочницы — выполнить на VPS.
+
+### Результат
+
+- Ветка готова к VPS-review: график + честный UI без
+  единой зависимости от Signal Engine.
+
+### Следующий этап
+
+- VPS-проверка и перенос commits; Signal Engine —
+  отдельным решением.
