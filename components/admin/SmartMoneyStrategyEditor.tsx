@@ -76,7 +76,7 @@ type Props = {
   };
 };
 
-const DEFAULT_WEIGHTS: SmcWeights = {
+export const DEFAULT_WEIGHTS: SmcWeights = {
   swingStructureBias: 20,
   recentSwingBos: 15,
   internalStructure: 10,
@@ -88,30 +88,30 @@ const DEFAULT_WEIGHTS: SmcWeights = {
   confluence: 5,
 };
 
-const DEFAULT_DISPLACEMENT: SmartMoneyAdvancedDisplacement = {
+export const DEFAULT_DISPLACEMENT: SmartMoneyAdvancedDisplacement = {
   bodyAtrMin: 1.5,
   rangeAtrMin: 2.0,
   bullCloseLocMin: 0.6,
   bearCloseLocMax: 0.4,
 };
-const DEFAULT_FVG: SmartMoneyAdvancedFvg = {
+export const DEFAULT_FVG: SmartMoneyAdvancedFvg = {
   minGapAtr: 0.1,
   maxAgeCandles: 0,
 };
-const DEFAULT_LIQUIDITY: SmartMoneyAdvancedLiquidity = {
+export const DEFAULT_LIQUIDITY: SmartMoneyAdvancedLiquidity = {
   eqToleranceAtr: 0.1,
   eqConfirmBars: 2,
   sweepMinPenetrationAtr: 0.05,
   maxAgeCandles: 0,
 };
-const DEFAULT_ORDERBLOCK: SmartMoneyAdvancedOrderBlock = {
+export const DEFAULT_ORDERBLOCK: SmartMoneyAdvancedOrderBlock = {
   impulseMaxCandles: 3,
   confirmMaxCandles: 10,
   maxAgeCandles: 750,
   sweepLookbackCandles: 5,
 };
 
-const DEFAULT_CONFIG: SmartMoneyConfig = {
+export const DEFAULT_CONFIG: SmartMoneyConfig = {
   minimumSignalScore: 72,
   swingLeft: 20,
   swingRight: 20,
@@ -134,7 +134,7 @@ const DEFAULT_CONFIG: SmartMoneyConfig = {
   orderBlock: { ...DEFAULT_ORDERBLOCK },
 };
 
-const ALLOWED_TFS = ["5m", "15m", "1h", "4h", "1d"] as const;
+export const ALLOWED_TFS = ["5m", "15m", "1h", "4h", "1d"] as const;
 
 function NumberField({
   label,
@@ -174,7 +174,7 @@ function NumberField({
   );
 }
 
-function normalizeConfig(raw: unknown): SmartMoneyConfig {
+export function normalizeConfig(raw: unknown): SmartMoneyConfig {
   const r = (raw ?? {}) as Record<string, unknown>;
   const w = (r.weights ?? {}) as Record<string, unknown>;
   const f = (r.filters ?? {}) as Record<string, unknown>;
@@ -287,7 +287,7 @@ function normalizeConfig(raw: unknown): SmartMoneyConfig {
   };
 }
 
-function validateLocal(
+export function validateLocal(
   config: SmartMoneyConfig,
   timeframes: string[],
   minExchanges: number
@@ -845,7 +845,7 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
             step="1"
             min="0"
             max="5000"
-            onChange={(v) => setConfig((c) => ({ ...c, fvg: { ...(c.fvg ?? DEFAULT_FVG), maxAgeCandles: Math.round(v) } }))}
+            onChange={(v) => setConfig((c) => ({ ...c, fvg: { ...(c.fvg ?? DEFAULT_FVG), maxAgeCandles: v } }))}
           />
         </div>
       </section>
@@ -878,7 +878,7 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
             step="1"
             min="0"
             max="20"
-            onChange={(v) => setConfig((c) => ({ ...c, liquidity: { ...(c.liquidity ?? DEFAULT_LIQUIDITY), eqConfirmBars: Math.round(v) } }))}
+            onChange={(v) => setConfig((c) => ({ ...c, liquidity: { ...(c.liquidity ?? DEFAULT_LIQUIDITY), eqConfirmBars: v } }))}
           />
           <NumberField
             label="Глубина съёма — минимум ATR (liquidity.sweepMinPenetrationAtr) — default 0.05"
@@ -896,7 +896,7 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
             step="1"
             min="0"
             max="5000"
-            onChange={(v) => setConfig((c) => ({ ...c, liquidity: { ...(c.liquidity ?? DEFAULT_LIQUIDITY), maxAgeCandles: Math.round(v) } }))}
+            onChange={(v) => setConfig((c) => ({ ...c, liquidity: { ...(c.liquidity ?? DEFAULT_LIQUIDITY), maxAgeCandles: v } }))}
           />
         </div>
       </section>
@@ -920,7 +920,7 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
             step="1"
             min="1"
             max="10"
-            onChange={(v) => setConfig((c) => ({ ...c, orderBlock: { ...(c.orderBlock ?? DEFAULT_ORDERBLOCK), impulseMaxCandles: Math.round(v) } }))}
+            onChange={(v) => setConfig((c) => ({ ...c, orderBlock: { ...(c.orderBlock ?? DEFAULT_ORDERBLOCK), impulseMaxCandles: v } }))}
           />
           <NumberField
             label="Максимум ожидания подтверждения — свечей (orderBlock.confirmMaxCandles) — default 10"
@@ -929,7 +929,7 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
             step="1"
             min="1"
             max="100"
-            onChange={(v) => setConfig((c) => ({ ...c, orderBlock: { ...(c.orderBlock ?? DEFAULT_ORDERBLOCK), confirmMaxCandles: Math.round(v) } }))}
+            onChange={(v) => setConfig((c) => ({ ...c, orderBlock: { ...(c.orderBlock ?? DEFAULT_ORDERBLOCK), confirmMaxCandles: v } }))}
           />
           <NumberField
             label="Время жизни зоны — свечей (orderBlock.maxAgeCandles) — default 750"
@@ -938,7 +938,7 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
             step="1"
             min="0"
             max="5000"
-            onChange={(v) => setConfig((c) => ({ ...c, orderBlock: { ...(c.orderBlock ?? DEFAULT_ORDERBLOCK), maxAgeCandles: Math.round(v) } }))}
+            onChange={(v) => setConfig((c) => ({ ...c, orderBlock: { ...(c.orderBlock ?? DEFAULT_ORDERBLOCK), maxAgeCandles: v } }))}
           />
           <NumberField
             label="Контекст sweep — lookback свечей (orderBlock.sweepLookbackCandles) — default 5"
@@ -947,7 +947,7 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
             step="1"
             min="0"
             max="100"
-            onChange={(v) => setConfig((c) => ({ ...c, orderBlock: { ...(c.orderBlock ?? DEFAULT_ORDERBLOCK), sweepLookbackCandles: Math.round(v) } }))}
+            onChange={(v) => setConfig((c) => ({ ...c, orderBlock: { ...(c.orderBlock ?? DEFAULT_ORDERBLOCK), sweepLookbackCandles: v } }))}
           />
         </div>
       </section>
