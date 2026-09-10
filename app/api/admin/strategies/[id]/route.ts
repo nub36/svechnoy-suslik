@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { validateTrendSuslikConfig } from "@/lib/strategies/config";
+import { validateSmartMoneyRuntime } from "@/lib/strategies/smart-money";
 
 async function isAdmin() {
   const session = await auth();
@@ -79,79 +80,101 @@ export async function PUT(
     );
   }
 
-  /*
-   * Polnaya servernaya validaciya config
- * (te zhe pravila, chto i dlya runtime):
-   * weights, ema, rsi, macd (vklyuchaya myortvuyu
-   * zonu), atr, volume, execution, filters.
-   * Ran'she proveryalsya tolko minimumSignalScore.
-   */
-  const validation =
-    validateTrendSuslikConfig(config);
+  // Discriminate validation by existing.slug from DB, not by body.slug.
+  // Client cannot change slug/version via body — those fields are ignored.
+  const existing = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+  });
 
-  if (!validation.ok) {
+  if (!existing) {
     return NextResponse.json(
-      {
-        error:
-          "Конфигурация не прошла проверку: " +
-          validation.errors.join("; ")
-      },
-      { status: 400 }
+      { error: "Стратегия не найдена" },
+      { status: 404 }
     );
   }
 
-  const minExchanges =
-    Number(body.minExchanges);
+  const rawTimeframes = body.timeframes;
+  const rawMinExchanges = body.minExchanges;
 
-  if (
-    !Number.isInteger(minExchanges) ||
-    minExchanges < 1 ||
-    minExchanges > 5
-  ) {
-    return NextResponse.json(
-      {
-        error:
-          "Количество подтверждающих бирж должно быть от 1 до 5"
-      },
-      { status: 400 }
-    );
-  }
+  if (existing.slug === "trend-suslik") {
+    const validation = validateTrendSuslikConfig(config);
+    if (!validation.ok) {
+      return NextResponse.json(
+        {
+          error:
+            "Конфигурация не прошла проверку: " +
+            validation.errors.join("; "),
+        },
+        { status: 400 }
+      );
+    }
 
-  const allowedTimeframes =
-    ["5m", "15m", "1h", "4h", "1d"];
+    const minExchanges = Number(rawMinExchanges);
+    if (!Number.isInteger(minExchanges) || minExchanges < 1 || minExchanges > 5) {
+      return NextResponse.json(
+        { error: "Количество подтверждающих бирж должно быть от 1 до 5" },
+        { status: 400 }
+      );
+    }
 
-  const timeframes =
-    Array.isArray(body.timeframes)
-      ? body.timeframes.filter(
-          (x: unknown) =>
-            typeof x === "string" &&
-            allowedTimeframes.includes(x)
+    const allowedTimeframes = ["5m", "15m", "1h", "4h", "1d"];
+    const timeframes = Array.isArray(rawTimeframes)
+      ? rawTimeframes.filter(
+          (x: unknown) => typeof x === "string" && allowedTimeframes.includes(x as string)
         )
       : [];
+    if (!timeframes.length) {
+      return NextResponse.json(
+        { error: "Выберите хотя бы один таймфрейм" },
+        { status: 400 }
+      );
+    }
 
-  if (!timeframes.length) {
-    return NextResponse.json(
-      {
-        error:
-          "Выберите хотя бы один таймфрейм"
-      },
-      { status: 400 }
-    );
-  }
-
-  const updated =
-    await prisma.strategy.update({
-      where: {
-        id: strategyId
-      },
-
+    const updated = await prisma.strategy.update({
+      where: { id: strategyId },
       data: {
         enabled: Boolean(body.enabled),
         minExchanges,
         timeframes,
-        config
-      }
+        config,
+      },
     });
+    return NextResponse.json(updated);
+  }
 
-  return NextResponse.json(updated);
+  if (existing.slug === "smart-money-suslik") {
+    // Use canonical Smart Money runtime validator — checks timeframes, minExchanges and config per TF.
+    const runtimeValidation = validateSmartMoneyRuntime({
+      config,
+      timeframes: rawTimeframes,
+      minExchanges: rawMinExchanges,
+    });
+    if (!runtimeValidation.ok) {
+      return NextResponse.json(
+        {
+          error: "Конфигурация не прошла проверку: " + runtimeValidation.errors.join("; "),
+        },
+        { status: 400 }
+      );
+    }
+
+    const updated = await prisma.strategy.update({
+      where: { id: strategyId },
+      data: {
+        enabled: Boolean(body.enabled),
+        minExchanges: runtimeValidation.minExchanges,
+        timeframes: runtimeValidation.timeframes,
+        config,
+      },
+    });
+    return NextResponse.json(updated);
+  }
+
+  // Unknown slug — safe reject, no fallback to Trend
+  return NextResponse.json(
+    {
+      error: `Стратегия с slug "${existing.slug}" не поддерживается текущим API (требуется обновление)`,
+    },
+    { status: 400 }
+  );
 }
