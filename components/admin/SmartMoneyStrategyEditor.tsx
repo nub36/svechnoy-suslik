@@ -412,7 +412,7 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
             одновременно набрали ≥ порога). Это <b>не</b> означает, что цена «не изменится».
           </li>
           <li>
-            <b>cannot-evaluate</b> означает, что данных недостаточно (например, &lt;84 закрытых свечей для swing 20) либо
+            <b>cannot-evaluate</b> означает, что данных недостаточно (например, при canonical default swingLeft/swingRight=20 требуется минимум 84 CLOSED свечи; при изменении swing-окон требуемая история меняется) либо
             корректная оценка сейчас невозможна — рынок пропускается.
           </li>
           <li>
