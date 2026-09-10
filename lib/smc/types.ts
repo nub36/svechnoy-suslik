@@ -44,6 +44,11 @@ export type SmcLayer = "internal" | "swing";
 
 export type SmcPivotKind = "high" | "low";
 
+/** Общее направление для price-action primitives Phase 2A
+ * (displacement/FVG); структура FSM использует собственные
+ * dir-литералы Phase 1 — они не объединяются без нужды. */
+export type SmcDirection = "up" | "down";
+
 /**
  * Сырая закрытая свеча, адаптированная к реальной модели
  * Prisma Candle (schema.prisma на 3b76086):

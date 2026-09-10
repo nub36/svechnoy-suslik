@@ -194,6 +194,15 @@ export function assertValidAsOf(asOf: Date): void {
   }
 }
 
+/** Общий guard ТФ для primitives Phase 2A (displacement/FVG). */
+export function assertValidTf(tf: SmcTimeframe): void {
+  if (!isSmcTimeframe(tf)) {
+    throw new SmcInputError(
+      `timeframe "${String(tf)}" вне белого списка проекта`
+    );
+  }
+}
+
 export function assertValidStructureParams(
   params: StructureParams
 ): void {
