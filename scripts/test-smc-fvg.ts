@@ -471,6 +471,78 @@ function single(
   );
 }
 
+/* ---------- FIX: bearish fillFraction (зеркальный аккумулятор) ---------- */
+
+/* Regression VPS review: bearish-аккумулятор должен
+ * отслеживать MAX high после confirmation (не MIN), иначе
+ * fillFraction считается от наименее проникшей свечи.
+ * Fixture — точное зеркало bullish mainFixture(). */
+{
+  const bearishAt = (hour: number) =>
+    single(mainFixture().map(neg), T0 + hour * HOUR)!;
+
+  closeTo(
+    bearishAt(20).fillFraction,
+    0.2,
+    "FIX: bearish first partial touch — fillFraction = 0.2"
+  );
+  closeTo(
+    bearishAt(21).fillFraction,
+    0.5,
+    "FIX: bearish CE touch — fillFraction = 0.5"
+  );
+  closeTo(
+    bearishAt(22).fillFraction,
+    1,
+    "FIX: bearish full excursion — fillFraction = 1"
+  );
+
+  // Несколько bearish post-confirmation свечей: 0.2 → 0.5 →
+  // 0.3 (мельче): fillFraction остаётся MAX = 0.5.
+  const seq = [
+    ...fvgBase(103.625).map(neg),
+    neg(mk(18, 105, 106, 106.5, 103.5)),    // 0.2
+    neg(mk(19, 105, 106, 106.5, 103.3125)), // 0.5 (CE)
+    neg(mk(20, 105, 106, 106.5, 103.4375))  // 0.3 (мельче)
+  ];
+
+  const retained = single(seq, T0 + 21 * HOUR)!;
+
+  closeTo(
+    retained.fillFraction,
+    0.5,
+    "FIX: fillFraction = MAX, не откатывается (0.2 → 0.5 → 0.3 → 0.5)"
+  );
+  ok(
+    retained.state === "CE_MITIGATED" &&
+      retained.fullFilledByExcursionAt === null &&
+      retained.invalidatedByCloseAt === null,
+    "FIX: ретеншн не порождает ложных full-fill/invalidation"
+  );
+
+  /* SYMMETRY: для геометрически зеркальных
+   * bullish/bearish fixtures на одинаковом asOf
+   * fillFraction совпадают с tolerance 1e-9. */
+  let symmetric = true;
+
+  for (const hour of [20, 21, 22, 23]) {
+    const bull = single(mainFixture(), T0 + hour * HOUR)!;
+    const bear = single(mainFixture().map(neg), T0 + hour * HOUR)!;
+
+    if (
+      Math.abs(bull.fillFraction - bear.fillFraction) >
+      1e-9
+    ) {
+      symmetric = false;
+    }
+  }
+
+  ok(
+    symmetric,
+    "FIX: symmetry — bullish.fillFraction === bearish.fillFraction на зеркальных fixtures (+20h/+21h/+22h/+23h)"
+  );
+}
+
 /* ---------- итог ---------- */
 
 console.log(`Itog: ${passed}/${total}`);

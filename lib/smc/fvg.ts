@@ -33,8 +33,9 @@
  *   ceTouchedAt             — первая d с d.low <= ce   (включительно);
  *   fullFilledByExcursionAt — первая d с d.low <= bottom (включительно);
  *   invalidatedByCloseAt    — первая d с d.close < bottom (строго);
- *   fillFraction            — max проникновение (top - min low) / gap,
- *                             clamp [0,1], по свечам до invalidation;
+ *   fillFraction            — max проникновение в зону, clamp [0,1]:
+ *                             bullish (top - min low)/gap,
+ *                             bearish (max high - bottom)/gap;
  *   expiredAt               — эффективное закрытие (maxAgeCandles)-й
  *                             последующей свечи, если close-
  *                             invalidation не случилось раньше.
@@ -164,7 +165,17 @@ function buildLifecycle(
   config: SmcFvgConfig
 ): void {
   const bullish = fvg.direction === "up";
-  let minPenetration = Number.POSITIVE_INFINITY;
+  // МАКСИМАЛЬНОЕ проникновение в зону определяется
+  // противоположным экстремумом последующих свечей:
+  //   bullish — САМЫЙ НИЗКИЙ low после confirmation;
+  //   bearish — САМЫЙ ВЫСОКИЙ high после confirmation.
+  // Два отдельных аккумулятора — mirror-семантика явная
+  // (одна общая переменная для обоих направлений дала bug:
+  // bearish считался от min high).
+  let lowestLowAfterConfirmation =
+    Number.POSITIVE_INFINITY;
+  let highestHighAfterConfirmation =
+    Number.NEGATIVE_INFINITY;
   let scanned = 0;
 
   for (
@@ -208,7 +219,10 @@ function buildLifecycle(
         fvg.fullFilledByExcursionAt = d.effectiveCloseTime;
       }
 
-      minPenetration = Math.min(minPenetration, low);
+      lowestLowAfterConfirmation = Math.min(
+        lowestLowAfterConfirmation,
+        low
+      );
 
       if (closeInvalidated) {
         fvg.invalidatedByCloseAt = d.effectiveCloseTime;
@@ -232,7 +246,10 @@ function buildLifecycle(
         fvg.fullFilledByExcursionAt = d.effectiveCloseTime;
       }
 
-      minPenetration = Math.min(minPenetration, high);
+      highestHighAfterConfirmation = Math.max(
+        highestHighAfterConfirmation,
+        high
+      );
 
       if (closeInvalidated) {
         fvg.invalidatedByCloseAt = d.effectiveCloseTime;
@@ -241,17 +258,27 @@ function buildLifecycle(
     }
   }
 
-  // fillFraction: max проникновение в зону, clamp [0,1].
+  // fillFraction: max проникновение в зону, clamp [0,1];
+  // формулы очевидно зеркальны.
   if (scanned === 0) {
     fvg.fillFraction = 0;
-  } else {
-    const raw = bullish
-      ? (fvg.top - minPenetration) / fvg.gapSize
-      : (minPenetration - fvg.bottom) / fvg.gapSize;
+  } else if (bullish) {
+    const bullishFill =
+      (fvg.top - lowestLowAfterConfirmation) /
+      fvg.gapSize;
 
     fvg.fillFraction = Math.min(
       1,
-      Math.max(0, raw)
+      Math.max(0, bullishFill)
+    );
+  } else {
+    const bearishFill =
+      (highestHighAfterConfirmation - fvg.bottom) /
+      fvg.gapSize;
+
+    fvg.fillFraction = Math.min(
+      1,
+      Math.max(0, bearishFill)
     );
   }
 
