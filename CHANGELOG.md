@@ -897,3 +897,31 @@ Signal Engine (после живого прогона Runtime на VPS).
   6.19.3 их не видит — на 7b2bb09 VPS tsc показал
   ровно одну ошибку (этот контракт); rule 34/46:
   rank-assets не трогается.
+
+
+### Фикс layout/interactive страницы стратегии по VPS-ревью 7ddb2ef (10.09.2026)
+- /admin/strategies/[id]: страница была на блоковом
+  .shell (без сетки) — AdminNav растягивался во всю
+  ширину, редактор уезжал вниз; переведена на точный
+  layout-контракт рабочих страниц (.adminPage — grid
+  235px+1fr, AdminNav слева, StrategyEditor в
+  adminDashboard справа; responsive <=950px — средства
+  globals.css, без pixel-hack);
+- аудит интерактива редактора (статически + тесты,
+  без mutation против БД): checkbox «Стратегия
+  включена» — state + PUT enabled; «Сохранить
+  настройки» — onClick → PUT /api/admin/strategies/[id]
+  (isAdmin-gate, server-валидация config/minExchanges/
+  timeframes, prisma.strategy.update); таймфреймы и
+  числовые поля — реальная проводка; decorative
+  кнопок нет (обе <button> с onClick — проверено
+  тестом);
+- «+ Новая стратегия» (Overview): подтверждено —
+  backend создания НЕ существует; кнопка честно
+  disabled без onClick, title уточнён: «Создание
+  стратегий из админки пока не реализовано —
+  стратегия задаётся seed-скриптом»;
+- «Настроить» — реальный Link на существующий
+  /admin/strategies/[id] (тест проверяет href и цель);
+- regression: test-admin-consistency 76/76 (+13
+  проверок layout/interactive/dead-buttons).

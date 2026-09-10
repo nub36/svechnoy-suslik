@@ -557,6 +557,118 @@ ok(
   "overview-page: неиспользуемого activeMarkets больше нет"
 );
 
+/* ---------- Strategy page: layout-контракт ---------- */
+
+const strategyPage = read(
+  "app/admin/strategies/[id]/page.tsx"
+);
+
+ok(
+  strategyPage.includes('className="adminPage"') &&
+    strategyPage.includes(
+      '<section className="adminDashboard">'
+    ),
+  "strategy page: тот же layout-контракт (adminPage grid + adminDashboard), что у рабочих страниц"
+);
+ok(
+  !strategyPage.includes('className="shell"'),
+  "strategy page: старый блоковый .shell (нав во всю ширину) убран"
+);
+ok(
+  strategyPage.indexOf("<AdminNav") <
+    strategyPage.indexOf("<StrategyEditor"),
+  "strategy page: AdminNav стоит перед StrategyEditor (левая колонка)"
+);
+
+// Responsive-контракт из globals.css: сетка 235px+1fr
+// и схлопывание в одну колонку на узких экранах.
+const css = read("app/globals.css");
+ok(
+  css.includes("grid-template-columns: 235px 1fr;"),
+  "globals.css: .adminPage = 235px + 1fr (нав слева)"
+);
+ok(
+  /@media \(max-width: 950px\)/.test(css) &&
+    css.includes("grid-template-columns: 1fr;"),
+  "globals.css: на экранах <=950px adminPage схлопывается (responsive)"
+);
+
+/* ---------- Strategy page: интерактив без dead buttons ---------- */
+
+const editor = read(
+  "components/admin/StrategyEditor.tsx"
+);
+
+// Каждая кнопка редактора обязана иметь onClick.
+const buttonTags =
+  editor.match(/<button[\s\S]*?>/g) ?? [];
+ok(
+  buttonTags.length === 2 &&
+    buttonTags.every((t) => t.includes("onClick=")),
+  "strategy editor: обе кнопки (таймфрейм, сохранить) имеют onClick — нет decorative"
+);
+
+// Checkbox «Стратегия включена» — реальный:
+// state + обработчик + попадание в PUT.
+ok(
+  editor.includes("checked={enabled}") &&
+    editor.includes("setEnabled(e.target.checked)") &&
+    editor.includes("method: \"PUT\""),
+  "strategy editor: checkbox включённости подключен к state и PUT"
+);
+ok(
+  editor.includes(
+    "`/api/admin/strategies/${strategy.id}`"
+  ),
+  "strategy editor: сохранение бьёт в реальный API-роут"
+);
+
+// API-роут статически: ADMIN-gate + запись enabled.
+const apiRoute = read(
+  "app/api/admin/strategies/[id]/route.ts"
+);
+ok(
+  apiRoute.includes("isAdmin()") &&
+    apiRoute.includes("prisma.strategy.update") &&
+    apiRoute.includes(
+      "enabled: Boolean(body.enabled)"
+    ),
+  "strategy API: isAdmin-gate + prisma.strategy.update(enabled) — toggle реально сохраняется"
+);
+
+/* ---------- Overview: Настроить / Новая стратегия ---------- */
+
+ok(
+  overviewPage.includes(
+    "href={`/admin/strategies/${strategy.id}`}"
+  ),
+  "overview: «Настроить» — реальный href на существующий редактор"
+);
+ok(
+  read("app/admin/strategies/[id]/page.tsx").includes(
+    "<StrategyEditor"
+  ),
+  "overview: цель «Настроить» рендерит StrategyEditor"
+);
+
+// «Новая стратегия»: честно disabled + объяснение,
+// без выдуманного onClick/формы.
+const newBtn =
+  overviewPage.match(
+    /<button[\s\S]*?\+ Новая стратегия[\s\S]*?<\/button>/
+  )?.[0] ?? "";
+ok(
+  newBtn.includes("disabled") &&
+    !newBtn.includes("onClick"),
+  "overview: «+ Новая стратегия» disabled без выдуманного обработчика"
+);
+ok(
+  overviewPage.includes(
+    "Создание стратегий из админки пока не реализовано"
+  ),
+  "overview: у «+ Новая стратегия» честное объяснение"
+);
+
 /* ---------- итог (после async-проверок) ---------- */
 
 checkOverviewSemantics().then(() => {

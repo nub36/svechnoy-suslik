@@ -1914,3 +1914,21 @@ rank-assets TS7006 в песочнице vs 0 на VPS» —
 для Prisma-параметров — только с учётом mutability
 реальных Prisma-типов; stub-песочница проверяет
 логику, но не Prisma-варианс.
+
+---
+
+## §31f. Фикс layout/interactive стратегии (10.09.2026)
+
+VPS browser acceptance 7ddb2ef: /admin/strategies/[id]
+использовала .shell вместо .adminPage — AdminNav во
+всю ширину, редактор внизу. Исправлено на общий
+layout-контракт (grid 235px+1fr + adminDashboard,
+responsive из globals.css). Интерактив редактора
+проверен статически и тестами (checkbox→PUT enabled,
+save→PUT с валидацией и update, без mutation-тестов
+против production БД). «+ Новая стратегия» — честно
+disabled с явным объяснением (backend создания не
+существует). Тестов в test-admin-consistency стало 76.
+Подтверждённые числа (100/401/2357, 14683/48,
+Top-100 semantics, Notifications, Journal, Runtime,
+72, 2) не тронуты.

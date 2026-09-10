@@ -219,7 +219,7 @@ export default async function AdminPage() {
             <button
               className="adminPrimaryButton"
               disabled
-              title="Добавим вместе с конструктором стратегий"
+              title="Создание стратегий из админки пока не реализовано — стратегия задаётся seed-скриптом"
             >
               + Новая стратегия
             </button>
