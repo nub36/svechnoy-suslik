@@ -299,7 +299,7 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
     if (!confirm(`Сбросить секцию «${section}» к значениям по умолчанию?`)) return;
     if (section === "Порог") {
       setConfig((c) => ({ ...c, minimumSignalScore: DEFAULT_CONFIG.minimumSignalScore }));
-    } else if (section === "Market Structure") {
+    } else if (section === "Market Structure" || section === "Структура рынка (Market Structure)") {
       setConfig((c) => ({
         ...c,
         swingLeft: DEFAULT_CONFIG.swingLeft,
@@ -317,9 +317,9 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
         orderBlockFreshBars: DEFAULT_CONFIG.orderBlockFreshBars,
         fvgFreshBars: DEFAULT_CONFIG.fvgFreshBars,
       }));
-    } else if (section === "Dealing Range") {
+    } else if (section === "Dealing Range" || section === "Ценовой диапазон: Premium / Discount (Dealing Range)") {
       setConfig((c) => ({ ...c, eqBand: DEFAULT_CONFIG.eqBand }));
-    } else if (section === "Scoring") {
+    } else if (section === "Scoring" || section === "Оценка сигнала — веса факторов (Scoring)") {
       setConfig((c) => ({ ...c, weights: { ...DEFAULT_WEIGHTS } }));
     } else if (section === "Filters") {
       setConfig((c) => ({ ...c, filters: { ...DEFAULT_CONFIG.filters } }));
@@ -389,6 +389,39 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
         </label>
       </section>
 
+      <section className="editorSection" style={{ background: "#f0f9ff", border: "1px solid #bae6fd" }}>
+        <h2>Как работает Smart Money Strategy</h2>
+        <p style={{ fontSize: 13, lineHeight: "1.5" }}>
+          Цепочка оценки: <b>CLOSED свечи</b> → структура рынка (Market Structure) → пробой структуры (BOS) / снятие
+          ликвидности (Liquidity Sweep) / блоки ордеров (Order Blocks) / ценовой дисбаланс (Fair Value Gap / FVG) /
+          ценовой диапазон (Premium / Discount) → отдельные баллы{" "}
+          <b>LONG</b> и <b>SHORT</b> → порог <code>minimumSignalScore</code> → подтверждение на нескольких биржах (
+          <code>minExchanges</code>) → итог <b>LONG</b> / <b>SHORT</b> / <b>NEUTRAL</b> / <b>cannot-evaluate</b>.
+        </p>
+        <ul style={{ fontSize: 13, margin: "8px 0 0 18px", lineHeight: "1.5" }}>
+          <li>Используются <b>только полностью закрытые (CLOSED) свечи</b>; текущая формирующаяся свеча не участвует.</li>
+          <li>
+            Будущие свечи не используются — <b>no lookahead</b>: оценка на момент <code>asOf</code> видит только свечи с{" "}
+            <code>effectiveCloseTime ≤ asOf</code>.
+          </li>
+          <li>
+            <b>LONG / SHORT</b> — результат правил и scoring (0..100 баллов), <b>не прогноз с гарантией</b>.
+          </li>
+          <li>
+            <b>NEUTRAL</b> означает, что условия направления недостаточно подтверждены или конфликтуют (например, LONG и SHORT
+            одновременно набрали ≥ порога). Это <b>не</b> означает, что цена «не изменится».
+          </li>
+          <li>
+            <b>cannot-evaluate</b> означает, что данных недостаточно (например, &lt;84 закрытых свечей для swing 20) либо
+            корректная оценка сейчас невозможна — рынок пропускается.
+          </li>
+          <li>
+            <b>Signal Engine не развёрнут.</b> Прибыльность не гарантируется и должна проверяться отдельным
+            backtest / out-of-sample.
+          </li>
+        </ul>
+      </section>
+
       <div className="adminPanel" style={{ background: "#fffbeb", border: "1px solid #fcd34d", padding: 12, borderRadius: 8, marginBottom: 16 }}>
         <b>Предупреждение:</b> Изменение параметров влияет на будущие runtime-расчёты Smart Money. Signal Engine не развёрнут. Прибыльность не заявляется.
       </div>
@@ -414,15 +447,20 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
             Сбросить секцию
           </button>
         </div>
+        <p className="sectionDescription">
+          Итоговые баллы LONG/SHORT находятся в диапазоне <b>0..100</b>. Порог определяет, какой score достаточен для
+          направления. Более высокий порог = более строгий отбор, более низкий = больше потенциальных срабатываний. Высокий
+          score <b>не</b> означает гарантированную прибыль.
+        </p>
         <NumberField
-          label="Минимальная сила сигнала"
-          description="Порог 0..100. LONG если longScore≥порога, SHORT если shortScore≥порога, оба → конфликт NEUTRAL. Зависит от весов."
+          label="Минимальная сила сигнала (minimumSignalScore)"
+          description="Порог 0..100. LONG если longScore≥порога, SHORT если shortScore≥порога, оба набрали ≥порога → конфликт и NEUTRAL. Изменение меняет чувствительность, но не гарантирует качество."
           value={config.minimumSignalScore}
           onChange={(v) => setConfig({ ...config, minimumSignalScore: v })}
         />
         <NumberField
-          label="Подтверждение бирж"
-          description="Сколько из 5 бирж должны независимо подтвердить одно направление (1..5). Влияние на агрегацию: <minExchanges → NEUTRAL без конфликта."
+          label="Подтверждение бирж (minExchanges)"
+          description="Сколько независимых рынков/бирж (1..5) должны подтвердить одно направление. Большее значение = более строгий межбиржевой консенсус. Параметр не является гарантией качества."
           value={minExchanges}
           onChange={setMinExchanges}
         />
@@ -462,33 +500,39 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
       {/* Market Structure */}
       <section className="editorSection">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h2>Market Structure</h2>
+          <h2>Структура рынка (Market Structure)</h2>
           <button type="button" onClick={() => resetSection("Market Structure")} style={{ fontSize: 12 }}>
             Сбросить секцию
           </button>
         </div>
-        <p className="sectionDescription">Окна пивотов для swing и internal слоёв. Влияют на FSM, liquidity, OB, dealing range. Требуемая история 4*(maxSwing+1) свечей.</p>
+        <p className="sectionDescription">
+          <b>Swing high / swing low</b> — подтверждённые локальные вершины/минимумы более крупной структуры;{" "}
+          <b>internal structure</b> — более чувствительная внутренняя структура. <b>Left/Right</b> задают число соседних
+          CLOSED свечей, необходимое для подтверждения экстремума. Большие окна → меньше структурных точек, обычно они более
+          крупные/редкие; маленькие окна → больше чувствительности и рыночного шума. Пивот не становится известным раньше
+          правых confirmation-свечей — <b>no lookahead</b>.
+        </p>
         <div className="fieldGrid">
           <NumberField
-            label="Swing слева"
-            description="Левое окно swing-пивота (1..500). Чем больше — тем устойчивее структура, но больше требуется истории."
+            label="Swing слева (swingLeft)"
+            description="Левое окно swing-пивота (1..500). Влияет на FSM-swing, liquidity, OB-swing, dealing range."
             value={config.swingLeft}
             onChange={(v) => setConfig({ ...config, swingLeft: v })}
           />
           <NumberField
-            label="Swing справа"
-            description="Правое окно swing-пивота (1..500). Пара с swingLeft."
+            label="Swing справа (swingRight)"
+            description="Правое окно swing-пивота (1..500). Пара с swingLeft — история 4*(max+1) свечей."
             value={config.swingRight}
             onChange={(v) => setConfig({ ...config, swingRight: v })}
           />
           <NumberField
-            label="Internal слева"
-            description="Левое окно internal-пивота (1..500). Мелкая структура."
+            label="Internal слева (internalLeft)"
+            description="Левое окно internal-пивота (1..500). Мелкая структура внутри swing."
             value={config.internalLeft}
             onChange={(v) => setConfig({ ...config, internalLeft: v })}
           />
           <NumberField
-            label="Internal справа"
+            label="Internal справа (internalRight)"
             description="Правое окно internal-пивота (1..500)."
             value={config.internalRight}
             onChange={(v) => setConfig({ ...config, internalRight: v })}
@@ -499,14 +543,20 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
       {/* Volatility */}
       <section className="editorSection">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h2>Волатильность</h2>
+          <h2>Волатильность (ATR)</h2>
           <button type="button" onClick={() => resetSection("Волатильность")} style={{ fontSize: 12 }}>
             Сбросить секцию
           </button>
         </div>
+        <p className="sectionDescription">
+          <b>ATR</b> измеряет типичный диапазон движения цены и используется для нормализации условий между разными
+          активами/волатильностями. <b>atrPeriod</b> — количество CLOSED свечей расчётного периода. Меньше период → быстрее
+          реакция, больше чувствительности/шума; больше период → более сглаженная оценка, медленнее адаптация. Ни один вариант не
+          заявляется как «лучший».
+        </p>
         <NumberField
-          label="Период ATR"
-          description="Единый период ATR для displacement/FVG/liquidity/OB (≥1). При недоступном ATR факт not-evaluable."
+          label="Период ATR (atrPeriod)"
+          description="Единый период ATR для displacement/FVG/liquidity/OB (≥1). При недоступном ATR на последней свече факт не оценивается."
           value={config.atrPeriod}
           onChange={(v) => setConfig({ ...config, atrPeriod: v })}
         />
@@ -520,29 +570,33 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
             Сбросить секцию
           </button>
         </div>
-        <p className="sectionDescription">Сколько CLOSED свечей после события оно остаётся свежим (0 = только текущий бар). Индексная семантика, не wall-clock.</p>
+        <p className="sectionDescription">
+          SMC-событие не должно бесконечно влиять на текущий score. Все значения измеряются <b>в CLOSED свечах</b>, а не в
+          wall-clock времени. Больше значение = событие влияет дольше; меньше = требуется более свежее событие. Не путать
+          freshness в scoring с жизненным циклом (lifecycle/expiry) в core.
+        </p>
         <div className="fieldGrid">
           <NumberField
-            label="Свежесть BOS"
-            description="Последний BOS по фазе (≥0). Используется в компоненте RECENT_SWING_BOS."
+            label="Свежесть BOS (structureEventFreshBars)"
+            description="Сколько закрытых свечей недавний пробой структуры (BOS) остаётся релевантным (≥0)."
             value={config.structureEventFreshBars}
             onChange={(v) => setConfig({ ...config, structureEventFreshBars: v })}
           />
           <NumberField
-            label="Свежесть sweep"
-            description="Последний SWEPT уровень ликвидности (≥0)."
+            label="Свежесть снятия ликвидности (sweepFreshBars)"
+            description="Сколько закрытых свечей остаётся релевантным подтверждённое снятие ликвидности (Liquidity Sweep) (≥0)."
             value={config.sweepFreshBars}
             onChange={(v) => setConfig({ ...config, sweepFreshBars: v })}
           />
           <NumberField
-            label="Свежесть swing OB"
-            description="Последний активный swing OB (OPEN|MITIGATED) (≥0)."
+            label="Свежесть Swing OB (orderBlockFreshBars)"
+            description="Как долго активный блок ордеров swing-структуры (Order Block) может участвовать в scoring (≥0)."
             value={config.orderBlockFreshBars}
             onChange={(v) => setConfig({ ...config, orderBlockFreshBars: v })}
           />
           <NumberField
-            label="Свежесть FVG"
-            description="Последний активный FVG (OPEN|TOUCHED|CE_MITIGATED) (≥0)."
+            label="Свежесть FVG (fvgFreshBars)"
+            description="Как долго актуальный ценовой дисбаланс (Fair Value Gap / FVG) может участвовать в scoring (≥0)."
             value={config.fvgFreshBars}
             onChange={(v) => setConfig({ ...config, fvgFreshBars: v })}
           />
@@ -552,13 +606,20 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
       {/* Dealing Range */}
       <section className="editorSection">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h2>Dealing Range</h2>
+          <h2>Ценовой диапазон: Premium / Discount (Dealing Range)</h2>
           <button type="button" onClick={() => resetSection("Dealing Range")} style={{ fontSize: 12 }}>
             Сбросить секцию
           </button>
         </div>
+        <p className="sectionDescription">
+          Определяется положение текущей цены внутри активного dealing range. Нижняя часть —{" "}
+          <b>Discount</b>, верхняя — <b>Premium</b>, область около середины — <b>Equilibrium</b>.{" "}
+          <code>eqBand</code> задаёт ширину нейтральной полосы вокруг середины; больший <code>eqBand</code> = более
+          широкая Equilibrium-зона. Это только один из 9 факторов — <b>не</b> означает «Discount = покупать» и «Premium =
+          продавать».
+        </p>
         <NumberField
-          label="Полоса равновесия eqBand"
+          label="Полоса равновесия (eqBand)"
           description="Полуширина EQUILIBRIUM (0 ≤ eqBand <0.5). При 0.02: <0.48 discount, >0.52 premium, иначе equilibrium."
           value={config.eqBand}
           step="0.01"
@@ -569,39 +630,57 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
       {/* Scoring */}
       <section className="editorSection">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h2>Веса компонентов (Scoring)</h2>
+          <h2>Оценка сигнала — веса факторов (Scoring)</h2>
           <button type="button" onClick={() => resetSection("Scoring")} style={{ fontSize: 12 }}>
             Сбросить секцию
           </button>
         </div>
-        <p className="sectionDescription">9 компонентов, сумма строго 100. Один факт — одни баллы, без double-count. Direction резолвится по порогу.</p>
+        <p className="sectionDescription">
+          LONG и SHORT получают отдельные баллы. 9 факторов дают вклад согласно весам; сумма весов обязана быть{" "}
+          <b>ровно 100</b>. Вес <code>0</code> убирает вклад фактора в итоговый score, но <b>не</b> обязательно отключает
+          вычисление соответствующей структуры в core. Больший вес = фактор сильнее влияет на итог; изменение весов не
+          означает автоматического улучшения стратегии.
+        </p>
         <div className="fieldGrid">
           {(
             [
-              ["swingStructureBias", "Swing тренд (A)"],
-              ["recentSwingBos", "Свежий BOS (B)"],
-              ["internalStructure", "Internal тренд (C)"],
-              ["liquiditySweep", "Sweep ликвидности (D)"],
-              ["swingOrderBlock", "Swing OB (E)"],
-              ["internalOrderBlock", "Internal OB (F)"],
-              ["fvg", "FVG (G)"],
-              ["rangePosition", "Позиция в range (H)"],
-              ["confluence", "Confluence OB+FVG (I)"],
+              ["swingStructureBias", "Основное направление swing-структуры (SWING_TREND)"],
+              ["recentSwingBos", "Недавний пробой структуры — BOS (RECENT_SWING_BOS)"],
+              ["internalStructure", "Внутренняя структура (INTERNAL_TREND)"],
+              ["liquiditySweep", "Снятие ликвидности (LIQUIDITY_SWEEP)"],
+              ["swingOrderBlock", "Swing блок ордеров (SWING_ORDER_BLOCK)"],
+              ["internalOrderBlock", "Internal блок ордеров (INTERNAL_ORDER_BLOCK)"],
+              ["fvg", "Ценовой дисбаланс — FVG (FVG)"],
+              ["rangePosition", "Положение в Premium/Discount (RANGE_POSITION)"],
+              ["confluence", "Совпадение блока ордеров + FVG (OB_FVG_CONFLUENCE)"],
             ] as const
-          ).map(([key, title]) => (
-            <NumberField
-              key={key}
-              label={title}
-              description={`Вес ${key} (0..100).`}
-              value={config.weights[key as keyof SmcWeights]}
-              onChange={(v) =>
-                setConfig((c) => ({
-                  ...c,
-                  weights: { ...c.weights, [key]: v },
-                }))
-              }
-            />
-          ))}
+          ).map(([key, title]) => {
+            const descriptions: Record<string, string> = {
+              swingStructureBias: "Показывает направление более крупной подтверждённой структуры рынка.",
+              recentSwingBos: "BOS — подтверждённый пробой ранее сформированного структурного уровня.",
+              internalStructure: "Направление более мелкой и чувствительной структуры рынка.",
+              liquiditySweep: "Фиксирует подтверждённое снятие ликвидности за структурным максимумом/минимумом.",
+              swingOrderBlock: "Блок ордеров (Order Block), относящийся к более крупной swing-структуре.",
+              internalOrderBlock: "Блок ордеров внутренней, более чувствительной структуры.",
+              fvg: "Ценовой дисбаланс между свечами (Fair Value Gap), определяемый формальными правилами SMC core.",
+              rangePosition: "Учитывает, где находится текущая цена внутри активного dealing range.",
+              confluence: "Дополнительный фактор, когда выбранные блок ордеров и FVG одного направления пересекаются.",
+            };
+            return (
+              <NumberField
+                key={key}
+                label={title}
+                description={descriptions[key as string] + " Вес 0..100."}
+                value={config.weights[key as keyof SmcWeights]}
+                onChange={(v) =>
+                  setConfig((c) => ({
+                    ...c,
+                    weights: { ...c.weights, [key]: v },
+                  }))
+                }
+              />
+            );
+          })}
         </div>
         <div className="scoreTotal" style={{ color: weightSum === 100 ? "inherit" : "#dc2626" }}>
           Сумма весов: <b>{weightSum}</b> {weightSum !== 100 ? "— должна быть 100" : "✓"}
@@ -611,14 +690,17 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
       {/* Filters */}
       <section className="editorSection">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h2>Фильтры</h2>
+          <h2>Фильтры рынков</h2>
           <button type="button" onClick={() => resetSection("Filters")} style={{ fontSize: 12 }}>
             Сбросить секцию
           </button>
         </div>
+        <p className="sectionDescription">
+          Фильтры определяют, какие рынки вообще допускаются до оценки. Они <b>не</b> добавляют баллы LONG/SHORT.
+        </p>
         <NumberField
-          label="Мин. объём рынка 24ч (USDT)"
-          description="Рынки с меньшим оборотом не оцениваются. 0 = без фильтра."
+          label="Мин. объём рынка 24ч — quote volume (minimumQuoteVolume24h)"
+          description="Минимальный 24h quote volume в USDT. Рынок ниже порога исключается; 0 = фильтр объёма отключён."
           value={config.filters.minimumQuoteVolume24h}
           onChange={(v) => setConfig((c) => ({ ...c, filters: { ...c.filters, minimumQuoteVolume24h: v } }))}
         />
@@ -639,17 +721,33 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
 
       {/* Informational hardcoded */}
       <details className="editorSection" style={{ padding: 12 }}>
-        <summary style={{ cursor: "pointer", fontWeight: 600 }}>Продвинуто — hardcoded параметры (Phase 3D candidates)</summary>
+        <summary style={{ cursor: "pointer", fontWeight: 600 }}>Продвинутые параметры — Phase 3D (только просмотр)</summary>
         <p className="muted" style={{ fontSize: 13, marginTop: 8 }}>
-          Следующие параметры сейчас фиксированы в SMC core и не настраиваются в Phase 3C. Показаны для справки — будут вынесены в Phase 3D.
+          Следующие параметры сейчас фиксированы в SMC core и не настраиваются в Phase 3C. Сейчас эти параметры доступны
+          только для просмотра. Возможность настройки будет добавлена после отдельной проверки Phase 3D.
         </p>
-        <ul style={{ fontSize: 13, margin: "8px 0 0 18px" }}>
-          <li>displacement: bodyAtrMin 1.5, rangeAtrMin 2.0, bullCloseLocMin 0.60, bearCloseLocMax 0.40</li>
-          <li>FVG: minGapAtr 0.10, maxAgeCandles 0 (expiry выкл)</li>
-          <li>Liquidity: eqToleranceAtr 0.10, eqConfirmBars 2, sweepMinPenetrationAtr 0.05, maxAge 0</li>
-          <li>OB: impulseMaxCandles 3, confirmMaxCandles 10, maxAge 750, sweepLookback 5</li>
-          <li>Range: только eqBand + swing окна (остальное в core)</li>
-        </ul>
+        <div style={{ fontSize: 13, marginTop: 12 }}>
+          <p>
+            <b>Displacement (импульс):</b> определяет, насколько сильным должен быть импульс относительно ATR и где
+            закрывается импульсная свеча. Текущие значения: bodyAtrMin 1.5, rangeAtrMin 2.0, bullCloseLocMin 0.60,
+            bearCloseLocMax 0.40.
+          </p>
+          <p>
+            <b>Fair Value Gap (FVG):</b> определяет минимальный размер ценового дисбаланса и правила его жизненного цикла.
+            Текущие: minGapAtr 0.10, maxAgeCandles 0 (expiry выключен).
+          </p>
+          <p>
+            <b>Liquidity (ликвидность):</b> определяет допуск для equal highs/lows, подтверждение liquidity pool и
+            минимальную глубину sweep. Текущие: eqToleranceAtr 0.10, eqConfirmBars 2, sweepMinPenetrationAtr 0.05, maxAge 0.
+          </p>
+          <p>
+            <b>Order Blocks (блоки ордеров):</b> определяет правила поиска исходной свечи/зоны, импульсного подтверждения,
+            возраста и контекста sweep. Текущие: impulseMaxCandles 3, confirmMaxCandles 10, maxAge 750, sweepLookback 5.
+          </p>
+          <p>
+            <b>Dealing Range:</b> кроме eqBand и swing-окон, остальные правила диапазона фиксированы в core.
+          </p>
+        </div>
       </details>
 
       <div className="editorSaveBar">
