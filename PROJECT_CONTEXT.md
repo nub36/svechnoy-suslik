@@ -1932,3 +1932,16 @@ disabled с явным объяснением (backend создания не
 Подтверждённые числа (100/401/2357, 14683/48,
 Top-100 semantics, Notifications, Journal, Runtime,
 72, 2) не тронуты.
+
+---
+
+## §31g. Раздел «Стратегии» (10.09.2026)
+
+VPS browser acceptance 9bf14ce: пункт «Стратегии»
+вёл на /admin#strategies (выглядел неработающим).
+Создан самостоятельный раздел /admin/strategies
+(реальные Strategy записи, настройка внутри карточки,
+единый layout), AdminNav переключён на маршрут.
+«+ Новая стратегия» — disabled с единым объяснением
+на /admin и /admin/strategies; create-API отсутствует
+(проверяется тестом). test-admin-consistency 84/84.

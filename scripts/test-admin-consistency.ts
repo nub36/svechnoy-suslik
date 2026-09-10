@@ -13,7 +13,10 @@
  * Запуск: npx tsx scripts/test-admin-consistency.ts
  */
 
-import { readFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync
+} from "node:fs";
 import {
   isInTopUniverse,
   LEGACY_TOP500_SIZE,
@@ -104,7 +107,7 @@ const nav = read(
 
 const expectedItems: [string, string][] = [
   ["overview", "/admin"],
-  ["strategies", "/admin#strategies"],
+  ["strategies", "/admin/strategies"],
   ["indicators", "/admin/indicators"],
   ["data", "/admin/data"],
   ["markets", "/admin/markets"],
@@ -123,6 +126,14 @@ for (const [key, href] of expectedItems) {
   );
 }
 
+// «Стратегии» больше НЕ anchor на Overview:
+// раздел должен быть самостоятельным маршрутом.
+ok(
+  !nav.includes("/admin#strategies") &&
+    nav.includes('href: "/admin/strategies"'),
+  "nav: Стратегии → /admin/strategies (не /admin#strategies)"
+);
+
 // Порядок: Мониторинг → Уведомления → Журнал.
 const iMonitoring = nav.indexOf('key: "monitoring"');
 const iNotifications =
@@ -140,6 +151,7 @@ ok(
 
 const pages: [string, string][] = [
   ["app/admin/page.tsx", "overview"],
+  ["app/admin/strategies/page.tsx", "strategies"],
   ["app/admin/strategies/[id]/page.tsx", "strategies"],
   ["app/admin/indicators/page.tsx", "indicators"],
   ["app/admin/data/page.tsx", "data"],
@@ -557,6 +569,71 @@ ok(
   "overview-page: неиспользуемого activeMarkets больше нет"
 );
 
+/* ---------- Раздел /admin/strategies ---------- */
+
+const strategiesSection = read(
+  "app/admin/strategies/page.tsx"
+);
+
+ok(
+  strategiesSection.includes(
+    'className="adminPage"'
+  ) &&
+    strategiesSection.includes(
+      '<section className="adminDashboard">'
+    ),
+  "strategies section: единый admin layout (grid + dashboard)"
+);
+ok(
+  strategiesSection.includes(
+    "prisma.strategy.findMany"
+  ),
+  "strategies section: реальный источник — Strategy.findMany из PostgreSQL"
+);
+ok(
+  strategiesSection.includes(
+    'href={`/admin/strategies/${strategy.id}`}'
+  ),
+  "strategies section: «Настроить» — реальный href на редактор"
+);
+// Проверяем КОД страницы, не док-комментарии.
+const sectionNoComments = strategiesSection
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .replace(/\/\/[^\n]*/g, "");
+ok(
+  !/winrate|pnl|profit|прибыль/i.test(
+    sectionNoComments
+  ),
+  "strategies section: нет fake-метрик прибыльности/сигналов"
+);
+
+// Disabled «Новая стратегия» с объяснением (и на
+// разделе, и на Overview — одинаковая формулировка).
+const sectionNewBtn =
+  strategiesSection.match(
+    /<button[\s\S]*?\+ Новая стратегия[\s\S]*?<\/button>/
+  )?.[0] ?? "";
+ok(
+  sectionNewBtn.includes("disabled") &&
+    !sectionNewBtn.includes("onClick"),
+  "strategies section: «+ Новая стратегия» disabled без обработчика"
+);
+ok(
+  strategiesSection.includes(
+    "Добавление новых стратегий станет доступно после разработки и проверки стратегии"
+  ) &&
+    overviewPage.includes(
+      "Добавление новых стратегий станет доступно после разработки и проверки стратегии"
+    ),
+  "strategies/overview: у disabled-кнопки есть объяснение (единый текст)"
+);
+
+// Create-стратегии API НЕ существует в этом коммите.
+ok(
+  !existsSync("app/api/admin/strategies/route.ts"),
+  "strategies: нет create-эндпоинта (backend создания отсутствует сознательно)"
+);
+
 /* ---------- Strategy page: layout-контракт ---------- */
 
 const strategyPage = read(
@@ -662,12 +739,7 @@ ok(
     !newBtn.includes("onClick"),
   "overview: «+ Новая стратегия» disabled без выдуманного обработчика"
 );
-ok(
-  overviewPage.includes(
-    "Создание стратегий из админки пока не реализовано"
-  ),
-  "overview: у «+ Новая стратегия» честное объяснение"
-);
+
 
 /* ---------- итог (после async-проверок) ---------- */
 

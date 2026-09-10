@@ -925,3 +925,28 @@ Signal Engine (после живого прогона Runtime на VPS).
   /admin/strategies/[id] (тест проверяет href и цель);
 - regression: test-admin-consistency 76/76 (+13
   проверок layout/interactive/dead-buttons).
+
+
+### Раздел «Стратегии» админки по VPS-ревью 9bf14ce (10.09.2026)
+- новый самостоятельный маршрут /admin/strategies:
+  реальные записи Strategy из PostgreSQL (имя/версия/
+  статус/включённость/таймфреймы/minExchanges), ссылка
+  «Настроить» → /admin/strategies/[id], единый
+  layout-контракт (adminPage grid + AdminNav
+  active="strategies"); без fake PnL/winrate/счётчиков
+  сигналов;
+- AdminNav: «Стратегии» → /admin/strategies (раньше —
+  anchor /admin#strategies, воспринимался как
+  неработающая кнопка);
+- Overview: карточка стратегий сохранена + добавлена
+  ссылка «Открыть раздел «Стратегии» →»;
+- «+ Новая стратегия» на обоих страницах честно
+  disabled с единым объяснением «Добавление новых
+  стратегий станет доступно после разработки и
+  проверки стратегии»; create-backend сознательно
+  не создаётся (тест проверяет отсутствие
+  app/api/admin/strategies/route.ts);
+- тесты: test-admin-consistency 84/84 (+8: раздел,
+  источник, href, отсутствие fake-метрик в коде,
+  disabled+объяснение на двух страницах, отсутствие
+  create-API, запрет anchor-href).

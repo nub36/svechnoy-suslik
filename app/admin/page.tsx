@@ -214,12 +214,18 @@ export default async function AdminPage() {
                 {published} активных
                 опубликованных стратегий.
               </p>
+
+              <p>
+                <Link href="/admin/strategies">
+                  Открыть раздел «Стратегии» →
+                </Link>
+              </p>
             </div>
 
             <button
               className="adminPrimaryButton"
               disabled
-              title="Создание стратегий из админки пока не реализовано — стратегия задаётся seed-скриптом"
+              title="Добавление новых стратегий станет доступно после разработки и проверки стратегии"
             >
               + Новая стратегия
             </button>

@@ -34,7 +34,7 @@ const ITEMS: {
   },
   {
     key: "strategies",
-    href: "/admin#strategies",
+    href: "/admin/strategies",
     label: "Стратегии",
     icon: SlidersHorizontal
   },

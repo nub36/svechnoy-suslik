@@ -7,6 +7,7 @@ app/admin/monitoring/page.tsx
 app/admin/notifications/page.tsx
 app/admin/page.tsx
 app/admin/strategies/[id]/page.tsx
+app/admin/strategies/page.tsx
 app/api/admin/strategies/[id]/route.ts
 app/api/auth/[...nextauth]/route.ts
 app/api/chart/candles/route.ts
