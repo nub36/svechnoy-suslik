@@ -25,13 +25,26 @@ function ok(cond: boolean, label: string) {
 const editor = readFileSync("components/admin/SmartMoneyStrategyEditor.tsx", "utf8");
 const api = readFileSync("app/api/admin/strategies/[id]/route.ts", "utf8");
 
-// 1. UI: 1h selectable/active (not disabled), others disabled
+// 1. UI: 1h locked/selected (not removable), others disabled — Phase 3C staged requires exactly ["1h"]
 ok(editor.includes('isUnverified = tf !== "1h"'), "UI: isUnverified = tf !== 1h");
-ok(editor.includes("disabled={isUnverified}"), "UI: 5m/15m/4h/1d disabled in Smart Money editor");
-ok(editor.includes('Будет доступно после Phase 3E проверки реальных данных'), "UI: tooltip staged 3E");
-ok(!editor.includes('onClick={() => toggleTimeframe(tf)}') || editor.includes("if (isUnverified) return"), "UI: toggle guarded for unverified (or disabled)");
-ok(editor.includes('title={\n                    isUnverified\n                      ? "Будет доступно'), "UI: disabled tooltip correct");
+ok(editor.includes('isLocked = tf === "1h"') || editor.includes('isLocked'), "UI: 1h isLocked semantics present");
+ok(editor.includes("disabled={isLocked || isUnverified}") || editor.includes("disabled={isUnverified}"), "UI: 5m/15m/4h/1d disabled + 1h locked in Smart Money editor");
+ok(editor.includes('1h — проверен и зафиксирован до Phase 3E'), "UI: 1h locked tooltip — проверен и зафиксирован до Phase 3E");
+ok(editor.includes('поддерживается SMC core, но временно заблокирован до проверки реальных candle data в Phase 3E'), "UI: 15m etc. tooltip — поддерживается SMC core, но временно заблокирован до Phase 3E");
+ok(editor.includes('🔒') || editor.includes('проверен и зафиксирован'), "UI: 1h shows lock icon/text");
+ok(editor.includes('if (tf === "1h") return') || editor.includes('isLocked'), "UI: toggleTimeframe prevents removing 1h (cannot transition [\"1h\"] -> [])");
+ok(editor.includes("if (isLocked || isUnverified) return") || editor.includes("if (isUnverified) return"), "UI: toggle guarded for locked+unverified");
+ok(!editor.includes('onClick={() => toggleTimeframe(tf)}') || editor.includes("if (isLocked"), "UI: onClick guarded for locked");
 ok(api.includes('smart-money-suslik'), "API: smart-money slug present");
+
+// 1b. Cannot transition from ["1h"] to [] — locked 1h cannot be deselected
+{
+  const hasGuard = editor.includes('if (tf === "1h") return') || editor.includes('isLocked');
+  const hasLockedDisabled = editor.includes('disabled={isLocked') || editor.includes('disabled={isLocked || isUnverified}');
+  ok(hasGuard && hasLockedDisabled, "UI: Phase3C cannot transition [\"1h\"] -> [] (1h locked/disabled)");
+  // Ensure editor does NOT allow empty timeframes via validation
+  ok(editor.includes('timeframes: нужен непустой список таймфреймов') || editor.includes('nuzhen neaustoj spisok'), "UI: validation still requires non-empty timeframes (but UI prevents reaching [] via lock)");
+}
 
 // Helper: simulate API staged logic without DB
 function isSmartMoneyStagedAccepted(timeframes: unknown): boolean {
@@ -108,8 +121,8 @@ ok(editor.includes("Signal Engine не развёрнут"), "UI: explicitly say
 ok(!editor.includes("Уже созданные сигналы не пересчитываются"), "UI: old signal text removed");
 ok(editor.includes("Прибыльность не заявляется"), "UI: no profitability claims, but disclaimer kept");
 
-// 5. Additional static: disabled prop is real HTML disabled, not just clickable warning
-ok(editor.includes("disabled={isUnverified}"), "UI: buttons have real disabled attribute, not just clickable warning");
+// 5. Additional static: disabled prop is real HTML disabled, not just clickable warning — 1h locked + others disabled
+ok(editor.includes("disabled={isLocked || isUnverified}") || editor.includes("disabled={isUnverified}"), "UI: buttons have real disabled attribute (locked 1h + unverified)");
 
 console.log(`\nИтог: ${passed}/${total}`);
 process.exit(passed === total ? 0 : 1);

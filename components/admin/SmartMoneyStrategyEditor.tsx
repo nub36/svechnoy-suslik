@@ -292,6 +292,8 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
   void _updateSection;
 
   function toggleTimeframe(tf: string) {
+    // Phase 3C staged: 1h is locked — cannot be removed (would produce [] invalid)
+    if (tf === "1h") return;
     setTimeframes((cur) => (cur.includes(tf) ? cur.filter((x) => x !== tf) : [...cur, tf]));
   }
 
@@ -470,30 +472,32 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
           <div className="timeframeSelector">
             {([...ALLOWED_TFS] as string[]).map((tf) => {
               const active = timeframes.includes(tf);
+              const isLocked = tf === "1h";
               const isUnverified = tf !== "1h";
               return (
                 <button
                   type="button"
                   key={tf}
                   className={active ? "tfActive" : ""}
-                  disabled={isUnverified}
+                  disabled={isLocked || isUnverified}
                   onClick={() => {
-                    if (isUnverified) return;
+                    if (isLocked || isUnverified) return;
                     toggleTimeframe(tf);
                   }}
                   title={
-                    isUnverified
-                      ? "Будет доступно после Phase 3E проверки реальных данных"
-                      : "Production-safe: closeTime проверен на реальных данных"
+                    isLocked
+                      ? "1h — проверен и зафиксирован до Phase 3E"
+                      : `${tf} поддерживается SMC core, но временно заблокирован до проверки реальных candle data в Phase 3E.`
                   }
                 >
                   {tf}
-                  {isUnverified ? " *" : ""}
+                  {isLocked ? " 🔒" : isUnverified ? " *" : ""}
                 </button>
               );
             })}
           </div>
           <small style={{ color: "#92400e" }}>* 5m/15m/4h/1d — disabled до Phase 3E. Архитектура поддерживает, но closeTime-консистентность подтверждена только для 1h.</small>
+          <small style={{ color: "#065f46", display: "block", marginTop: 4 }}>🔒 1h — проверен и зафиксирован до Phase 3E (не снимается, staged требует ровно ["1h"]).</small>
         </div>
       </section>
 
