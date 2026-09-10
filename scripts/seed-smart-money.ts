@@ -1,8 +1,10 @@
 /**
- * Safe idempotent seed/registration for Smart Money Strategy.
+ * Safe registration seed for Smart Money Strategy (create-if-absent).
  *
  * DEFAULT DRY-RUN — NO DB WRITE.
  * Write requires: --apply + three explicit operator params.
+ * Registration semantic: if slug+version already exists, apply is NO-OP (preserves admin config).
+ * Idempotency = repeated execution preserves existing row unchanged.
  *
  * Usage:
  *   npx tsx scripts/seed-smart-money.ts
@@ -11,7 +13,7 @@
  *   npx tsx scripts/seed-smart-money.ts --apply --min-exchanges 2 --minimum-quote-volume-24h 500000 --top100-only true
  *
  * DO NOT execute apply without operator explicit values.
- * No Signal writes. No deletes. Only upsert slug+version.
+ * No Signal writes. No deletes. Only registration/create-if-absent (no update).
  */
 
 import { PrismaClient } from "@prisma/client";
@@ -120,8 +122,10 @@ async function main() {
   console.log(JSON.stringify(payload, null, 2));
   console.log("");
 
-  // DB read-only probe to say CREATE vs UPDATE (only if DATABASE_URL present, else skip gracefully for self-test)
-  let dbState: "CREATE" | "UPDATE" | "UNKNOWN" | "SKIP_NO_DB" = "UNKNOWN";
+  // DB read-only probe to say CREATE vs NO-OP (registration/create-if-absent)
+  // Dry-run: probe error => UNKNOWN continues read-only
+  // Apply: probe error => FAIL CLOSED before any mutation
+  let dbState: "CREATE" | "NO_OP_EXISTS" | "UNKNOWN" | "SKIP_NO_DB" = "UNKNOWN";
   let existing: unknown = null;
   let prisma: PrismaClient | null = null;
 
@@ -130,7 +134,7 @@ async function main() {
   if (!hasDbUrl) {
     dbState = "SKIP_NO_DB";
     console.log("ℹ  DATABASE_URL не задан — пропуск DB-проверки (dry-run без БД).");
-    console.log("   При наличии БД dry-run показал бы: CREATE would happen или UPDATE would happen.");
+    console.log("   При наличии БД dry-run показал бы: CREATE would happen или NO-OP (already exists, preserved).");
     console.log("");
   } else {
     prisma = new PrismaClient();
@@ -141,10 +145,11 @@ async function main() {
       existing = row;
       if (!row) {
         dbState = "CREATE";
-        console.log("DB состояние: CREATE would happen (строка отсутствует, будет создана новая).");
+        console.log("DB состояние: CREATE would happen (строка отсутствует, будет создана новая — registration).");
       } else {
-        dbState = "UPDATE";
-        console.log("DB состояние: UPDATE would happen (строка уже существует, будет идемпотентный upsert).");
+        dbState = "NO_OP_EXISTS";
+        console.log("DB состояние: NO-OP — Strategy already exists; existing PostgreSQL configuration was NOT modified.");
+        console.log("Registration is create-if-absent: rerunning preserves admin config (enabled/status/timeframes/minExchanges/config).");
         console.log("Существующая строка (сокращённо):");
         console.log(
           JSON.stringify(
@@ -162,45 +167,55 @@ async function main() {
             2
           )
         );
-        // Check unexpected mismatches
+        // Check unexpected mismatches (informational only, no overwrite)
         const mismatches: string[] = [];
         if ((row as any).slug !== SMART_MONEY_SLUG)
           mismatches.push(`slug mismatch: expected ${SMART_MONEY_SLUG} got ${(row as any).slug}`);
         if ((row as any).version !== SMART_MONEY_VERSION)
           mismatches.push(`version mismatch: expected ${SMART_MONEY_VERSION} got ${(row as any).version}`);
-        // Report clearly if unexpected row has different enabled/status/timeframes
-        if ((row as any).enabled !== false) {
-          console.log(
-            `⚠  Существующая строка has enabled=${(row as any).enabled} — seed оставит enabled=false (cannot enable).`
-          );
-        }
-        if ((row as any).status !== "DRAFT") {
-          console.log(
-            `⚠  Существующая строка has status=${(row as any).status} — seed оставит status=DRAFT.`
-          );
-        }
-        if (JSON.stringify((row as any).timeframes) !== JSON.stringify([...SMART_MONEY_TIMEFRAMES])) {
-          console.log(
-            `⚠  Существующая строка has timeframes=${JSON.stringify((row as any).timeframes)} — seed приведёт к ["1h"].`
-          );
-        }
         if (mismatches.length > 0) {
           console.log("⚠  Unexpected existing row (identity mismatch):");
           for (const m of mismatches) console.log(`  - ${m}`);
         }
+        // Informational: if existing has different values, we explicitly do NOT overwrite
+        if ((row as any).enabled !== SMART_MONEY_ENABLED) {
+          console.log(
+            `ℹ  Существующая строка enabled=${(row as any).enabled} — registration сохранит существующее значение (не перезаписывает).`
+          );
+        }
+        if ((row as any).status !== SMART_MONEY_STATUS) {
+          console.log(
+            `ℹ  Существующая строка status=${(row as any).status} — registration сохранит существующее значение.`
+          );
+        }
+        if (JSON.stringify((row as any).timeframes) !== JSON.stringify([...SMART_MONEY_TIMEFRAMES])) {
+          console.log(
+            `ℹ  Существующая строка timeframes=${JSON.stringify((row as any).timeframes)} — registration сохранит существующее значение (не приводит к ["1h"]).`
+          );
+        }
       }
       console.log("");
     } catch (e) {
-      // DB read error — dry-run should not fail hard, just report
-      console.log(`ℹ  Не удалось прочитать DB для dry-run (ошибка: ${e instanceof Error ? e.message : String(e)})`);
-      console.log("   Payload выше остаётся корректным; DB-действие неизвестно до наличия соединения.");
-      dbState = "UNKNOWN";
-      console.log("");
+      const msg = e instanceof Error ? e.message : String(e);
+      if (dryRun) {
+        console.log(`ℹ  Не удалось прочитать DB для dry-run (ошибка: ${msg})`);
+        console.log("   Payload выше остаётся корректным; DB-действие неизвестно до наличия соединения.");
+        dbState = "UNKNOWN";
+        console.log("");
+      } else {
+        console.error(`✗ Не удалось прочитать DB для APPLY (ошибка: ${msg})`);
+        console.error("✗ APPLY прерван: DB probe должен пройти до создания строки — fail closed до мутации.");
+        console.error("   Никаких записей не произведено.");
+        try {
+          await (prisma as any)?.$disconnect?.();
+        } catch {}
+        process.exit(1);
+      }
     } finally {
       if (dryRun) {
         // In dry-run we must NOT keep connection that implies write; just disconnect
         try {
-          await prisma?.$disconnect();
+          await (prisma as any)?.$disconnect?.();
         } catch {}
       }
     }
@@ -217,7 +232,7 @@ async function main() {
     }
     // Ensure we disconnected and exit 0
     if (prisma && hasDbUrl) {
-      try { await prisma.$disconnect(); } catch {}
+      try { await (prisma as any).$disconnect?.(); } catch {}
     }
     process.exit(0);
   }
@@ -246,30 +261,49 @@ async function main() {
   console.log("╚════════════════════════════════════════════════════════════════╝");
   console.log("");
 
-  // Ensure prisma exists (hasDbUrl already checked, but we re-init if needed)
+  // Ensure prisma exists — but APPLY requires real DB URL, fail closed if absent
+  if (!hasDbUrl) {
+    console.error("✗ APPLY requires DATABASE_URL — not set, fail closed до мутации.");
+    console.error("✗ Никаких записей не произведено. Установите DATABASE_URL и повторите.");
+    process.exit(1);
+  }
   if (!prisma) prisma = new PrismaClient();
 
   try {
-    // Idempotent upsert by slug+version
-    const existingRow = await prisma.strategy.findFirst({
-      where: { slug: SMART_MONEY_SLUG, version: SMART_MONEY_VERSION },
-    });
+    // Registration: create-if-absent (NO-OP if already exists) — idempotency = preserve existing
+    // Do NOT overwrite existing admin config. No update.
+    let existingRow: unknown = null;
+    try {
+      existingRow = await prisma.strategy.findFirst({
+        where: { slug: SMART_MONEY_SLUG, version: SMART_MONEY_VERSION },
+      });
+    } catch (e) {
+      console.error(`✗ APPLY DB probe failure — fail closed до мутации (ошибка: ${e instanceof Error ? e.message : String(e)})`);
+      console.error("✗ APPLY прерван: не удалось проверить существование строки — создание не выполнялось.");
+      try { await (prisma as any).$disconnect?.(); } catch {}
+      process.exit(1);
+    }
 
     if (existingRow) {
-      const updated = await prisma.strategy.update({
-        where: { id: (existingRow as any).id },
-        data: {
-          name: SMART_MONEY_NAME,
-          description: CANONICAL_DESCRIPTION,
-          enabled: SMART_MONEY_ENABLED, // must remain false
-          status: SMART_MONEY_STATUS, // must remain DRAFT
-          config: payload.config as any,
-          timeframes: payload.timeframes as any,
-          minExchanges: payload.minExchanges as any,
-        },
-      });
-      console.log(`✓ Smart Money Strategy обновлена (id=${(updated as any).id}) — idempotent UPDATE`);
-      console.log(JSON.stringify({ slug: (updated as any).slug, version: (updated as any).version, enabled: (updated as any).enabled, status: (updated as any).status, timeframes: (updated as any).timeframes, minExchanges: (updated as any).minExchanges }, null, 2));
+      console.log("Strategy already exists; existing PostgreSQL configuration was NOT modified.");
+      console.log("Registration NO-OP — existing row preserved (idempotency = preserve).");
+      console.log(
+        JSON.stringify(
+          {
+            id: (existingRow as any).id,
+            slug: (existingRow as any).slug,
+            version: (existingRow as any).version,
+            enabled: (existingRow as any).enabled,
+            status: (existingRow as any).status,
+            timeframes: (existingRow as any).timeframes,
+            minExchanges: (existingRow as any).minExchanges,
+          },
+          null,
+          2
+        )
+      );
+      console.log("");
+      console.log("✓ Seed APPLY завершён как NO-OP. Мутаций не было. Для намеренного сброса используйте отдельный explicitly approved tool (не в этом скрипте).");
     } else {
       const created = await prisma.strategy.create({
         data: {
@@ -284,16 +318,16 @@ async function main() {
           minExchanges: payload.minExchanges as any,
         },
       });
-      console.log(`✓ Smart Money Strategy создана (id=${(created as any).id}) — CREATE`);
+      console.log(`✓ Smart Money Strategy создана (id=${(created as any).id}) — CREATE (registration)`);
       console.log(JSON.stringify({ slug: (created as any).slug, version: (created as any).version, enabled: (created as any).enabled, status: (created as any).status, timeframes: (created as any).timeframes, minExchanges: (created as any).minExchanges }, null, 2));
+      console.log("");
+      console.log("✓ Seed APPLY завершён. enabled=false, status=DRAFT, timeframes=[\"1h\"], canonical config сохранён (только при отсутствии строки).");
     }
-    console.log("");
-    console.log("✓ Seed APPLY завершён. enabled=false, status=DRAFT, timeframes=[\"1h\"], canonical config сохранён.");
   } catch (e) {
     console.error("✗ Ошибка записи в БД:", e instanceof Error ? e.message : String(e));
     process.exit(1);
   } finally {
-    await prisma.$disconnect();
+    await (prisma as any).$disconnect?.();
   }
 }
 

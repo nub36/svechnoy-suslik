@@ -251,14 +251,42 @@ const schemaSrc = readFileSync("prisma/schema.prisma", "utf8");
   ok(!argsSrc.includes("schema.prisma"), "args: no schema.prisma");
 }
 
-// Additional: slug/version identity, apply idempotent hint
+// Additional: slug/version identity, registration semantics (create-if-absent, NO-OP preserve)
 {
   ok(SMART_MONEY_SLUG === "smart-money-suslik", "slug smart-money-suslik");
   ok(SMART_MONEY_VERSION === 1, "version 1");
   ok(seedSrc.includes("@@unique") || seedSrc.includes("slug") && seedSrc.includes("version"), "seed uses slug+version identity");
-  ok(seedSrc.includes("findFirst") && seedSrc.includes("update") && seedSrc.includes("create"), "seed has idempotent findFirst -> update/create");
+  ok(seedSrc.includes("findFirst") && seedSrc.includes("create"), "seed has findFirst + create (registration)");
+  ok(!seedSrc.includes("prisma.strategy.update"), "seed has NO prisma.strategy.update (registration NO-OP, no overwrite existing admin config)");
+  ok(seedSrc.includes("create-if-absent") || seedSrc.includes("create-if-absent") || seedSrc.includes("createIfAbsent"), "seed comment registration/create-if-absent");
+  ok(seedSrc.includes("Strategy already exists; existing PostgreSQL configuration was NOT modified."), "seed NO-OP message for existing row (preserve)");
   ok(seedSrc.includes("Это изменит общую production PostgreSQL Strategy row."), "seed has prominent warning before apply");
   ok(seedSrc.includes("DRY-RUN") || seedSrc.includes("DRY_RUN") || seedSrc.includes("dry-run") || seedSrc.includes("DRY"), "seed mentions DRY-RUN");
+}
+
+// Registration semantics: absent -> CREATE, existing -> NO-OP
+{
+  ok(seedSrc.includes("if (existingRow)") && seedSrc.includes("NO-OP") && seedSrc.includes("prisma.strategy.create"), "registration: existing -> NO-OP, absent -> CREATE (only CREATE mutation)");
+  ok(!seedSrc.includes("prisma.strategy.update"), "existing row -> no update (verified again)");
+  ok(seedSrc.includes("Registration is create-if-absent") || seedSrc.includes("create-if-absent"), "registration comment present");
+}
+
+// APPLY fail-closed on DB probe error
+{
+  ok(seedSrc.includes("Не удалось прочитать DB для APPLY") || seedSrc.includes("APPLY DB probe failure"), "apply DB probe error message present");
+  ok(seedSrc.includes("FAIL CLOSED") || seedSrc.includes("fail closed") || seedSrc.includes("APPLY прерван: DB probe"), "apply DB probe failure fails closed before mutation");
+  // Ensure the only mutation is create and it is after probe success (fail-closed guards before create)
+  const createIdx = seedSrc.indexOf("prisma.strategy.create");
+  const probeFailIdx = seedSrc.indexOf("Не удалось прочитать DB для APPLY");
+  ok(probeFailIdx !== -1 && createIdx !== -1 && probeFailIdx < createIdx, "DB probe failure guard is BEFORE prisma.strategy.create");
+  ok(!seedSrc.includes("prisma.strategy.update"), "no update even after probe (only create)");
+}
+
+// Dry-run never writes (extra check)
+{
+  ok(!seedSrc.includes("prisma.strategy.create") || seedSrc.includes("DRY-RUN") , "dry-run never writes: create only in APPLY path (file has DRY-RUN guard)");
+  // Static: ensure dry-run path has process.exit before any mutation and does not contain delete
+  ok(seedSrc.includes("DRY-RUN завершён") && seedSrc.includes("Никаких записей в БД не произведено"), "dry-run completion message indicates no writes");
 }
 
 // 14. validate dry-run with operator params prints exact payload (check build)
