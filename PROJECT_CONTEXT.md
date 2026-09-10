@@ -2441,3 +2441,48 @@ SmcScoringConfig {
 **DB:** No `prisma.strategy.*`/`prisma.signal.*`, no workers, Strategy id=2 остаётся `DRAFT enabled=false timeframes=["1h"]`, Signal 0→0. Только config/OB/test/PROJECT_CONTEXT.md изменены; `components/admin/app/api/admin/prisma/schema/chart/Signal` не тронуты.
 
 **Deliverable:** ONE commit exact parent `dade753`, push only `arena/01a08b68-svechnoy-suslik-phase3d-clean`, STOP after 3D-B (no 3D-C).
+
+==================================================
+37. SMART MONEY PHASE 3D-C — STRATEGY JSON / RUNTIME BOUNDARY (IMPLEMENTED) 10.09.2026
+==================================================
+
+**Baseline:** `2fc18aeb09164dc36b7316a9295ad944c995122a` (Phase 3D-B commit, parent `dade753e1bed8663a7b8334241e6e09be14dec3e`), branch `arena/01a08b68-svechnoy-suslik-phase3d-clean` (exact parent).
+**Scope:** Strategy JSON boundary only — wires 4 optional advanced groups through real Strategy JSON → SmcScoringConfig → runtime; no Admin UI/API, no PostgreSQL mutation, no workers, no Signal.
+
+**Problem (3D-B drop):** `lib/strategies/smart-money.ts` `validateSmartMoneyConfig` parsed only flat legacy fields (minimumSignalScore, swing/internal, atrPeriod, freshBars, eqBand, weights, filters, tf) and silently dropped `displacement/fvg/liquidity/orderBlock`. After 3D-C valid advanced JSON must be preserved and validated.
+
+**Implementation:**
+- `lib/strategies/smart-money.ts` `validateSmartMoneyConfig` updated:
+  - Explicit `ALLOWED_TOP_LEVEL` Set (audit of seed `scripts/seed-smart-money-args.ts` `CANONICAL_SMC_CONFIG` + current DB id=2 shape + all existing tests): `minimumSignalScore/minimumScore/swingLeft/swingRight/internalLeft/internalRight/atrPeriod/structureEventFreshBars/sweepFreshBars/orderBlockFreshBars/fvgFreshBars/eqBand/weights/filters/tf` + 4 Phase3D groups. Unknown top-level → `config.<key>: neizvestnoe pole`.
+  - Strict inner `weights` (9 keys) and `filters` (2 keys `minimumQuoteVolume24h/top500Only`) unknown → `config.weights.<key>/config.filters.<key>: neizvestnoe pole` (previously silent; now fail-closed — audited safe, no existing config/test uses extra).
+  - Advanced groups safely copied (`displacement/fvg/liquidity/orderBlock` if present, preserving shape for validator) into `SmcScoringConfig` candidate; numeric/coherence validation delegated to canonical `assertValidSmcScoringConfig` (no duplicated bounds, deterministic translation via `ValidateSmcConfigResult`).
+  - `filters` handling now explicitly checks both required fields if present, preserving default when absent.
+  - `validateSmartMoneyRuntime` automatically inherits advanced handling per timeframe (validates config for each tf via `validateSmartMoneyConfig`, configs per tf preserved).
+- **Legacy compat:** `filters.top500Only` (semantics Top-100) remains accepted; exact old JSON without advanced groups validates `ok:true` with no advanced fields leaked; `minimumScore` still gives proper threshold-uniqueness error.
+- **Unknown group aliases:** `displecement/orderBlocks/orderblock/liqudity/randomFutureKnob` → top-level unknown reject (verified).
+
+**Validation reuse:**
+- Structural JSON shape (top-level allow-list, weights/filters strict) checked locally; all numeric bounds, coherence (weights sum 100), advanced groups numeric/integer ranges and nested unknown handled by canonical `lib/smc/config.ts` (single source of truth, no second bounds set). Errors translated to `ValidateSmcConfigResult` style.
+
+**Backward compat — non-negotiable (verified):**
+- Old Strategy JSON without advanced groups → `ok:true`, `config.displacement/fvg/liquidity/orderBlock === undefined`, derived `1.5/2.0/0.6/0.4` etc via resolver; DB row id=2 (DRAFT enabled=false `["1h"]` minExchanges 3) requires no migration; `test-smc-phase3d-c.ts` §1.
+
+**Proofs:**
+- **All 14 fields round-trip:** `test-smc-phase3d-c.ts` §3 via `validateSmartMoneyConfig` and §4 via `validateSmartMoneyRuntime` (displacement 4, fvg 2, liquidity 4, orderBlock 4) — each preserved and `deriveSubConfigs` wired.
+- **Runtime behavior:** §5 displacement `bodyAtrMin 3.0` via `validateSmartMoneyConfig` → `deriveSubConfigs` → `evaluateDisplacements` 1→0, plus `validateSmartMoneyRuntime` configs per tf contain 3.0; representative FVG/Liquidity/OB also round-trip.
+- **Multi-TF:** § MT 5m/15m/1h/4h all `ok:true` and preserve `2.2/0.12` per tf; 1d remains `ok:true` at pure validator level but Admin/API Phase3E guard still blocks 1d (not weakened, documented).
+- **Old-config equivalence:** §1e + deterministic/no-lookahead via `evaluateSmc` prefix equality.
+
+**Tests (new):**
+- `scripts/test-smc-phase3d-c.ts` **91/91**: old valid, partial, all 14 round-trip config/runtime, behavior, malformed (null/array/wrong type/NaN/Infinity/bounds/nested unknown), unknown top-level (5 aliases), filters/weights strict, legacy top500Only, Trend unchanged, deterministic/no-lookahead, no Signal, multi-TF 5m/15m/1h/4h + 1d.
+
+**Regression (strict, no || true):**
+- `test-smc-phase3d-config` 70/70, `test-smc-phase3d-b` 55/55, `test-smc-phase3d-c` 91/91, `test-smart-money` 62/62, `smart-money-readonly --self-test` 43/43, `test-smart-money-diagnostic` 95/95, `test-admin-consistency` 84/84, `test-seed-smart-money` 86/86, `test-smart-money-phase3c-fix` 39/39, `test-smc-*` 23/23/37/37/48/48/63/63/31/31/50/50, `tsc --noEmit` 0, `git diff --check` 0, `edf3732` NOT ancestor, **NO DB mutation** (prisma.strategy.* not called, only in-memory JSON, DB id=2 unchanged, Signal 0).
+
+**Filters / existing config:** `minimumSignalScore`, `weights`, freshness, swing/internal, `atrPeriod`, `eqBand`, `minimumQuoteVolume24h`, `top500Only` semantics unchanged; Trend path unchanged.
+
+**Range position:** No clamp, no maxAge, no outsideRange scoring changes (undecided, preserved).
+
+**Admin / DB:** Advanced groups still NOT exposed in Admin until 3D-D; 1d remains blocked in Admin/API; no PostgreSQL mutation, no workers, no Signal Engine.
+
+**Deliverable:** ONE commit exact parent `2fc18ae` (this commit), push clean Phase3D branch only, STOP after 3D-C.

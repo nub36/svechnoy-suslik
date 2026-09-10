@@ -160,6 +160,40 @@ export function validateSmartMoneyConfig(
     };
   }
 
+  // ---- Phase 3D-C: top-level allowed keys (exact Strategy JSON shape) ----
+  // Audit: seed config (scripts/seed-smart-money-args.ts CANONICAL_SMC_CONFIG)
+  // + current DB id=2 (no advanced groups) + all existing tests use:
+  // minimumSignalScore, swingLeft/Right, internalLeft/Right, atrPeriod,
+  // structureEventFreshBars, sweepFreshBars, orderBlockFreshBars, fvgFreshBars,
+  // eqBand, weights, filters, optional tf, plus 4 Phase3D advanced groups.
+  // minimumScore is allowed only to give proper threshold-uniqueness error.
+  const ALLOWED_TOP_LEVEL = new Set([
+    "minimumSignalScore",
+    "minimumScore",
+    "swingLeft",
+    "swingRight",
+    "internalLeft",
+    "internalRight",
+    "atrPeriod",
+    "structureEventFreshBars",
+    "sweepFreshBars",
+    "orderBlockFreshBars",
+    "fvgFreshBars",
+    "eqBand",
+    "weights",
+    "filters",
+    "tf",
+    "displacement",
+    "fvg",
+    "liquidity",
+    "orderBlock",
+  ]);
+  for (const key of Object.keys(raw as Record<string, unknown>)) {
+    if (!ALLOWED_TOP_LEVEL.has(key)) {
+      errors.push(`config.${key}: neizvestnoe pole`);
+    }
+  }
+
   // ---- threshold uniqueness ----
   const hasSignal = Object.prototype.hasOwnProperty.call(
     raw,
@@ -292,12 +326,18 @@ export function validateSmartMoneyConfig(
     eqBand = eqBandRaw as number;
   }
 
-  // ---- weights ----
+  // ---- weights (strict unknown inner keys) ----
   let weights: SmcScoringWeights | null = null;
   const rawWeights = (raw as Record<string, unknown>).weights;
   if (!isRecord(rawWeights)) {
     errors.push("config.weights: ozhidaetsya obekt");
   } else {
+    const allowedWeights = new Set(WEIGHT_KEYS as unknown as string[]);
+    for (const key of Object.keys(rawWeights as Record<string, unknown>)) {
+      if (!allowedWeights.has(key)) {
+        errors.push(`config.weights.${key}: neizvestnoe pole`);
+      }
+    }
     let sum = 0;
     const w: Record<string, number> = {};
     for (const key of WEIGHT_KEYS) {
@@ -321,20 +361,28 @@ export function validateSmartMoneyConfig(
     }
   }
 
-  // ---- filters ----
+  // ---- filters (strict unknown inner keys) ----
   let filters: SmartMoneyFilters = DEFAULT_SMART_MONEY_FILTERS;
   const rawFilters = (raw as Record<string, unknown>).filters;
   if (rawFilters !== undefined) {
     if (!isRecord(rawFilters)) {
       errors.push("config.filters: ozhidaetsya obekt");
     } else {
+      const allowedFilters = new Set(["minimumQuoteVolume24h", "top500Only"]);
+      for (const key of Object.keys(rawFilters as Record<string, unknown>)) {
+        if (!allowedFilters.has(key)) {
+          errors.push(`config.filters.${key}: neizvestnoe pole`);
+        }
+      }
       const rawMinVol = (rawFilters as Record<string, unknown>)
         .minimumQuoteVolume24h;
       const rawTop = (rawFilters as Record<string, unknown>).top500Only;
       let minVol: number | null = null;
       let top: boolean | null = null;
 
-      if (!isFiniteNumber(rawMinVol) || (rawMinVol as number) < 0) {
+      if (rawMinVol === undefined) {
+        errors.push("config.filters.minimumQuoteVolume24h: obyazatelnoe pole");
+      } else if (!isFiniteNumber(rawMinVol) || (rawMinVol as number) < 0) {
         errors.push(
           "config.filters.minimumQuoteVolume24h: ozhidaetsya chislo >= 0"
         );
@@ -342,7 +390,9 @@ export function validateSmartMoneyConfig(
         minVol = rawMinVol as number;
       }
 
-      if (typeof rawTop !== "boolean") {
+      if (rawTop === undefined) {
+        errors.push("config.filters.top500Only: obyazatelnoe pole");
+      } else if (typeof rawTop !== "boolean") {
         errors.push("config.filters.top500Only: ozhidaetsya boolean");
       } else {
         top = rawTop;
@@ -355,6 +405,21 @@ export function validateSmartMoneyConfig(
         };
       }
     }
+  }
+
+  const rawRec = raw as Record<string, unknown>;
+  const advancedCopy: Partial<SmcScoringConfig> = {};
+  if (Object.prototype.hasOwnProperty.call(rawRec, "displacement")) {
+    (advancedCopy as any).displacement = rawRec.displacement;
+  }
+  if (Object.prototype.hasOwnProperty.call(rawRec, "fvg")) {
+    (advancedCopy as any).fvg = rawRec.fvg;
+  }
+  if (Object.prototype.hasOwnProperty.call(rawRec, "liquidity")) {
+    (advancedCopy as any).liquidity = rawRec.liquidity;
+  }
+  if (Object.prototype.hasOwnProperty.call(rawRec, "orderBlock")) {
+    (advancedCopy as any).orderBlock = rawRec.orderBlock;
   }
 
   if (
@@ -372,27 +437,49 @@ export function validateSmartMoneyConfig(
     eqBand === null ||
     weights === null
   ) {
-    return {
-      ok: false,
-      errors: errors.length > 0 ? errors : ["config: neizvestnaya oshibka"],
-    };
+    const hasAdvanced = Object.keys(advancedCopy).length > 0;
+    if (!hasAdvanced) {
+      return {
+        ok: false,
+        errors: errors.length > 0 ? errors : ["config: neizvestnaya oshibka"],
+      };
+    }
+    if (
+      minimumScore === null ||
+      swingLeft === null ||
+      swingRight === null ||
+      internalLeft === null ||
+      internalRight === null ||
+      atrPeriod === null ||
+      structureEventFreshBars === null ||
+      sweepFreshBars === null ||
+      orderBlockFreshBars === null ||
+      fvgFreshBars === null ||
+      eqBand === null ||
+      weights === null
+    ) {
+      return {
+        ok: false,
+        errors: errors.length > 0 ? errors : ["config: neizvestnaya oshibka"],
+      };
+    }
   }
 
-  // Build internal SmcScoringConfig and run its coherence validator
   const candidate: SmcScoringConfig = {
     tf,
     minimumScore,
-    swingLeft,
-    swingRight,
-    internalLeft,
-    internalRight,
-    atrPeriod,
-    structureEventFreshBars,
-    sweepFreshBars,
-    orderBlockFreshBars,
-    fvgFreshBars,
-    eqBand,
-    weights,
+    swingLeft: swingLeft as number,
+    swingRight: swingRight as number,
+    internalLeft: internalLeft as number,
+    internalRight: internalRight as number,
+    atrPeriod: atrPeriod as number,
+    structureEventFreshBars: structureEventFreshBars as number,
+    sweepFreshBars: sweepFreshBars as number,
+    orderBlockFreshBars: orderBlockFreshBars as number,
+    fvgFreshBars: fvgFreshBars as number,
+    eqBand: eqBand as number,
+    weights: weights as SmcScoringWeights,
+    ...(Object.keys(advancedCopy).length > 0 ? advancedCopy : {}),
   };
 
   try {
@@ -400,20 +487,22 @@ export function validateSmartMoneyConfig(
   } catch (e) {
     const msg =
       e instanceof SmcInputError ? e.message : String((e as Error).message);
-    return { ok: false, errors: [msg] };
+    if (!errors.some((er) => er.includes(msg))) {
+      errors.push(msg);
+    } else if (errors.length === 0) {
+      errors.push(msg);
+    }
+    return { ok: false, errors };
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, errors };
   }
 
   return { ok: true, config: candidate, filters };
 }
 
-/**
- * Totикальная валидация Strategy-уровня для Smart Money:
- * config + timeframes + minExchanges (аналог validateStrategyRuntime).
- *
- * config валидируется для КАЖДОГО timeframe из списка
- * (tf-подставляемый), чтобы multi-timeframe стратегия была
- * консистентна на всех ТФ.
- */
+
 export type SmartMoneyRuntimeValidation =
   | {
       ok: true;
