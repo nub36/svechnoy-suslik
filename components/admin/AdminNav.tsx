@@ -5,6 +5,7 @@ import {
   CandlestickChart,
   Database,
   FlaskConical,
+  Bell,
   Gauge,
   ScrollText,
   SlidersHorizontal,
@@ -72,6 +73,12 @@ const ITEMS: {
     href: "/admin/monitoring",
     label: "Мониторинг",
     icon: Activity
+  },
+  {
+    key: "notifications",
+    href: "/admin/notifications",
+    label: "Уведомления",
+    icon: Bell
   },
   {
     key: "journal",

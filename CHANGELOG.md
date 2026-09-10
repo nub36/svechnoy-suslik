@@ -811,3 +811,31 @@ Signal Engine (после живого прогона Runtime на VPS).
   проходит / rank=101 и rank=null отсеиваются),
   periods 59/59; tsc — только 12 известных
   implicit-any rank-assets (baseline).
+
+
+### Фикс хвостов VPS-браузер-ревью ЭТАПА A (10.09.2026)
+- Monitoring: семантика свечей как в /admin/data —
+  закрытые и открытые считаются РАЗДЕЛЬНО (SQL FILTER);
+  таблица: Закрытых / Открытых / Рынков / Последняя
+  закрытая / Текущая открытая / Свежесть (по закрытой);
+  карточка свечей показывает закрытые и открытые
+  суммарно раздельно; open не смешивается с freshness;
+- Рынки: во всём admin различаются «Рынки Top-100
+  (активные SPOT USDT)» — через rank 1..100
+  (topUniverseRankFilter, НЕ Asset.top500) — и «Всего
+  активных SPOT USDT-рынков в БД»; Overview показывает
+  основным показателем Рынков Top-100, вторичным
+  текстом — всего в БД; Monitoring — обе карточки;
+- AdminNav: добавлен пункт «Уведомления»
+  (/admin/notifications больше не orphan); порядок:
+  ... Мониторинг, Уведомления, Журнал; страница
+  осталась честным empty-state;
+- единый AdminNav добавлен на страницу редактирования
+  стратегии /admin/strategies/[id] (была тупиковой,
+  active="strategies");
+- новый тест scripts/test-admin-consistency.ts 42/42:
+  контракт universe (границы rank=100/101),
+  полнота AdminNav, AdminNav на всех 9 admin-страницах,
+  closed/open SQL-семантика Monitoring, рынки Top-100
+  через rank-фильтр (без top500), честный empty-state
+  уведомлений.

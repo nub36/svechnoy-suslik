@@ -67,6 +67,7 @@ scripts/rank-assets.ts
 scripts/seed-strategies.ts
 scripts/snapshot-worker.ts
 scripts/sync-markets.ts
+scripts/test-admin-consistency.ts
 scripts/test-analysis.ts
 scripts/test-bybit.ts
 scripts/test-chart-history.ts

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import AdminNav from "@/components/admin/AdminNav";
 import { auth } from "@/auth";
+import { topUniverseRankFilter } from "@/lib/universe";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import {
@@ -48,6 +49,7 @@ export default async function AdminPage() {
           minExchanges: number;
         }[];
         assets: number;
+        universeMarkets: number;
         markets: number;
         candleCount: number;
         signals: number;
@@ -63,6 +65,7 @@ export default async function AdminPage() {
     const [
       strategies,
       assets,
+      universeMarkets,
       markets,
       candleCount,
       signals,
@@ -77,14 +80,22 @@ export default async function AdminPage() {
         ]
       }),
 
+      // рынки ОСНОВНОГО Top-100 universe (rank 1..100)
+      prisma.market.count({
+        where: {
+          enabled: true,
+          status: "ACTIVE",
+          quote: "USDT",
+          marketType: "SPOT",
+          asset: topUniverseRankFilter()
+        }
+      }),
+
       // основной universe Top-100 (lib/universe.ts)
       prisma.asset.count({
         where: {
           enabled: true,
-          rank: {
-            lte: 100,
-            not: null
-          }
+          ...topUniverseRankFilter()
         }
       }),
 
@@ -137,6 +148,7 @@ export default async function AdminPage() {
     data = {
       strategies,
       assets,
+      universeMarkets,
       markets,
       candleCount,
       signals,
@@ -201,16 +213,22 @@ export default async function AdminPage() {
           </div>
 
           <div className="adminStatCard">
-            <span>Рынков (активных)</span>
+            <span>Рынков Top-100</span>
             <b>
               {data
-                ? data.markets.toLocaleString(
+                ? data.universeMarkets.toLocaleString(
                     "ru-RU"
                   )
                 : "—"}
             </b>
             <small>
-              активные SPOT USDT-рынки в БД
+              активные SPOT USDT-рынки активов
+              Top-100; всего активных в БД:{" "}
+              {data
+                ? data.markets.toLocaleString(
+                    "ru-RU"
+                  )
+                : "—"}
             </small>
           </div>
 

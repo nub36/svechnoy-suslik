@@ -2,6 +2,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect, notFound } from "next/navigation";
 import StrategyEditor from "@/components/admin/StrategyEditor";
+import AdminNav from "@/components/admin/AdminNav";
 
 export default async function Page({
   params
@@ -33,6 +34,8 @@ export default async function Page({
 
   return (
     <main className="shell">
+      <AdminNav active="strategies" />
+
       <StrategyEditor
         strategy={{
           id: strategy.id,

@@ -3,6 +3,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { candleFreshness } from "@/lib/data/freshness";
+import { topUniverseRankFilter } from "@/lib/universe";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +42,8 @@ function fmtUtc(date: Date | null): string {
 type CandleTf = {
   timeframe: string;
   total: number;
+  closed: number;
+  open: number;
   markets: number;
   lastClosed: Date | null;
   lastOpen: Date | null;
@@ -77,53 +80,88 @@ export default async function AdminMonitoringPage() {
   // 2. Счётчики и свежесть (только если БД отвечает).
   let counts: {
     universe: number;
+    universeMarkets: number;
     marketsActive: number;
-    candles: number;
     snapshots: number;
   } | null = null;
 
   let candleTf: CandleTf[] = [];
 
   if (dbError === null) {
-    const [universe, marketsActive, candles, snapshots, tfRows] =
-      await Promise.all([
-        prisma.asset.count({
-          where: {
-            enabled: true,
-            rank: { lte: 100, not: null }
-          }
-        }),
-        prisma.market.count({
-          where: {
-            enabled: true,
-            status: "ACTIVE",
-            quote: "USDT",
-            marketType: "SPOT"
-          }
-        }),
-        prisma.candle.count(),
-        prisma.indicatorSnapshot.count(),
-        (prisma.$queryRaw<CandleTf[]>`
-          SELECT
-            c.timeframe AS "timeframe",
-            COUNT(*)::int AS "total",
-            COUNT(DISTINCT c."marketId")::int AS "markets",
-            MAX(c."openTime") FILTER (WHERE c.closed = true) AS "lastClosed",
-            MAX(c."openTime") FILTER (WHERE c.closed = false) AS "lastOpen"
-          FROM "Candle" c
-          GROUP BY c.timeframe
-          ORDER BY c.timeframe
-        `) as unknown as CandleTf[]
-      ]);
+    // Семантика свечей — как в /admin/data: закрытые
+    // и открытые считаются РАЗДЕЛЬНО (FILTER), свежесть
+    // строится только по закрытым.
+    const [
+      universe,
+      universeMarkets,
+      marketsActive,
+      snapshots,
+      tfRows
+    ] = await Promise.all([
+      prisma.asset.count({
+        where: {
+          enabled: true,
+          ...topUniverseRankFilter()
+        }
+      }),
+      // рынки ОСНОВНОГО Top-100 universe (rank 1..100)
+      prisma.market.count({
+        where: {
+          enabled: true,
+          status: "ACTIVE",
+          quote: "USDT",
+          marketType: "SPOT",
+          asset: topUniverseRankFilter()
+        }
+      }),
+      // всего активных SPOT USDT рынков в БД
+      prisma.market.count({
+        where: {
+          enabled: true,
+          status: "ACTIVE",
+          quote: "USDT",
+          marketType: "SPOT"
+        }
+      }),
+      prisma.indicatorSnapshot.count(),
+      (prisma.$queryRaw<CandleTf[]>`
+        SELECT
+          c.timeframe AS "timeframe",
+          COUNT(*)::int AS "total",
+          COUNT(*) FILTER (
+            WHERE c.closed = true
+          )::int AS "closed",
+          COUNT(*) FILTER (
+            WHERE c.closed = false
+          )::int AS "open",
+          COUNT(DISTINCT c."marketId")::int AS "markets",
+          MAX(c."openTime") FILTER (WHERE c.closed = true) AS "lastClosed",
+          MAX(c."openTime") FILTER (WHERE c.closed = false) AS "lastOpen"
+        FROM "Candle" c
+        GROUP BY c.timeframe
+        ORDER BY c.timeframe
+      `) as unknown as CandleTf[]
+    ]);
 
     counts = {
       universe,
+      universeMarkets,
       marketsActive,
-      candles,
       snapshots
     };
     candleTf = tfRows;
   }
+
+  // Суммы закрытых/открытых по всем ТФ (один проход
+  // по уже полученным строкам, без второго запроса).
+  const candleClosedSum = candleTf.reduce(
+    (acc, row) => acc + row.closed,
+    0
+  );
+  const candleOpenSum = candleTf.reduce(
+    (acc, row) => acc + row.open,
+    0
+  );
 
   return (
     <main className="adminPage">
@@ -170,7 +208,7 @@ export default async function AdminMonitoringPage() {
             <span
               className={`statusDot ${
                 counts &&
-                counts.candles > 0
+                candleClosedSum > 0
                   ? "statusGreen"
                   : "statusYellow"
               }`}
@@ -179,7 +217,7 @@ export default async function AdminMonitoringPage() {
               <b>Данные свечей</b>
               <small>
                 {counts
-                  ? `${counts.candles.toLocaleString("ru-RU")} свечей в БД`
+                  ? `${candleClosedSum.toLocaleString("ru-RU")} закрытых, ${candleOpenSum.toLocaleString("ru-RU")} открытых`
                   : "нет данных"}
               </small>
             </p>
@@ -228,19 +266,28 @@ export default async function AdminMonitoringPage() {
 
               <div className="healthCard">
                 <div className="healthValue">
-                  {counts.marketsActive.toLocaleString("ru-RU")}
+                  {counts.universeMarkets.toLocaleString("ru-RU")}
                 </div>
                 <div className="healthLabel">
-                  активных SPOT USDT-рынков
+                  рынков Top-100 (активных SPOT USDT)
                 </div>
               </div>
 
               <div className="healthCard">
                 <div className="healthValue">
-                  {counts.candles.toLocaleString("ru-RU")}
+                  {counts.marketsActive.toLocaleString("ru-RU")}
                 </div>
                 <div className="healthLabel">
-                  свечей
+                  всего активных SPOT USDT-рынков в БД
+                </div>
+              </div>
+
+              <div className="healthCard">
+                <div className="healthValue">
+                  {(candleClosedSum + candleOpenSum).toLocaleString("ru-RU")}
+                </div>
+                <div className="healthLabel">
+                  свечей (закрытых {candleClosedSum.toLocaleString("ru-RU")}, открытых {candleOpenSum.toLocaleString("ru-RU")})
                 </div>
               </div>
 
@@ -255,7 +302,8 @@ export default async function AdminMonitoringPage() {
             </div>
 
             <h2 className="healthSectionTitle">
-              Свежесть закрытых свечей
+              Свечи по таймфреймам — закрытые и открытые
+              раздельно
             </h2>
 
             <div className="tableBox">
@@ -263,7 +311,8 @@ export default async function AdminMonitoringPage() {
                 <thead>
                   <tr>
                     <th>Таймфрейм</th>
-                    <th>Свечей</th>
+                    <th>Закрытых</th>
+                    <th>Открытых</th>
                     <th>Рынков</th>
                     <th>Последняя закрытая</th>
                     <th>Текущая открытая</th>
@@ -274,7 +323,7 @@ export default async function AdminMonitoringPage() {
                 <tbody>
                   {candleTf.length === 0 && (
                     <tr>
-                      <td colSpan={6}>
+                      <td colSpan={7}>
                         Свечей в базе пока нет
                       </td>
                     </tr>
@@ -294,7 +343,10 @@ export default async function AdminMonitoringPage() {
                           {row.timeframe}
                         </td>
                         <td>
-                          {row.total.toLocaleString("ru-RU")}
+                          {row.closed.toLocaleString("ru-RU")}
+                        </td>
+                        <td>
+                          {row.open.toLocaleString("ru-RU")}
                         </td>
                         <td>{row.markets}</td>
                         <td>
