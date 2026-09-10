@@ -21,6 +21,14 @@
  *   I OB_FVG_CONFLUENCE    OB+FVG overlap (5, единственный
  *                          deliberate overlap bonus)
  *
+ * DIRECTIONAL SELECTION: компоненты E/F/G выбирают РОВНО
+ * ОДИН последний fresh active факт ПО ОБОИМ направлениям
+ * (action ts, tie — детерминированный key); приоритет
+ * bullish по порядку кода запрещён. Confluence (I) строится
+ * на ТЕХ ЖЕ выбранных фактах (swing preferred, otherwise
+ * internal — после выбора; +5 только при совпадении
+ * направлений и пересечении зон).
+ *
  * FRESHNESS: возраст события = число CLOSED свеч после его
  * action-свечи по каноническим индексам horizon (closedBarsSince),
  * НЕ wall-clock — таймгэпы истории не влияют. Используются
@@ -147,12 +155,6 @@ const FVG_ACTIVE_STATES = new Set<SmcFvgState>([
   "TOUCHED",
   "CE_MITIGATED"
 ]);
-
-interface ObPick {
-  direction: SmcDirection;
-  bottom: number;
-  top: number;
-}
 
 /** Последний по (confirmedAt, key) элемент из свежих,
  * удовлетворяющих предикату. Детерминированно (tie-break по
@@ -404,55 +406,39 @@ export function evaluateSmcFromFacts(
   }
 
   // --- E/F. ORDER BLOCKS (fresh + active, по одному) ---
+  // Directional recency: ОДИН последний fresh active OB слоя
+  // ПО ОБОИМ направлениям (action = confirmedAt; tie — key).
+  // Сначала «по одному на направление, затем bullish if/else»
+  // запрещено — это bullish-приоритет порядка кода, а не
+  // свежайший факт.
   const obPredicate = (ob: SmcOrderBlock): boolean =>
     OB_ACTIVE_STATES.has(ob.state);
 
-  const swingObUp = pickLatest(
+  const swingOb = pickLatest(
     facts.swingOrderBlocks,
     config.orderBlockFreshBars,
     facts,
     (ob) => ob.confirmedAt.getTime(),
-    (ob) => obPredicate(ob) && ob.direction === "up"
+    obPredicate
   );
-  const swingObDown = pickLatest(
-    facts.swingOrderBlocks,
-    config.orderBlockFreshBars,
-    facts,
-    (ob) => ob.confirmedAt.getTime(),
-    (ob) => obPredicate(ob) && ob.direction === "down"
-  );
-  const internalObUp = pickLatest(
+  const internalOb = pickLatest(
     facts.internalOrderBlocks,
     config.orderBlockFreshBars,
     facts,
     (ob) => ob.confirmedAt.getTime(),
-    (ob) => obPredicate(ob) && ob.direction === "up"
-  );
-  const internalObDown = pickLatest(
-    facts.internalOrderBlocks,
-    config.orderBlockFreshBars,
-    facts,
-    (ob) => ob.confirmedAt.getTime(),
-    (ob) => obPredicate(ob) && ob.direction === "down"
+    obPredicate
   );
 
-  if (swingObUp !== null) {
+  if (swingOb !== null) {
     push(
       "SWING_ORDER_BLOCK",
-      "Свежий активный bullish swing order block",
+      swingOb.direction === "up"
+        ? "Свежий активный bullish swing order block"
+        : "Свежий активный bearish swing order block",
+      swingOb.direction === "up" ? w.swingOrderBlock : 0,
+      swingOb.direction === "down" ? w.swingOrderBlock : 0,
       w.swingOrderBlock,
-      0,
-      w.swingOrderBlock,
-      swingObUp.key
-    );
-  } else if (swingObDown !== null) {
-    push(
-      "SWING_ORDER_BLOCK",
-      "Свежий активный bearish swing order block",
-      0,
-      w.swingOrderBlock,
-      w.swingOrderBlock,
-      swingObDown.key
+      swingOb.key
     );
   } else {
     push(
@@ -466,23 +452,20 @@ export function evaluateSmcFromFacts(
     softCodes.push("NO_SWING_ORDER_BLOCK");
   }
 
-  if (internalObUp !== null) {
+  if (internalOb !== null) {
     push(
       "INTERNAL_ORDER_BLOCK",
-      "Свежий активный bullish internal order block",
+      internalOb.direction === "up"
+        ? "Свежий активный bullish internal order block"
+        : "Свежий активный bearish internal order block",
+      internalOb.direction === "up"
+        ? w.internalOrderBlock
+        : 0,
+      internalOb.direction === "down"
+        ? w.internalOrderBlock
+        : 0,
       w.internalOrderBlock,
-      0,
-      w.internalOrderBlock,
-      internalObUp.key
-    );
-  } else if (internalObDown !== null) {
-    push(
-      "INTERNAL_ORDER_BLOCK",
-      "Свежий активный bearish internal order block",
-      0,
-      w.internalOrderBlock,
-      w.internalOrderBlock,
-      internalObDown.key
+      internalOb.key
     );
   } else {
     push(
@@ -497,41 +480,29 @@ export function evaluateSmcFromFacts(
   }
 
   // --- G. FVG ---
+  // Directional recency: ОДИН последний fresh active FVG по
+  // обоим направлениям (confirmedAt, tie — key).
   const fvgPredicate = (fvg: SmcFvg): boolean =>
     FVG_ACTIVE_STATES.has(fvg.state);
 
-  const fvgUp = pickLatest(
+  const selectedFvg = pickLatest(
     facts.fvgs,
     config.fvgFreshBars,
     facts,
     (fvg) => fvg.confirmedAt.getTime(),
-    (fvg) => fvgPredicate(fvg) && fvg.direction === "up"
-  );
-  const fvgDown = pickLatest(
-    facts.fvgs,
-    config.fvgFreshBars,
-    facts,
-    (fvg) => fvg.confirmedAt.getTime(),
-    (fvg) => fvgPredicate(fvg) && fvg.direction === "down"
+    fvgPredicate
   );
 
-  if (fvgUp !== null) {
+  if (selectedFvg !== null) {
     push(
       "FVG",
-      "Свежий активный bullish FVG",
+      selectedFvg.direction === "up"
+        ? "Свежий активный bullish FVG"
+        : "Свежий активный bearish FVG",
+      selectedFvg.direction === "up" ? w.fvg : 0,
+      selectedFvg.direction === "down" ? w.fvg : 0,
       w.fvg,
-      0,
-      w.fvg,
-      fvgUp.key
-    );
-  } else if (fvgDown !== null) {
-    push(
-      "FVG",
-      "Свежий активный bearish FVG",
-      0,
-      w.fvg,
-      w.fvg,
-      fvgDown.key
+      selectedFvg.key
     );
   } else {
     push(
@@ -601,50 +572,26 @@ export function evaluateSmcFromFacts(
   }
 
   // --- I. OB + FVG CONFLUENCE (единственный overlap bonus) ---
-  const bullOb: ObPick | null =
-    swingObUp !== null
-      ? {
-          direction: "up",
-          bottom: swingObUp.bottom,
-          top: swingObUp.top
-        }
-      : internalObUp !== null
-        ? {
-            direction: "up",
-            bottom: internalObUp.bottom,
-            top: internalObUp.top
-          }
-        : null;
-  const bearOb: ObPick | null =
-    swingObDown !== null
-      ? {
-          direction: "down",
-          bottom: swingObDown.bottom,
-          top: swingObDown.top
-        }
-      : internalObDown !== null
-        ? {
-            direction: "down",
-            bottom: internalObDown.bottom,
-            top: internalObDown.top
-          }
-        : null;
-
-  const bullConfluence =
-    bullOb !== null &&
-    fvgUp !== null &&
-    overlap(bullOb.bottom, bullOb.top, fvgUp.bottom, fvgUp.top);
-  const bearConfluence =
-    bearOb !== null &&
-    fvgDown !== null &&
+  // Confluence строится на ТЕХ ЖЕ выбранных фактах, что
+  // получили component points: swing preferred, otherwise
+  // internal (после дирекционально-нейтрального выбора OB);
+  // +5 только если direction выбранного OB === direction
+  // выбранного FVG И зоны перекрываются. Никакого
+  // дополнительного дирекционального выбора и bullish-приоритета.
+  const confluenceOb =
+    swingOb !== null ? swingOb : internalOb;
+  const confluence =
+    confluenceOb !== null &&
+    selectedFvg !== null &&
+    confluenceOb.direction === selectedFvg.direction &&
     overlap(
-      bearOb.bottom,
-      bearOb.top,
-      fvgDown.bottom,
-      fvgDown.top
+      confluenceOb.bottom,
+      confluenceOb.top,
+      selectedFvg.bottom,
+      selectedFvg.top
     );
 
-  if (bullConfluence) {
+  if (confluence && confluenceOb!.direction === "up") {
     push(
       "OB_FVG_CONFLUENCE",
       "Confluence: bullish OB и FVG перекрываются",
@@ -653,7 +600,7 @@ export function evaluateSmcFromFacts(
       w.confluence,
       null
     );
-  } else if (bearConfluence) {
+  } else if (confluence) {
     push(
       "OB_FVG_CONFLUENCE",
       "Confluence: bearish OB и FVG перекрываются",

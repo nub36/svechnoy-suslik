@@ -1304,6 +1304,301 @@ function mirrorFacts(facts: SmcFacts): SmcFacts {
   );
 }
 
+/* ---------- FIX: directional recency (regression 1–10) ---------- */
+
+{
+  /* 1. Swing OB: older bullish active + newer bearish active
+   * → SWING_ORDER_BLOCK = SHORT +15 (последний факт ПО ОБОИМ
+   * направлениям; на 98458e0 был bullish-приоритет → LONG). */
+  const bearishNewer = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      swingOrderBlocks: [
+        mkOb("up", "swing", "OPEN", 88, 84, 90),
+        mkOb("down", "swing", "OPEN", 92, 80, 86)
+      ]
+    },
+    cfg()
+  );
+
+  ok(
+    reasonOf(bearishNewer.reasons, "SWING_ORDER_BLOCK").shortPoints ===
+      15 &&
+      reasonOf(bearishNewer.reasons, "SWING_ORDER_BLOCK")
+        .longPoints === 0 &&
+      bearishNewer.longScore === 0 &&
+      bearishNewer.shortScore === 15,
+    "fix1: старше bullish + новее bearish swing OB → SHORT +15 (не bullish-приоритет)"
+  );
+
+  /* 2. Зеркало: older bearish + newer bullish → LONG +15. */
+  const bullishNewer = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      swingOrderBlocks: [
+        mkOb("down", "swing", "OPEN", 88, 80, 86),
+        mkOb("up", "swing", "OPEN", 92, 84, 90)
+      ]
+    },
+    cfg()
+  );
+
+  ok(
+    reasonOf(bullishNewer.reasons, "SWING_ORDER_BLOCK").longPoints ===
+      15 &&
+      bullishNewer.longScore === 15 &&
+      bullishNewer.shortScore === 0,
+    "fix2: старше bearish + новее bullish swing OB → LONG +15 (зеркало)"
+  );
+
+  /* 3. Internal OB: older bullish + newer bearish → SHORT +5. */
+  const internalBear = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      internalOrderBlocks: [
+        mkOb("up", "internal", "OPEN", 88),
+        mkOb("down", "internal", "OPEN", 92)
+      ]
+    },
+    cfg()
+  );
+
+  ok(
+    reasonOf(internalBear.reasons, "INTERNAL_ORDER_BLOCK")
+      .shortPoints === 5 &&
+      internalBear.shortScore === 5 &&
+      internalBear.longScore === 0,
+    "fix3: internal OB — новее bearish → SHORT +5 (та же рецензия)"
+  );
+
+  /* 4. FVG: older bullish + newer bearish → SHORT +10. */
+  const fvgBear = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      fvgs: [
+        mkFvg("up", "OPEN", 88, 88, 95),
+        mkFvg("down", "OPEN", 92, 88, 95)
+      ]
+    },
+    cfg()
+  );
+
+  ok(
+    reasonOf(fvgBear.reasons, "FVG").shortPoints === 10 &&
+      reasonOf(fvgBear.reasons, "FVG").longPoints === 0 &&
+      fvgBear.shortScore === 10,
+    "fix4: старше bullish + новее bearish FVG → SHORT +10"
+  );
+
+  /* 5. FVG зеркало. */
+  const fvgBull = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      fvgs: [
+        mkFvg("down", "OPEN", 88, 88, 95),
+        mkFvg("up", "OPEN", 92, 88, 95)
+      ]
+    },
+    cfg()
+  );
+
+  ok(
+    reasonOf(fvgBull.reasons, "FVG").longPoints === 10 &&
+      fvgBull.longScore === 10,
+    "fix5: FVG зеркало — новее bullish → LONG +10"
+  );
+
+  /* 6. Confluence: старше bullish OB+FVG перекрываются, но
+   * выбранные (последние) OB и FVG — bearish и перекрываются
+   * → SHORT +5, НЕ LONG. */
+  const confluenceBear = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      swingOrderBlocks: [
+        mkOb("up", "swing", "OPEN", 88, 84, 90),
+        mkOb("down", "swing", "OPEN", 92, 84, 90)
+      ],
+      fvgs: [
+        mkFvg("up", "OPEN", 88, 88, 95),
+        mkFvg("down", "OPEN", 92, 88, 95)
+      ]
+    },
+    cfg()
+  );
+
+  ok(
+    reasonOf(confluenceBear.reasons, "OB_FVG_CONFLUENCE")
+      .shortPoints === 5 &&
+      reasonOf(confluenceBear.reasons, "OB_FVG_CONFLUENCE")
+        .longPoints === 0 &&
+      confluenceBear.shortScore === 15 + 10 + 5 &&
+      confluenceBear.longScore === 0,
+    "fix6: выбранные latest OB/FVG bearish и перекрываются → SHORT +5 (старый bullish-набор не конфлюирует)"
+  );
+
+  /* 7. Смешанные направления выбранных фактов: latest OB
+   * bullish, latest FVG bearish (старый bullish FVG, который
+   * перекрывается, НЕ используется) → confluence 0. */
+  const mixed = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      swingOrderBlocks: [mkOb("up", "swing", "OPEN", 92, 84, 90)],
+      fvgs: [
+        mkFvg("up", "OPEN", 88, 88, 95),
+        mkFvg("down", "OPEN", 92, 120, 126)
+      ]
+    },
+    cfg()
+  );
+
+  ok(
+    reasonOf(mixed.reasons, "OB_FVG_CONFLUENCE").longPoints === 0 &&
+      reasonOf(mixed.reasons, "OB_FVG_CONFLUENCE").shortPoints ===
+        0 &&
+      mixed.longScore === 15 &&
+      mixed.shortScore === 10,
+    "fix7: latest OB bullish + latest FVG bearish → confluence 0 (старый перекрывающийся bullish FVG игнорируется)"
+  );
+
+  /* 8. Swing preference ПОСЛЕ выбора: свежий active swing OB
+   * выбран; internal OB НОВЕЕ тоже существует; confluence
+   * использует SWING OB (V1 rule), а не более новый internal. */
+  const swingPreferred = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      swingOrderBlocks: [mkOb("up", "swing", "OPEN", 90, 84, 90)],
+      internalOrderBlocks: [
+        mkOb("up", "internal", "OPEN", 93, 300, 306)
+      ],
+      fvgs: [mkFvg("up", "OPEN", 92, 88, 95)]
+    },
+    cfg()
+  );
+
+  ok(
+    reasonOf(swingPreferred.reasons, "OB_FVG_CONFLUENCE")
+      .longPoints === 5 &&
+      swingPreferred.longScore === 15 + 5 + 10 + 5,
+    "fix8: confluence построен на SWING OB (зона [84,90] ∩ FVG [88,95]), хотя internal OB новее (его зона [300,306] не перекрывается) — swing preferred после выбора"
+  );
+
+  /* 9. Одинаковый action-time, противоположные направления:
+   * детерминированный key tie-break (без направления как
+   * tie-breaker); оба порядка массива и два запуска — один
+   * результат. */
+  const tieA = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      swingOrderBlocks: [
+        mkOb("up", "swing", "OPEN", 92, 84, 90),
+        mkOb("down", "swing", "OPEN", 92, 80, 86)
+      ]
+    },
+    cfg()
+  );
+  const tieB = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      swingOrderBlocks: [
+        mkOb("down", "swing", "OPEN", 92, 80, 86),
+        mkOb("up", "swing", "OPEN", 92, 84, 90)
+      ]
+    },
+    cfg()
+  );
+
+  ok(
+    reasonOf(tieA.reasons, "SWING_ORDER_BLOCK").longPoints === 15 &&
+      reasonOf(tieA.reasons, "SWING_ORDER_BLOCK").shortPoints ===
+        0 &&
+      JSON.stringify(tieA) === JSON.stringify(tieB) &&
+      JSON.stringify(tieA) ===
+        JSON.stringify(evaluateSmcFromFacts({
+          ...baseFacts(),
+          swingOrderBlocks: [
+            mkOb("up", "swing", "OPEN", 92, 84, 90),
+            mkOb("down", "swing", "OPEN", 92, 80, 86)
+          ]
+        }, cfg())),
+    "fix9: same confirmedAt + противоположные направления — key tie-break детерминирован (порядок массива и повторный запуск не влияют)"
+  );
+
+  /* 10. Mirror/symmetry: зеркальная пара наборов даёт
+   * попарно зеркальные points — зашитый bullish-приоритет
+   * отсутствует (на 98458e0 фикс1/фикс6 нарушали это). */
+  const directSet = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      swingOrderBlocks: [
+        mkOb("up", "swing", "OPEN", 88, 84, 90),
+        mkOb("down", "swing", "OPEN", 92, 84, 90)
+      ],
+      fvgs: [
+        mkFvg("up", "OPEN", 88, 88, 95),
+        mkFvg("down", "OPEN", 92, 88, 95)
+      ]
+    },
+    cfg()
+  );
+  const mirrorSet = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      swingOrderBlocks: [
+        mkOb("down", "swing", "OPEN", 88, 84, 90),
+        mkOb("up", "swing", "OPEN", 92, 84, 90)
+      ],
+      fvgs: [
+        mkFvg("down", "OPEN", 88, 88, 95),
+        mkFvg("up", "OPEN", 92, 88, 95)
+      ]
+    },
+    cfg()
+  );
+
+  ok(
+    directSet.longScore === mirrorSet.shortScore &&
+      directSet.shortScore === mirrorSet.longScore &&
+      directSet.longScore === 0,
+    "fix10: mirror-симметрия хронологического выбора — 0/30 ↔ 30/0 (нет зашитого bullish-приоритета)"
+  );
+
+  /* Sweep cross-direction: новее BUY_SIDE побеждает старее
+   * SELL_SIDE и наоборот (pickLatest по resolvedAt уже по
+   * всем уровням — регрессия сохраняется). */
+  const newerBuy = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      liquidity: [
+        mkLevel("SELL_SIDE", "SWEPT", 95),
+        mkLevel("BUY_SIDE", "SWEPT", 97)
+      ]
+    },
+    cfg()
+  );
+  const newerSell = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      liquidity: [
+        mkLevel("BUY_SIDE", "SWEPT", 95),
+        mkLevel("SELL_SIDE", "SWEPT", 97)
+      ]
+    },
+    cfg()
+  );
+
+  ok(
+    reasonOf(newerBuy.reasons, "LIQUIDITY_SWEEP").shortPoints ===
+      10 &&
+      reasonOf(newerBuy.reasons, "LIQUIDITY_SWEEP").longPoints ===
+        0 &&
+      reasonOf(newerSell.reasons, "LIQUIDITY_SWEEP").longPoints ===
+        10 &&
+      reasonOf(newerSell.reasons, "LIQUIDITY_SWEEP").shortPoints ===
+        0,
+    "fix-sweep: новее BUY_SIDE sweep → SHORT +10, новее SELL_SIDE → LONG +10 (кросс-направление по resolvedAt)"
+  );
+}
+
 /* ---------- итог ---------- */
 
 console.log(`Itog: ${passed}/${total}`);
