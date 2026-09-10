@@ -320,7 +320,7 @@ function mk(i: number, o: number, c: number, high?: number, low?: number): SmcRa
   ok(res.ok, "6a: TrendSuslik config still validates (unchanged)");
 }
 
-/* ---------- 7. SIGNAL + OB duplication note ---------- */
+/* ---------- 7. SIGNAL + OB WIRING (Phase 3D-B: no divergence) ---------- */
 {
   // edf3732 must remain NOT ancestor — check via git is external, but we can ensure no Signal imports in config
   // Here we just check that config module does not import prisma.signal
@@ -328,17 +328,70 @@ function mk(i: number, o: number, c: number, high?: number, low?: number): SmcRa
   ok(!configContent.includes("prisma.signal") && !configContent.includes("signal.create"),
     "7a: config has no Signal writes");
 
-  // Document OB duplication: top-level vs OB internal divergent until 3D-B
-  // For old configs, resolved displacement 1.5 equals hardcoded OB 1.5, so no observable divergence.
-  // For custom 3.0, divergence would exist — this is known deferred to 3D-B.
+  // Phase 3D-B: OB internal now wired — top-level and OB internal must be identical
   const oldAdv = resolveSmcAdvancedConfig(defaultSmcScoringConfig("1h"));
   ok(oldAdv.displacement.bodyAtrMin === 1.5, "7b: old resolved displacement equals OB hardcoded 1.5 (no divergence for old)");
 
   const custom: SmcScoringConfig = { ...defaultSmcScoringConfig("1h"), displacement: { bodyAtrMin: 3.0 } };
   const customAdv = resolveSmcAdvancedConfig(custom);
-  ok(customAdv.displacement.bodyAtrMin === 3.0, "7c: custom displacement 3.0 resolved for top-level (OB wiring deferred to 3D-B)");
-  // Note: OB internal still hardcoded 1.5, so this demonstrates the deferred wiring requirement
-  console.log("NOTE: OB internal hardcode 1.5/2.0/0.6/0.4 + minGap 0.1 still divergent for custom 3.0 — deferred to 3D-B as documented");
+  const subsCustom = deriveSubConfigs(custom);
+  ok(customAdv.displacement.bodyAtrMin === 3.0, "7c: custom displacement 3.0 resolved for top-level");
+  ok((subsCustom.orderBlockSwing as any).displacementBodyAtrMin === 3.0 && (subsCustom.orderBlockInternal as any).displacementBodyAtrMin === 3.0,
+    "7c-ob: OB wiring now receives 3.0 (no divergence)");
+  ok(subsCustom.displacement.bodyAtrMin === (subsCustom.orderBlockSwing as any).displacementBodyAtrMin,
+    "7c-ob2: top-level and OB internal displacementBodyAtrMin identical");
+
+  // Also check FVG minGap wiring (maxAge deliberately not wired — see 3D-B docs)
+  const customFvg: SmcScoringConfig = { ...defaultSmcScoringConfig("1h"), fvg: { minGapAtr: 0.5 } };
+  const subsFvg = deriveSubConfigs(customFvg);
+  ok(subsFvg.fvg.minGapAtr === 0.5 && (subsFvg.orderBlockSwing as any).fvgMinGapAtr === 0.5,
+    "7d: FVG minGap 0.5 wired to OB internal (maxAge not wired as documented)");
+
+  // Verify all 5 shared primitives wired (4 displacement + 1 FVG)
+  const customAll: SmcScoringConfig = {
+    ...defaultSmcScoringConfig("1h"),
+    displacement: { bodyAtrMin: 2.7, rangeAtrMin: 3.1, bullCloseLocMin: 0.77, bearCloseLocMax: 0.23 },
+    fvg: { minGapAtr: 0.42 }
+  };
+  const subsAll = deriveSubConfigs(customAll);
+  ok((subsAll.orderBlockSwing as any).displacementBodyAtrMin === 2.7 &&
+     (subsAll.orderBlockSwing as any).displacementRangeAtrMin === 3.1 &&
+     (subsAll.orderBlockSwing as any).displacementBullCloseLocMin === 0.77 &&
+     (subsAll.orderBlockSwing as any).displacementBearCloseLocMax === 0.23 &&
+     (subsAll.orderBlockSwing as any).fvgMinGapAtr === 0.42,
+    "7e: all 5 shared primitives wired to OB");
+  console.log("NOTE: Phase 3D-B OB wiring complete — top-level and OB internal primitives consistent; FVG maxAge intentionally not wired (hasFvgInImpulse independent)");
+}
+
+/* ---------- 8. UNKNOWN-KEY FAIL-CLOSED (Phase 3D-B) ---------- */
+{
+  function rejectsUnknown(cfg: SmcScoringConfig, label: string): void {
+    try {
+      assertValidSmcScoringConfig(cfg);
+      ok(false, label);
+    } catch (e) {
+      ok(e instanceof SmcInputError, label);
+    }
+  }
+  const base = defaultSmcScoringConfig("1h");
+  rejectsUnknown({ ...base, displacement: { bodyAtrMin: 1.5, typo: 1 } as any }, "8a: displacement unknown key rejected");
+  rejectsUnknown({ ...base, fvg: { minGapAtr: 0.1, typo: 1 } as any }, "8b: fvg unknown key rejected");
+  rejectsUnknown({ ...base, liquidity: { eqToleranceAtr: 0.1, typo: 1 } as any }, "8c: liquidity unknown key rejected");
+  rejectsUnknown({ ...base, orderBlock: { impulseMaxCandles: 3, typo: 1 } as any }, "8d: orderBlock unknown key rejected");
+  // Scoped to Phase3D namespace: unknown legacy fields must NOT break (e.g., rsiPeriod etc are not in this validator)
+  // Only inside displacement/fvg/liquidity/orderBlock — verify base without Phase3D still validates (already 1e)
+  // Also ensure that unknown advanced group typo is not silently ignored: we test via raw record containing extra group is not validated,
+  // but inside groups strictness is enforced (covered above).
+  let unknownGroupRejected = false;
+  try {
+    // Simulate runtime JSON with typo group name: parser would treat it as unknown, but our validator only checks known groups;
+    // we ensure that extra top-level unknown advanced-like key is not automatically accepted as valid group — it will be ignored,
+    // but inner unknown keys inside valid groups are rejected (already tested). For group-name typo, we document scoping.
+    // Here we just verify that a config with misspelled group does not throw (scoped), but we log document.
+    assertValidSmcScoringConfig({ ...base, displecement: { bodyAtrMin: 1.5 } } as any);
+  } catch { unknownGroupRejected = true; }
+  ok(!unknownGroupRejected, "8e: unknown advanced group name ignored (scoped to Phase3D namespace, not global)");
+  console.log("NOTE: unknown-key fail-closed scoped to Phase3D groups displacement/fvg/liquidity/orderBlock (legacy fields not affected)");
 }
 
 console.log(`Itog: ${passed}/${total}`);

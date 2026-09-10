@@ -2386,3 +2386,58 @@ SmcScoringConfig {
 **Tests (песочница):** `test-smc-phase3d-config.ts` 61/61, `test-smc-scoring` 63/63, `test-smc-range` 50/50, `test-smc-evaluate` 31/31, `smart-money` 62/62, `smart-money-readonly --self-test` 43/43, `test-admin-consistency` 84/84, `tsc --noEmit` 0, `git diff --check` 0.
 **Signal ancestry:** `git merge-base --is-ancestor edf3732 HEAD` → NOT ancestor (проверено).
 **DB:** No `prisma.strategy.*`/`prisma.signal.*`, no workers, Strategy id=2 остаётся `DRAFT enabled=false timeframes=["1h"]`, Signal 0→0 (read-only).
+
+==================================================
+36. SMART MONEY PHASE 3D-B — COMPLETE ADVANCED CORE WIRING / OB DIVERGENCE REMOVED (IMPLEMENTED) 10.09.2026
+==================================================
+
+**Baseline:** `dade753e1bed8663a7b8334241e6e09be14dec3e` (Phase 3D-A commit, parent `b06943112ff0c1aa9a4a8c23f474b0aa4c203076`), branch `arena/01a08b68-svechnoy-suslik-phase3d-clean` (exact parent, no SuslikChart).
+**Scope:** Core wiring only — устраняет разрыв top-level vs OB internal; unknown-key fail-closed; без Admin UI/API, без Prisma/DB, без workers/Signal Engine, без dealing-range lifecycle изменений.
+**Files:** `lib/smc/config.ts` (plumbing + unknown-key), `lib/smc/order-blocks.ts` (shared primitives), `scripts/test-smc-phase3d-config.ts` (расширен 61→70), `scripts/test-smc-phase3d-b.ts` (новый, 55 тестов).
+
+**Проблема 3D-A (устранена):** `findOrderBlocks` хардкодил `bodyAtrMin 1.5 / rangeAtrMin 2.0 / bullCloseLocMin 0.6 / bearCloseLocMax 0.4` и `minGapAtr 0.1 / maxAge 0` (`order-blocks.ts:260`); `deriveSubConfigs` уже резолвил top-level, но OB internal оставался divergent для кастомных значений. Для старых конфигов fallback === hardcoded → no observable change; для кастомных `bodyAtrMin 3.0` top-level отклонял бы displacement, а OB всё ещё принимал — скрытое двойное поведение.
+
+**Plumbing (ONE semantics, explicit typed, no circular/duplicate):**
+- `SmcOrderBlockConfig` расширен optional полями `displacementBodyAtrMin/displacementRangeAtrMin/displacementBullCloseLocMin/displacementBearCloseLocMax/fvgMinGapAtr` (`order-blocks.ts` interface + validation finite>=0).
+- `findOrderBlocks` теперь читает `config.displacementBodyAtrMin ?? 1.5` и т.д. (`minGapAtr ?? 0.1`), fallback сохраняет exact old behavior для старых вызовов без plumbing; `evaluateOrderBlocks` наследует.
+- `deriveSubConfigs` прокидывает `adv.displacement.*` и `adv.fvg.minGapAtr` в `orderBlockSwing` и `orderBlockInternal` (оба `...defaultOrderBlockConfig` + 5 shared полей); top-level `displacement/fvg` и OB internal — одна resolved semantics (backward-compatible: old → 1.5/2.0/0.6/0.4/0.1).
+- No circular imports, no duplicate constants, `findOrderBlocks` pure/deterministic без импорта global scoring config.
+
+**FVG maxAge decision (документировано):**
+- Top-level `fvg.maxAgeCandles` (0..∞) полностью wired в `deriveSubConfigs.fvg` и влияет на `evaluateFvgs` lifecycle (OPEN→EXPIRED), verified `test-smc-phase3d-b.ts` F2b.
+- OB internal `hasFvgInImpulse` проверяет только `fvg.confirmedAt` ∈ `[clusterStart..impulseEnd]` и `confirmedAt <= structureConfirmedAt` (`order-blocks.ts: hasFvgInInterval`), state/expired НЕ проверяется; поэтому `maxAge` не влияет на OB confluence и намеренно НЕ пробрасывается — OB FVG `maxAge` остаётся `0` (строгое условие). `minGapAtr` MUST не diverge и прокинут. Задокументировано в `config.ts` header и `order-blocks.ts:260` comment, verified OB-R13.
+
+**Unknown-key fail-closed (scoped to Phase3D namespace):**
+- `assertValidAdvancedDisplacement/Fvg/Liquidity/OrderBlock` теперь проверяют `Object.keys` против `allowed Set` и бросают `SmcInputError: scoring.<group>.<typo>: неизвестное поле` (fail-closed для опечаток внутри 4 групп).
+- Scoped: только внутри `displacement/fvg/liquidity/orderBlock`; legacy поля `SmcScoringConfig` (tf, swingLeft и т.д.) не затрагиваются; unknown advanced group name (например, `displecement`) игнорируется (не валидируется глобально) — задокументировано как Phase3D-namespace scoping, `test-smc-phase3d-b.ts` U6 и `test-smc-phase3d-config.ts` §8.
+- Validation coherence: global `assertValidSmcScoringConfig` и module `assertValid*` консистентны, no weakening (все старые 26 malformed кейсов остаются, новые 4 unknown-key добавлены).
+
+**Behavioral wiring proofs (14 params, каждый меняет relevant core):**
+- Displacement 4: `bodyAtrMin 1.5→3.0` (fixture bodyAtr 1.5), `rangeAtrMin 2.0→2.5`, `bullCloseLocMin 0.6→0.9`, `bearCloseLocMax 0.4→0.1` — `evaluateDisplacements` count 1→0 verified.
+- FVG 2: `minGapAtr 0.1→0.15` (gap 0.104), `maxAge 0→3` (expiry OPEN→EXPIRED) — `evaluateFvgs`.
+- Liquidity 4: `eqToleranceAtr 0.5→0.05` (gap 2.0), `eqConfirmBars 2→3`, `sweepMinPenetrationAtr 0.05→0.5` (1.0 gap), `maxAge 0→3` — `evaluateLiquidity`.
+- OB 4: `impulseMaxCandles 1→3` (derive + grouping), `confirmMaxCandles 1→10→15` (far BOS 12), `maxAge 0→3` (EXPIRED), `sweepLookback 0→1→5` (distance 2) — `evaluateOrderBlocks`.
+- Distinguish resolver change vs behavior change: каждый тест сначала проверяет `deriveSubConfigs` resolved value, затем вызывает submodule с контролируемыми свечами и сверяет count/state.
+
+**OB consistency regression (would have FAILED on 3D-A):**
+- `test-smc-phase3d-b.ts` §5 OB-R1..R13: custom `bodyAtrMin 3.0` wired в оба OB configs (swing+internal) и identical top-level; behavioral: warmup fixture bodyAtr 1.5 top-level 0, old OB 1 vs new OB 0; `minGap 0.5` wired, `hasFvgInImpulse` true→false; `maxAge` not wired still true. На 3D-A этот тест падал бы (OB internal оставался 1 и true).
+- Также `test-smc-phase3d-config.ts` §7c-ob/e: прямой check `deriveSubConfigs` wiring для всех 5 shared primitives.
+
+**Old-config exact equivalence (frozen deterministic):**
+- `deriveSubConfigs(old) ≡ explicit defaults` serialized, `resolve` identical, `evaluateSmc(old) ≡ explicit` deep identical (120 свечей fixture, `T0+120h`), future-injection `full(T) ≡ prefix(T)`, scores/direction identical — §7 EQ1-3 в `test-smc-phase3d-b.ts` и §4 в `test-smc-phase3d-config.ts`.
+
+**Range position DO NOT CHANGE:**
+- No clamp, `outsideRange` true still awards via zone, lifecycle без изменений — `test-smc-phase3d-config.ts` §5 и `test-smc-range` 50/50 untouched.
+
+**Safety invariants unchanged:**
+- CLOSED-only, no-lookahead, deterministic, cannot-evaluate≠NEUTRAL, chronological/grid/no Signal writes, `edf3732` NOT ancestor — verified.
+
+**Tests (песочница):**
+- `test-smc-phase3d-config.ts` 70/70 (61→70, +OB wiring + unknown-key)
+- `test-smc-phase3d-b.ts` 55/55 (14 params behavioral + OB regression + unknown-key + equivalence)
+- `test-smc-displacement` 23/23, `test-smc-fvg` 37/37, `test-smc-liquidity` 48/48, `test-smc-order-blocks` 63/63, `test-smc-scoring` 63/63, `test-smc-evaluate` 31/31, `test-smc-range` 50/50, `smart-money` 62/62, `smart-money-readonly --self-test` 39/39, `test-admin-consistency` 84/84, `tsc --noEmit` 0, `git diff --check` 0.
+
+**Signal ancestry:** `git merge-base --is-ancestor edf3732 HEAD` → NOT ancestor.
+**DB:** No `prisma.strategy.*`/`prisma.signal.*`, no workers, Strategy id=2 остаётся `DRAFT enabled=false timeframes=["1h"]`, Signal 0→0. Только config/OB/test/PROJECT_CONTEXT.md изменены; `components/admin/app/api/admin/prisma/schema/chart/Signal` не тронуты.
+
+**Deliverable:** ONE commit exact parent `dade753`, push only `arena/01a08b68-svechnoy-suslik-phase3d-clean`, STOP after 3D-B (no 3D-C).

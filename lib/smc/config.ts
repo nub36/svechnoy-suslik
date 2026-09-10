@@ -25,9 +25,17 @@
  * - FVG module default maxAge=500 и Liquidity 750
  *   остаются для изолированных модульных тестов, но scoring
  *   fallback — 0 (текущая runtime semantics);
- * - OB internal hardcode (1.5/2.0/0.6/0.4 + minGap 0.1)
- *   остаётся в findOrderBlocks до 3D-B — см. комментарий
- *   ниже (разрыв top-level vs OB будет устранён в 3D-B).
+ * - 3D-A: OB internal hardcode оставался до 3D-B.
+ *
+ * Phase 3D-B — complete advanced core wiring:
+ * - findOrderBlocks теперь получает shared displacement/FVG
+ *   thresholds через явную типизированную plumbing
+ *   (SmcOrderBlockConfig extension), устраняя разрыв
+ *   top-level vs OB internal (см. deriveSubConfigs);
+ * - FVG maxAge в OB internal намеренно не пробрасывается:
+ *   hasFvgInImpulse не проверяет state/expired, только
+ *   confirmedAt в окне, поэтому maxAge не влияет.
+ * - неизвестные поля в advanced группах теперь fail-closed.
  *
  * НЕ менять проверенные algorithms: этот модуль только
  * собирает их параметры.
@@ -246,6 +254,19 @@ function assertValidAdvancedDisplacement(
       "scoring.displacement: ожидается объект"
     );
   }
+  const allowed = new Set([
+    "bodyAtrMin",
+    "rangeAtrMin",
+    "bullCloseLocMin",
+    "bearCloseLocMax"
+  ]);
+  for (const key of Object.keys(displacement)) {
+    if (!allowed.has(key)) {
+      throw new SmcInputError(
+        `scoring.displacement.${key}: неизвестное поле`
+      );
+    }
+  }
   if (displacement.bodyAtrMin !== undefined) {
     const v = displacement.bodyAtrMin;
     if (!Number.isFinite(v as number) || (v as number) < 0) {
@@ -284,6 +305,12 @@ function assertValidAdvancedFvg(fvg: unknown): void {
   if (!isRecord(fvg)) {
     throw new SmcInputError("scoring.fvg: ожидается объект");
   }
+  const allowed = new Set(["minGapAtr", "maxAgeCandles"]);
+  for (const key of Object.keys(fvg)) {
+    if (!allowed.has(key)) {
+      throw new SmcInputError(`scoring.fvg.${key}: неизвестное поле`);
+    }
+  }
   if (fvg.minGapAtr !== undefined) {
     const v = fvg.minGapAtr;
     if (!Number.isFinite(v as number) || (v as number) < 0) {
@@ -307,6 +334,19 @@ function assertValidAdvancedLiquidity(
 ): void {
   if (!isRecord(liquidity)) {
     throw new SmcInputError("scoring.liquidity: ожидается объект");
+  }
+  const allowed = new Set([
+    "eqToleranceAtr",
+    "eqConfirmBars",
+    "sweepMinPenetrationAtr",
+    "maxAgeCandles"
+  ]);
+  for (const key of Object.keys(liquidity)) {
+    if (!allowed.has(key)) {
+      throw new SmcInputError(
+        `scoring.liquidity.${key}: неизвестное поле`
+      );
+    }
   }
   if (liquidity.eqToleranceAtr !== undefined) {
     const v = liquidity.eqToleranceAtr;
@@ -347,6 +387,19 @@ function assertValidAdvancedOrderBlock(
 ): void {
   if (!isRecord(orderBlock)) {
     throw new SmcInputError("scoring.orderBlock: ожидается объект");
+  }
+  const allowed = new Set([
+    "impulseMaxCandles",
+    "confirmMaxCandles",
+    "maxAgeCandles",
+    "sweepLookbackCandles"
+  ]);
+  for (const key of Object.keys(orderBlock)) {
+    if (!allowed.has(key)) {
+      throw new SmcInputError(
+        `scoring.orderBlock.${key}: неизвестное поле`
+      );
+    }
   }
   if (orderBlock.impulseMaxCandles !== undefined) {
     const v = orderBlock.impulseMaxCandles;
@@ -576,16 +629,14 @@ export function resolveSmcAdvancedConfig(
  * Константы displacement/FVG — ТЕ ЖЕ, что в проверенном
  * OB core (единая semantics примитивов).
  *
- * Phase 3D-A: top-level sub-configs уже используют resolved
- * advanced значения. ВАЖНО: findOrderBlocks внутри всё ещё
- * хардкодит displacement 1.5/2.0/0.6/0.4 и FVG minGap 0.1
- * (lib/smc/order-blocks.ts:260) — разрыв между top-level
- * и OB internal сохраняется до 3D-B. Для старых конфигов
- * (без advanced полей) resolved === hardcoded, поэтому
- * семантика идентична; для кастомных advanced значений
- * top-level и OB разойдутся — это известное ограничение
- * 3D-A, устраняется в 3D-B путём проброса resolved
- * displacement/FVG в OB sub-evaluation.
+ * Phase 3D-B: top-level и OB internal теперь используют
+ * ОДНУ resolved semantics для shared primitives
+ * (displacementBodyAtrMin etc + fvgMinGapAtr пробрасываются
+ * в orderBlockSwing/Internal). Для старых конфигов
+ * resolved === hardcoded → no observable change;
+ * для кастомных значений top-level и OB internal
+ * консистентны. FVG maxAge в OB internal остаётся 0
+ * (hasFvgInImpulse не зависит от expiry).
  */
 export function deriveSubConfigs(
   config: SmcScoringConfig
@@ -636,7 +687,12 @@ export function deriveSubConfigs(
     impulseMaxCandles: adv.orderBlock.impulseMaxCandles,
     confirmMaxCandles: adv.orderBlock.confirmMaxCandles,
     maxAgeCandles: adv.orderBlock.maxAgeCandles,
-    sweepLookbackCandles: adv.orderBlock.sweepLookbackCandles
+    sweepLookbackCandles: adv.orderBlock.sweepLookbackCandles,
+    displacementBodyAtrMin: adv.displacement.bodyAtrMin,
+    displacementRangeAtrMin: adv.displacement.rangeAtrMin,
+    displacementBullCloseLocMin: adv.displacement.bullCloseLocMin,
+    displacementBearCloseLocMax: adv.displacement.bearCloseLocMax,
+    fvgMinGapAtr: adv.fvg.minGapAtr
   };
   const orderBlockInternal = {
     ...defaultOrderBlockConfig(config.tf, "internal"),
@@ -646,7 +702,12 @@ export function deriveSubConfigs(
     impulseMaxCandles: adv.orderBlock.impulseMaxCandles,
     confirmMaxCandles: adv.orderBlock.confirmMaxCandles,
     maxAgeCandles: adv.orderBlock.maxAgeCandles,
-    sweepLookbackCandles: adv.orderBlock.sweepLookbackCandles
+    sweepLookbackCandles: adv.orderBlock.sweepLookbackCandles,
+    displacementBodyAtrMin: adv.displacement.bodyAtrMin,
+    displacementRangeAtrMin: adv.displacement.rangeAtrMin,
+    displacementBullCloseLocMin: adv.displacement.bullCloseLocMin,
+    displacementBearCloseLocMax: adv.displacement.bearCloseLocMax,
+    fvgMinGapAtr: adv.fvg.minGapAtr
   };
   const range = {
     ...defaultRangeConfig(config.tf),

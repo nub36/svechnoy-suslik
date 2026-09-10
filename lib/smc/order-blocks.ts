@@ -160,6 +160,17 @@ export interface SmcOrderBlockConfig {
    * число CLOSED свеч (канонические индексы) между
    * resolving-свечей sweep и impulseStart; 0 = confluence выкл. */
   sweepLookbackCandles: number;
+  /** Phase 3D-B plumbing: shared displacement primitive thresholds
+   * (optional, fallback to canonical hardcoded for old callers).
+   * При наличии используются вместо 1.5/2.0/0.6/0.4. */
+  displacementBodyAtrMin?: number;
+  displacementRangeAtrMin?: number;
+  displacementBullCloseLocMin?: number;
+  displacementBearCloseLocMax?: number;
+  /** Phase 3D-B plumbing: shared FVG primitive threshold
+   * (optional, fallback 0.1). maxAge не пробрасывается —
+   * OB использует FVG с maxAge 0 (см. findOrderBlocks). */
+  fvgMinGapAtr?: number;
 }
 
 export function defaultOrderBlockConfig(
@@ -287,6 +298,58 @@ export function assertValidOrderBlockConfig(
       );
     }
   }
+
+  // Phase 3D-B plumbing: shared primitive thresholds (optional)
+  if (config.displacementBodyAtrMin !== undefined) {
+    if (
+      !Number.isFinite(config.displacementBodyAtrMin) ||
+      config.displacementBodyAtrMin < 0
+    ) {
+      throw new SmcInputError(
+        "ob.displacementBodyAtrMin: ожидается конечное число >= 0"
+      );
+    }
+  }
+  if (config.displacementRangeAtrMin !== undefined) {
+    if (
+      !Number.isFinite(config.displacementRangeAtrMin) ||
+      config.displacementRangeAtrMin < 0
+    ) {
+      throw new SmcInputError(
+        "ob.displacementRangeAtrMin: ожидается конечное число >= 0"
+      );
+    }
+  }
+  if (config.displacementBullCloseLocMin !== undefined) {
+    if (
+      !Number.isFinite(config.displacementBullCloseLocMin) ||
+      config.displacementBullCloseLocMin < 0
+    ) {
+      throw new SmcInputError(
+        "ob.displacementBullCloseLocMin: ожидается конечное число >= 0"
+      );
+    }
+  }
+  if (config.displacementBearCloseLocMax !== undefined) {
+    if (
+      !Number.isFinite(config.displacementBearCloseLocMax) ||
+      config.displacementBearCloseLocMax < 0
+    ) {
+      throw new SmcInputError(
+        "ob.displacementBearCloseLocMax: ожидается конечное число >= 0"
+      );
+    }
+  }
+  if (config.fvgMinGapAtr !== undefined) {
+    if (
+      !Number.isFinite(config.fvgMinGapAtr) ||
+      config.fvgMinGapAtr < 0
+    ) {
+      throw new SmcInputError(
+        "ob.fvgMinGapAtr: ожидается конечное число >= 0"
+      );
+    }
+  }
 }
 
 interface ImpulseRec {
@@ -347,15 +410,26 @@ export function findOrderBlocks(
     params,
     horizonAsOf
   );
+  // Phase 3D-B: shared primitives resolved via plumbing.
+  // Fallback to canonical hardcoded for old callers (exact old behavior).
+  // FVG maxAge deliberately stays 0 — hasFvgInImpulse не проверяет
+  // state/expired, только confirmedAt в окне, поэтому maxAge не влияет
+  // на OB primitive и не пробрасывается (документировано).
+  const bodyAtrMin = config.displacementBodyAtrMin ?? 1.5;
+  const rangeAtrMin = config.displacementRangeAtrMin ?? 2.0;
+  const bullCloseLocMin = config.displacementBullCloseLocMin ?? 0.6;
+  const bearCloseLocMax = config.displacementBearCloseLocMax ?? 0.4;
+  const minGapAtr = config.fvgMinGapAtr ?? 0.1;
+
   const displacements = evaluateDisplacements(
     rawShim,
     {
       tf: config.tf,
       atrPeriod: config.atrPeriod,
-      bodyAtrMin: 1.5,
-      rangeAtrMin: 2.0,
-      bullCloseLocMin: 0.6,
-      bearCloseLocMax: 0.4
+      bodyAtrMin,
+      rangeAtrMin,
+      bullCloseLocMin,
+      bearCloseLocMax
     },
     horizonAsOf
   );
@@ -364,7 +438,7 @@ export function findOrderBlocks(
     {
       tf: config.tf,
       atrPeriod: config.atrPeriod,
-      minGapAtr: 0.1,
+      minGapAtr,
       maxAgeCandles: 0
     },
     horizonAsOf
