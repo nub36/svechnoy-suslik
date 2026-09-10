@@ -42,6 +42,16 @@
  *   возможен ТОЛЬКО после нового подтверждённого target'а.
  * - protectedLow/High = последний AVAILABLE pivot
  *   противоположного рода (без фильтра по этажу потребления).
+ * - PROTECTED ANCHOR METADATA (immutable snapshot в каждом
+ *   событии, behavior НЕ меняет): protectedAnchor = значение
+ *   protectedLow/High тем же pickTarget на границе события;
+ *   для CHOCH — сам пробитый protected pivot (pivotKey ===
+ *   brokenPivotKey); для CHOCH_INVALIDATED — null; null также
+ *   если противоположный AVAILABLE уровень отсутствовал.
+ *   Snapshot — COPY значений пивота, после emit не зависит от
+ *   последующего CONSUMED уровня. Инвариант:
+ *   anchor.confirmedAt <= event.confirmedAt (нарушение —
+ *   assertion failure). Детали в pushEvent.
  * - TEMPORAL ELIGIBILITY (confirmation-time semantics):
  *   reversal-target обязан иметь pivot.confirmedAt СТРОГО
  *   позже chochConfirmedAt (effectiveCloseTime CHOCH-свечи).
@@ -82,6 +92,7 @@ import {
   SmcPivot,
   SmcStructureEvent,
   SmcStructureEventType,
+  SmcStructureAnchorSnapshot,
   SmcStructuralLevel,
   StructureParams,
   StructurePhase,
@@ -220,6 +231,66 @@ function runStructureFsm(
   ): string => {
     const key = `SMC1|E|${params.tf}|${params.layer}|${type}|${dir}|${brokenPivotKey}|${candle.openTime.getTime()}`;
 
+    // METADATA ONLY (behavior FSM не меняется): snapshot
+    // защищённого противоположного якоря тем же правилом
+    // pickTarget, каким FSM пользуется внутри. Вызов read-only:
+    // не consume уровни, не меняет выбор reversal-цели, фазы и
+    // события. На момент вызова ни один уровень этой свечи ещё
+    // не consume (consume происходит ПОСЛЕ emit), поэтому:
+    //   - continuation BOS up/down → ровно тот protectedLow /
+    //     protectedHigh, что вычислен в этой же boundary;
+    //   - CHOCH down/up → сам пробитый protected pivot
+    //     (pivotKey === brokenPivotKey);
+    //   - bootstrap BOS → текущий deterministic opposite target;
+    //   - reversal-confirming BOS (REVERSAL_PENDING_*) →
+    //     AVAILABLE opposite pivot этой же boundary (ветка его
+    //     иначе не вычисляла; lookup только для metadata).
+    let protectedAnchor: SmcStructureAnchorSnapshot | null =
+      null;
+
+    if (type !== "CHOCH_INVALIDATED") {
+      // Род искомого уровня:
+      //   - BOS (bootstrap/continuation/reversal) —
+      //     ПРОТИВОПОЛОЖНЫЙ роду события (BOS up → protected
+      //     low; BOS down → protected high);
+      //   - CHOCH — САМ пробитый protected pivot (CHOCH down
+      //     из TREND_UP ломает protected low; pivotKey
+      //     совпадает с brokenPivotKey, т.к. lookup тем же
+      //     pickTarget на той же boundary ДО consume).
+      const anchorLevels =
+        type === "CHOCH"
+          ? dir === "up"
+            ? highLevels
+            : lowLevels
+          : dir === "up"
+            ? lowLevels
+            : highLevels;
+      const anchorLevel = pickTarget(anchorLevels, -1, null);
+
+      if (anchorLevel !== null) {
+        // Temporal invariant: якорь подтверждён не позднее
+        // события (pivot попадает в уровни только на своей
+        // confirmation-свечи; событие происходит на свече с
+        // effClose >= confirmedAt pivot'а). Нарушение — bug.
+        if (
+          anchorLevel.pivot.confirmedAt.getTime() >
+          candle.effectiveCloseTime.getTime()
+        ) {
+          throw new Error(
+            `fsm: нарушен temporal invariant protectedAnchor (pivot ${anchorLevel.pivot.key} подтверждён позже события)`
+          );
+        }
+
+        protectedAnchor = {
+          pivotKey: anchorLevel.pivot.key,
+          kind: anchorLevel.pivot.kind,
+          price: anchorLevel.pivot.price,
+          eventTime: anchorLevel.pivot.eventTime,
+          confirmedAt: anchorLevel.pivot.confirmedAt
+        };
+      }
+    }
+
     events.push({
       key,
       layer: params.layer,
@@ -228,7 +299,8 @@ function runStructureFsm(
       brokenPivotKey,
       brokenLevelPrice,
       eventTime: candle.openTime,
-      confirmedAt: candle.effectiveCloseTime
+      confirmedAt: candle.effectiveCloseTime,
+      protectedAnchor
     });
 
     return key;

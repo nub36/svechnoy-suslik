@@ -154,6 +154,19 @@ export type SmcStructureEventType =
   | "CHOCH"
   | "CHOCH_INVALIDATED";
 
+/** Immutable snapshot защищённого противоположного якоря,
+ * выбранного САМИМ FSM на границе структурного события
+ * (metadata COPY значений пивота, НЕ ссылка на внутренний
+ * FsmLevel; после emit не зависит от последующего
+ * AVAILABLE/CONSUMED lifecycle уровня). */
+export interface SmcStructureAnchorSnapshot {
+  pivotKey: string;
+  kind: SmcPivotKind;
+  price: number;
+  eventTime: Date;
+  confirmedAt: Date;
+}
+
 export interface SmcStructureEvent {
   key: string;
   layer: SmcLayer;
@@ -168,6 +181,16 @@ export interface SmcStructureEvent {
   /** effectiveCloseTime той же свечи; actionableAt =
    * confirmedAt (anti-lookahead V2 §17). */
   confirmedAt: Date;
+  /** Metadata: защищённый противоположный якорь на момент
+   * события тем же deterministic правилом, каким FSM
+   * пользуется внутри (pickTarget противоположного рода;
+   * для CHOCH — сам пробитый protected pivot, т.е.
+   * pivotKey === brokenPivotKey); CHOCH_INVALIDATED → null;
+   * null также если противоположный AVAILABLE уровень на
+   * границе отсутствовал. Только metadata: не участвует в
+   * transition/identity и не меняет behavior FSM. Инвариант:
+   * protectedAnchor.confirmedAt <= confirmedAt события. */
+  protectedAnchor: SmcStructureAnchorSnapshot | null;
 }
 
 export type SmcLevelState = "AVAILABLE" | "CONSUMED";
