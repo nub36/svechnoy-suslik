@@ -759,44 +759,62 @@ async function runSymbolMode(symbol: string, timeframe: SmcTimeframe, diagnostic
   }
 
   // Phase 3E: cross-exchange candle-window alignment guard before aggregation
+  // MarketStrategyResult.candleTime is latest CLOSED candle openTime;
+  // same candleTime + same tf => same canonical interval [candleTime, candleTime + tf).
   const alignment = checkCandleAlignment(results, timeframe);
   console.log(`\n=== Выравнивание окон (alignment) ${timeframe} ===`);
-  for (const d of alignment.details) {
-    console.log(`  ${d.exchange}: candleTime=${d.candleTime.toISOString()} UTC hour=${d.utcHour} offset=${d.offsetMs}ms ${d.aligned ? "ALIGNED" : "MISALIGNED"}`);
+  if (alignment.referenceCandleTime) {
+    console.log(`  referenceCandleTime: ${alignment.referenceCandleTime.toISOString()} (all evaluated must equal this)`);
+  } else {
+    console.log(`  referenceCandleTime: — (no evaluated markets)`);
   }
-  if (!alignment.aligned) {
-    console.log(`  ⚠ MISALIGNED — cannot-aggregate for multi-exchange ${timeframe}: ${alignment.reason}`);
-    console.log(`  Пояснение: для ${timeframe} окна должны быть выровнены к canonical UTC границе (openTime % ${"SMCTIMEFRAME_MS[timeframe]"} ===0). BINGX 1d в 16 UTC не совпадает с остальными 00 UTC — это разные daily периоды, агрегация запрещена.`);
-    if (timeframe === "1d") {
-      console.log(`  Вывод 1d: оценивается per-exchange независимо, но multi-exchange агрегация REFUSED. Для разблокировки 1d требуется нормализация BINGX daily к UTC 00 или исключение BINGX из 1d universe.`);
+  for (const d of alignment.details) {
+    const horizonFlag = alignment.horizonMismatch.some((h) => h.exchange === d.exchange && h.marketId === d.marketId) ? "HORIZON_MISMATCH" : "HORIZON_OK";
+    const gridFlag = d.aligned ? "GRID_OK" : "OFF_GRID";
+    console.log(`  ${d.exchange}: candleTime=${d.candleTime.toISOString()} UTC hour=${d.utcHour} offset=${d.offsetMs}ms ${gridFlag} ${horizonFlag}`);
+  }
+  if (alignment.offGrid.length > 0) {
+    console.log(`  ⚠ OFF_GRID ${alignment.offGrid.length}/${alignment.totalEvaluated}: ${alignment.offGrid.map((o) => `${o.exchange} ${o.candleTime.toISOString()} offset=${o.offsetMs}ms`).join("; ")}`);
+  }
+  if (alignment.horizonMismatch.length > 0) {
+    console.log(`  ⚠ HORIZON_MISMATCH ${alignment.horizonMismatch.length}/${alignment.totalEvaluated}: reference=${alignment.referenceCandleTime?.toISOString() ?? "—"} mismatched ${alignment.horizonMismatch.map((h) => `${h.exchange} ${h.candleTime.toISOString()}`).join("; ")}`);
+  }
+  if (!alignment.safe) {
+    console.log(`  ⚠ MISALIGNED — cannot-aggregate for multi-exchange ${timeframe}: ${alignment.reason ?? "unsafe"}`);
+    console.log(`  Пояснение: для ${timeframe} требуется (A) canonical grid (openTime % tfMs ===0) и (B) одинаковый latest CLOSED candleTime у всех оцениваемых рынков. Разные окна — агрегация запрещена (generic для 5m/15m/1h/4h/1d).`);
+    if (alignment.totalEvaluated === 0) {
+      console.log(`  Вывод: нет evaluated рынков — cross-exchange агрегация невозможна.`);
+    } else if (alignment.offGrid.length > 0) {
+      console.log(`  Вывод: off-grid рынки (observed в PostgreSQL: BINGX 1d 16:00 UTC vs остальные 00:00 UTC — разные daily периоды) — требуется нормализация или исключение.`);
     }
   } else {
-    console.log(`  ✓ ALIGNED ${alignment.alignedCount}/${alignment.totalEvaluated} — можно агрегировать`);
+    console.log(`  ✓ ALIGNED ${alignment.alignedCount}/${alignment.totalEvaluated} safe — можно агрегировать (grid OK + same horizon)`);
   }
 
-  // Aggregation (if misaligned for 1d, we still compute but mark as not aggregatable)
-  const agg = aggregateAssetGroup(
-    asset.symbol,
-    timeframe,
-    SMART_MONEY_SLUG,
-    strategyVersion,
-    results,
-    minExchanges
-  );
-
-  if (!canAggregateSafely(alignment) && timeframe === "1d") {
-    console.log(`\n=== Агрегация ${asset.symbol} ${timeframe} ${SMART_MONEY_SLUG} v${strategyVersion} — REFUSED (misaligned) ===`);
-    console.log(`  direction: ${agg.direction} ${agg.conflict ? "(КОНФЛИКТ)" : ""} — НЕДОСТОВЕРНО для 1d из-за misalignment`);
-    console.log(`  votes: LONG ${agg.longVotes} SHORT ${agg.shortVotes} NEUTRAL ${agg.neutralVotes} evaluated ${agg.evaluated} skipped ${agg.skipped}`);
-    console.log(`  confirmation: ${agg.confirmation} (порог ${agg.minExchanges})`);
-    console.log(`  explanation: ${agg.explanation} — ОТКЛОНЕНО: cross-exchange daily windows не выровнены (BINGX 16 UTC vs 00 UTC)`);
-    console.log(`  Действие: per-exchange результаты выше валидны, но multi-exchange сигнал для 1d НЕ формируется.`);
+  if (!canAggregateSafely(alignment)) {
+    console.log(`\n=== MULTI-EXCHANGE AGGREGATION REFUSED ${asset.symbol} ${timeframe} ${SMART_MONEY_SLUG} v${strategyVersion} ===`);
+    console.log(`  reason: ${alignment.reason ?? "unsafe alignment"}`);
+    if (alignment.referenceCandleTime) console.log(`  referenceCandleTime: ${alignment.referenceCandleTime.toISOString()}`);
+    if (alignment.offGrid.length > 0) console.log(`  offGrid: ${alignment.offGrid.map((o) => `${o.exchange} ${o.candleTime.toISOString()}`).join(", ")}`);
+    if (alignment.horizonMismatch.length > 0) console.log(`  horizonMismatch: ${alignment.horizonMismatch.map((h) => `${h.exchange} ${h.candleTime.toISOString()}`).join(", ")}`);
+    console.log(`  Действие: per-exchange результаты выше валидны, но multi-exchange агрегация НЕ вычисляется (aggregateAssetGroup не вызван).`);
   } else {
+    const agg = aggregateAssetGroup(
+      asset.symbol,
+      timeframe,
+      SMART_MONEY_SLUG,
+      strategyVersion,
+      results,
+      minExchanges
+    );
     console.log(`\n=== Агрегация ${asset.symbol} ${timeframe} ${SMART_MONEY_SLUG} v${strategyVersion} ===`);
     console.log(`  direction: ${agg.direction} ${agg.conflict ? "(КОНФЛИКТ)" : ""}`);
     console.log(`  votes: LONG ${agg.longVotes} SHORT ${agg.shortVotes} NEUTRAL ${agg.neutralVotes} evaluated ${agg.evaluated} skipped ${agg.skipped}`);
     console.log(`  confirmation: ${agg.confirmation} (порог ${agg.minExchanges})`);
     console.log(`  explanation: ${agg.explanation}`);
+    if (agg.evaluated === 1) {
+      console.log(`  note: single evaluated — temporal alignment true, но minExchanges=${agg.minExchanges} проверяется отдельно на уровне агрегации.`);
+    }
   }
 
   const discBefore = await prisma.signal.count().catch(() => 0);

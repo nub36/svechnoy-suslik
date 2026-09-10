@@ -1,15 +1,19 @@
 /**
  * Phase 3E — Candle window alignment helper (read-only, pure).
  *
- * Detects cross-exchange misalignment for multi-exchange aggregation.
- * For 1d, BINGX openTime UTC 16 vs others UTC 00 are NOT the same daily window,
- * even though each is internally valid 24h bar.
+ * MarketStrategyResult.candleTime represents the latest CLOSED candle openTime
+ * (from PostgreSQL Candle where closed=true, last CLOSED bar per market).
+ * For same timeframe, identical candleTime means same canonical interval:
+ *   [candleTime, candleTime + SMCTIMEFRAME_MS[timeframe])
+ * We do NOT compare wall-clock execution time.
  *
- * Generic guard: each evaluated market's latest CLOSED candle openTime
- * must be canonical-aligned to UTC grid for its timeframe
- * (openTime.getTime() % SMCTIMEFRAME_MS[tf] === 0).
+ * Safe multi-exchange aggregation requires BOTH:
+ * A) canonical grid alignment: each evaluated candleTime % SMCTIMEFRAME_MS[tf] === 0
+ *    (UTC grid: 5m every 5min, 15m every 15min, 1h top, 4h q4, 1d UTC midnight)
+ * B) same evaluation horizon: all evaluated markets share exactly the same
+ *    candleTime (no stale/different horizon, even by one bar).
  *
- * This is pure, no DB, no side effects.
+ * This is pure, no DB, no side effects, deterministic, no lookahead.
  */
 
 import { SMCTIMEFRAME_MS, type SmcTimeframe } from "../smc/types";
@@ -40,7 +44,7 @@ export function canonicalOffsetMs(
 }
 
 /**
- * Human-readable UTC hour for 1d alignment audit.
+ * Human-readable UTC hour for audit.
  */
 export function utcHour(openTime: Date): number {
   return openTime.getUTCHours();
@@ -57,22 +61,32 @@ export type AlignmentDetail = {
 };
 
 export type AlignmentCheck = {
+  /** Legacy strict flag: true only if BOTH canonical and horizon pass and at least one evaluated exists. Kept for backward compat; equals safe. */
   aligned: boolean;
-  reason?: string;
+  /** Preferred strict flag: true only if canonical grid OK, same horizon, and at least one evaluated. */
+  safe: boolean;
+  /** Reference candleTime (first evaluated's openTime) — null when no evaluated. All evaluated must equal this. */
+  referenceCandleTime: Date | null;
+  /** Per-market details for evaluated markets */
   details: AlignmentDetail[];
+  /** Subset of details where !isCanonicalAligned (off-grid) */
+  offGrid: AlignmentDetail[];
+  /** Subset of details where candleTime !== referenceCandleTime (different horizon, even by one bar) */
+  horizonMismatch: AlignmentDetail[];
+  /** Legacy alias for offGrid */
   misaligned: AlignmentDetail[];
   alignedCount: number;
   totalEvaluated: number;
+  reason?: string;
 };
 
 /**
  * Check cross-exchange alignment for aggregation horizon.
  * Only evaluated markets are checked; filtered/cannot-evaluate are ignored.
- * Aligned = every evaluated market's candleTime is canonical-aligned.
- * If any misaligned, overall not aligned — aggregation must be refused/marked.
- *
- * For 1d with BINGX at UTC 16 vs others UTC 00, BINGX will be misaligned.
- * For 5m/15m/1h/4h where all exchanges are UTC-grid aligned, check passes.
+ * Safe = every evaluated is canonical-aligned AND shares the same candleTime.
+ * - Zero evaluated => safe=false (no evaluated markets available for cross-exchange aggregation)
+ * - One evaluated  => safe = isCanonicalAligned(single) (horizon trivially same, but minExchanges is separate)
+ *   Document: temporal alignment passing for 1 market does NOT imply minExchanges satisfied.
  */
 export function checkCandleAlignment(
   results: MarketStrategyResult[],
@@ -84,12 +98,16 @@ export function checkCandleAlignment(
 
   if (evaluated.length === 0) {
     return {
-      aligned: true, // vacuous — no evaluated to misalign, aggregation will be empty but not misaligned
-      reason: "no evaluated markets — vacuous aligned",
+      aligned: false,
+      safe: false,
+      referenceCandleTime: null,
       details: [],
+      offGrid: [],
+      horizonMismatch: [],
       misaligned: [],
       alignedCount: 0,
       totalEvaluated: 0,
+      reason: "no evaluated markets available for cross-exchange aggregation",
     };
   }
 
@@ -107,44 +125,71 @@ export function checkCandleAlignment(
     };
   });
 
-  const misaligned = details.filter((d) => !d.aligned);
+  const offGrid = details.filter((d) => !d.aligned);
+  const referenceCandleTime = details[0].candleTime;
+  const refMs = referenceCandleTime.getTime();
+  const horizonMismatch = details.filter(
+    (d) => d.candleTime.getTime() !== refMs,
+  );
 
-  if (misaligned.length === 0) {
-    return {
-      aligned: true,
-      details,
-      misaligned: [],
-      alignedCount: details.length,
-      totalEvaluated: details.length,
-    };
+  const safe = offGrid.length === 0 && horizonMismatch.length === 0;
+
+  let reason: string | undefined;
+  if (!safe) {
+    const parts: string[] = [];
+    if (offGrid.length > 0) {
+      parts.push(
+        `offGrid ${offGrid.length}/${details.length} markets for ${timeframe}: ` +
+          offGrid
+            .map(
+              (d) =>
+                `${d.exchange} openTime=${d.candleTime.toISOString()} UTC hour=${d.utcHour} offset=${d.offsetMs}ms (expected 0)`,
+            )
+            .join("; "),
+      );
+    }
+    if (horizonMismatch.length > 0) {
+      parts.push(
+        `horizonMismatch ${horizonMismatch.length}/${details.length} markets for ${timeframe}: reference=${referenceCandleTime.toISOString()} mismatched ` +
+          horizonMismatch
+            .map(
+              (d) =>
+                `${d.exchange} ${d.candleTime.toISOString()} (delta=${d.candleTime.getTime() - refMs}ms)`,
+            )
+            .join("; "),
+      );
+    }
+    reason = parts.join(" | ");
   }
 
-  const reason =
-    `misaligned ${misaligned.length}/${details.length} markets for ${timeframe}: ` +
-    misaligned
-      .map(
-        (d) =>
-          `${d.exchange} ${d.market} openTime=${d.candleTime.toISOString()} UTC hour=${d.utcHour} offset=${d.offsetMs}ms (expected 0 for ${timeframe})`,
-      )
-      .join("; ");
-
   return {
-    aligned: false,
-    reason,
+    aligned: safe,
+    safe,
+    referenceCandleTime,
     details,
-    misaligned,
-    alignedCount: details.length - misaligned.length,
+    offGrid,
+    horizonMismatch,
+    misaligned: offGrid,
+    alignedCount: details.length - offGrid.length,
     totalEvaluated: details.length,
+    reason,
   };
 }
 
 /**
  * Whether multi-exchange aggregation is safe for this check.
- * For diagnostic Phase3E, 1d with BINGX misaligned => refuse aggregation.
- * For 5m/15m/4h where all aligned, allow.
+ * True only when canonical grid OK and all evaluated share same candleTime and at least one evaluated.
+ * Note: one evaluated market may return safe=true (temporal), but aggregation layer must still
+ * enforce minExchanges separately; safe=false for zero evaluated.
  */
-export function canAggregateSafely(
-  check: AlignmentCheck,
-): boolean {
-  return check.aligned;
+export function canAggregateSafely(check: AlignmentCheck): boolean {
+  return check.safe;
+}
+
+/**
+ * Pure decision helper for tests/diag: whether to call aggregateAssetGroup.
+ * Returns true only if safe; never aggregates on offGrid or horizonMismatch or no evaluated.
+ */
+export function shouldAggregateAssetGroup(check: AlignmentCheck): boolean {
+  return canAggregateSafely(check);
 }

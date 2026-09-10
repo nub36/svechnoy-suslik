@@ -1,7 +1,7 @@
 # Phase 3E — Multi-timeframe diagnostic report (READ-ONLY)
 
-Date: 2026-09-10  
-Branch: `arena/01a08b68-svechnoy-suslik` parent `2850a2c` (Phase 3C staged `["1h"]`)  
+Date: 2026-09-10
+Branch: `arena/01a08b68-svechnoy-suslik` parent `2850a2c` (Phase 3C staged `["1h"]`)
 Scope: READ-ONLY verification, no DB writes, no Strategy mutation, no workers, no Signal.
 
 ## 1. Baseline facts (as given, verified by diagnostic code)
@@ -30,125 +30,90 @@ Scope: READ-ONLY verification, no DB writes, no Strategy mutation, no workers, n
 | `closeTime` | `openTime + duration - 1`, где `duration = 86_400_000` для `1d`; `closed = closeTime < now` |
 | Ресамплинг | отсутствует — сырые свечи BingX пишутся как есть в `Candle.openTime` |
 
-**Наблюдаемое расхождение**: для `1d` все биржи кроме BINGX имеют `openTime` в `00:00 UTC` (canonical daily граница `openTime % 86_400_000 === 0`), BINGX отдаёт `16:00 UTC`. Это стабильно воспроизводится (`16 × 3_600_000 = 57_600_000 ms` сдвиг).
+**Observed DB fact (no external cause asserted)**: For `1d`, BINGX BTC candles observed in PostgreSQL use `16:00 UTC` openTime boundary, while the other four observed exchanges use `00:00 UTC` (canonical `openTime % 86_400_000 === 0`). This is stably reproduced (`16 * 3_600_000 = 57_600_000` ms delta). We do NOT assert a proven external cause such as CST/UTC+8 without authoritative adapter contract — only observed storage behavior.
 
-**Интерпретация**: BingX daily выровнен к `00:00 CST (UTC+8)` — полночь по пекинскому времени, что и даёт `16:00 UTC` предыдущего дня. Это не баг нашего адаптера, а особенность источника. API BingX документирует `interval=1d` как *exchange-local daily* (CST), тогда как Binance/Bybit/Gate/KuCoin отдают daily как `00:00 UTC`. Других временных зон у остальных нет (проверено: их `openTime` для `1h/4h/1d` всегда `% tfMs === 0`).
+**Вывод**: для `1d` cross-exchange агрегация некорректна, пока BINGX не нормализован. Для `5m/15m/1h/4h` observed как UTC-grid aligned для всех 5 бирж (`% tfMs === 0`) — расхождение только на `1d` stale/horizon тест показал критичность generic guard.
 
-**Вывод**: для `1d` cross-exchange агрегация некорректна, пока BINGX не нормализован. Для `5m/15m/1h/4h` BINGX совпадает с остальными (`% tfMs === 0`) — расхождение только на `1d`.
-
-## 3. Alignment guard — generic для всех TF
+## 3. Alignment guard — generic для всех TF (fixed)
 
 **Файл**: `lib/strategies/alignment.ts` (pure, без DB/Prisma/Signal/workers, детерминированный, без lookahead).
 
-- `isCanonicalAligned(date, tf)` — `date.getTime() % SMCTIMEFRAME_MS[tf] === 0` (canonical UTC граница; для `1d` это `00:00 UTC`, для `1h` — ровный час, для `4h` — кратно 4 ч от полуночи UTC, для `5m/15m` — кратно 5/15 мин).
-- `checkCandleAlignment(results, tf)` — по результатам `evaluateSmartMoneyWithCandles` (только `evaluated`) собирает `details: {exchange, candleTime, utcHour, offsetMs, aligned}` и `misaligned`; `aligned = true` только если **все** `evaluated` выровнены; `reason` содержит список `EXCHANGE 16` и `expected UTC 00`.
-- `canAggregateSafely(check)` — `check.aligned` (есть хотя бы один `evaluated` и все aligned). Пустой `evaluated` → `false` (не агрегировать).
+`MarketStrategyResult.candleTime` — latest CLOSED candle openTime (PostgreSQL `closed=true` последняя свеча). Для одного timeframe одинаковый `candleTime` означает один и тот же интервал `[candleTime, candleTime+tf)`; wall-clock не сравнивается.
 
-Контракт проверен инспекцией `lib/strategies/runtime.ts: aggregateAssetGroup` — он принимает уже оценённые `IndividualSmartMoneySignalWithAvailability[]` и не проверяет окна; ранее Phase 3B предполагал, что окна уже canonical. Теперь перед вызовом `aggregateAssetGroup` в обоих CLI (`smart-money-readonly.ts` и `smart-money-diagnostic.ts`) стоит явная проверка `checkCandleAlignment` + `canAggregateSafely`, с логированием `MISALIGNED — cannot-aggregate / REFUSED`.
+Safe aggregation требует ОБА условия:
 
-Покрытие: `1d` мисагрегирован → `REFUSED`, остальные `5m/15m/1h/4h` aligned → `ALIGNED — можно агрегировать` (включая BINGX для этих TF).
+- A) canonical grid: `candleTime.getTime() % SMCTIMEFRAME_MS[tf] === 0` (UTC граница: 5m каждые 5 мин, 1h ровно час, 4h кратно 4ч, 1d полночь UTC)
+- B) same evaluation horizon: все `evaluated` рынки имеют точно одинаковый `candleTime` (ровно одно значение; даже одна свеча разницы — разные окна, stale). Без tolerance/skew.
+
+Структура результата:
+
+- `isCanonicalAligned(date, tf)` — проверка A
+- `checkCandleAlignment(results, tf)` → `AlignmentCheck { aligned/safe, referenceCandleTime, details, offGrid, horizonMismatch, misaligned (alias offGrid), alignedCount, totalEvaluated, reason }`
+  - `referenceCandleTime` — `details[0].candleTime` или `null` если нет evaluated
+  - `offGrid` — `!isCanonicalAligned`
+  - `horizonMismatch` — `candleTime !== referenceCandleTime`
+  - `safe = offGrid.length===0 && horizonMismatch.length===0 && totalEvaluated>0`
+  - ноль evaluated → `safe=false` (no evaluated markets available)
+  - один evaluated с grid OK → `safe=true` temporal, но `minExchanges` остаётся отдельным требованием агрегации (документировано)
+- `canAggregateSafely(check)` / `shouldAggregateAssetGroup(check)` — `check.safe` (pure decision helper, тестируем напрямую)
+
+Контракт проверен инспекцией `lib/strategies/runtime.ts: aggregateAssetGroup` — он не проверяет окна. Теперь перед `aggregateAssetGroup` в обоих CLI (`smart-money-readonly.ts` и `smart-money-diagnostic.ts`) стоит guard: если `!canAggregateSafely` — **не вызывать** `aggregateAssetGroup`, вывести `MULTI-EXCHANGE AGGREGATION REFUSED` с `referenceCandleTime`, `offGrid`, `horizonMismatch` (generic для 5m/15m/1h/4h/1d). Per-exchange результаты остаются видимыми.
+
+Покрытие: `1d` BINGX offGrid+horizonMismatch → REFUSED; stale `15m 14:45 vs 15:00`, `5m 15:10 vs 15:15`, `4h 08:00 vs 12:00` — все REFUSED несмотря на grid OK.
 
 ## 4. Diagnostic tooling — что добавлено, как проверено
 
 ### 4.1 CLI args (`scripts/smart-money-cli-args.ts`)
 
-- Pure parser: `Args.diagnosticCanonicalConfig: boolean` (default `false`), `parseSmartMoneyArgs` теперь распознаёт `--diagnostic-canonical-config`; валидация и `validateCliArgs` не менялись; без флага поведение идентично `2850a2c`.
+- Pure parser: `Args.diagnosticCanonicalConfig: boolean` (default `false`), распознаёт `--diagnostic-canonical-config`; без флага поведение идентично `2850a2c`.
 
-### 4.2 `scripts/smart-money-readonly.ts` (read-only, mutation-free)
+### 4.2 `scripts/smart-money-readonly.ts` (read-only)
 
-- `printHelp` дополнен строкой про `--diagnostic-canonical-config`.
-- `runSymbolMode(symbol, tf, diagnostic=false)` и `runMarketMode(id, tf, diagnostic=false)` — диагностический путь bypasses `Strategy.timeframes` проверку (`if (!cfgForTf) → ошибка` сохраняется для `!diagnostic`; при `diagnostic=true` берётся `defaultSmcScoringConfig(tf)` — canonical `minimumSignalScore 72 / swing 20 / atr 14` etc.).
-- `filters`/`minExchanges` **не игнорируются**: если `validateSmartMoneyRuntime` для Strategy `ok`, они берутся из Strategy (операторские параметры, независимые от TF) с явным логом `DIAGNOSTIC filters/minExchanges: using Strategy DB values`; иначе `DEFAULT` с логом — без молчаливых подстановок.
-- Loud баннер `DIAGNOSTIC ONLY — CANONICAL CONFIG — READ-ONLY` при `diagnostic=true`.
-- Перед агрегацией — alignment guard (см. §3) с детальным логом по каждой бирже и веткой `REFUSED` для `1d` misaligned.
-- В остальном: `CLOSED only` (`where: {closed:true}` + `last 500 DESC → reverse → ASC`), `no Signal INSERT/UPDATE`, `no workers`, `no Prisma Strategy update`, `minExchanges` из Strategy/default.
+- `runSymbolMode(..., diagnostic)` и `runMarketMode` — bypass `Strategy.timeframes` только при `diagnostic=true` via `defaultSmcScoringConfig(tf)` (canonical 72/20), filters/minExchanges из Strategy если семантически безопасно иначе DEFAULT с логом, loud баннер, `CLOSED only`, generic alignment guard + `MULTI-EXCHANGE AGGREGATION REFUSED` без вызова `aggregateAssetGroup` при `!safe` (для всех TF).
 
-### 4.3 `scripts/smart-money-diagnostic.ts` — explicit diagnostic-only wrapper
+### 4.3 `scripts/smart-money-diagnostic.ts` — explicit diagnostic-only
 
-- Всегда diagnostic (без флага), canonical `defaultSmcScoringConfig(tf)`, read-only, `CLOSED only`, per-exchange вывод + alignment guard + `REFUSED` для `1d` misaligned — тот же guard что и в `readonly --diagnostic`.
-- Содержит встроенный audit-комментарий про BINGX 1d (endpoint/interval/UTC+8) и секцию `=== 5m/15m/4h unlock report / 1d remaining ===`.
-- Self-test (`--self-test`) — 12 pure проверок alignment (misaligned `1d` BINGX 16 vs 00, aligned `5m/15m/1h/4h`).
-- Не импортирует workers/Signal, не пишет в DB; `prisma.signal.count()` только для чтения (allowed).
-
-### 4.4 Tests (`scripts/test-smart-money-diagnostic.ts`, `--self-test` в diagnostic)
-
-Доказано **pure/read-only**, без БД (кроме `count()` read):
-
-1. **Normal reject** — `Strategy ["1h"]` → `rt.configs["15m"] === undefined`; `readonly` без флага содержит `if (!cfgForTf) → "не поддерживает timeframe"`; с флагом — bypass.
-2. **Diagnostic can evaluate** `5m/15m/4h` с canonical config (evaluated/cannot-evaluate, но не ошибка парсера), `tf` совпадает, `minimumScore 72`.
-3. **Only CLOSED** — открытый бар `closed=false` → `cannot-evaluate`; оба CLI фильтруют `closed:true` и логируют `CLOSED`.
-4. **Not mutated** — `grep` подтверждает отсутствие `prisma.strategy.update/create` в alignment/diagnostic/readonly.
-5. **Aligned aggregate ok** — `5m/15m/4h` все биржи `alignedMs === 12:00 UTC` → `check.aligned=true`, `canAggregateSafely=true`, `aggregateAssetGroup` `evaluated 5`.
-6. **Misaligned 1d not aggregated** — `BINGX 16 vs others 00` → `!aligned`, `!canAggregateSafely`, `misaligned=[BINGX]`, diagnostic/readonly логируют `MISALIGNED — cannot-aggregate / REFUSED`, не агрегируют молча.
-7. **Deterministic** — двойной прогон `evaluateSmartMoneyWithCandles` и `checkCandleAlignment` даёт идентичный JSON.
-8. **No-lookahead** — `evaluateSmc(full, asOf) === evaluateSmc(prefix, asOf)` (asOf до будущих баров).
-9. **No Signal** — отсутствие `prisma.signal.create/update` в `diagnostic`, `alignment`, `smart-money.ts`.
-10. **CLI flag** — `parseSmartMoneyArgs(["--diagnostic-canonical-config"]) → diagnosticCanonicalConfig true`, без флага `false`.
-
-Дополнительно: `npx tsc --noEmit` — 0, `npx tsx scripts/test-smart-money.ts` 62/62, `test-seed-smart-money.ts` 86/86, `test-smart-money-phase3c-fix.ts` 28/28 — все зелёные.
+- Всегда diagnostic, canonical, read-only, per-exchange + generic guard + REFUSED без агрегации при unsafe, observed BINGX факт (без CST), summary `safe` для 5m/15m/4h/1d, self-test 8+ cases.
 
 ## 5. Per-exchange diagnostic output + aggregate
 
-Оба CLI выводят per-exchange строки:
+При unsafe (любой TF):
 
 ```
-[BINANCE BTCUSDT] 1d e=100.00 score L/S 0/0 dir=NEUTRAL conf=LOW candleTime=2026-01-10T00:00:00.000Z ...
-[BINGX ...] candleTime=2026-01-10T16:00:00.000Z ...
-=== Выравнивание окон (alignment) 1d ===
-  BINANCE: candleTime=... UTC hour=0 offset=0ms ALIGNED
-  BINGX:   candleTime=... UTC hour=16 offset=57600000ms MISALIGNED
-  ⚠ MISALIGNED — cannot-aggregate for multi-exchange 1d: ...
-=== Агрегация BTC 1d smart-money-suslik v1 — REFUSED (misaligned) ===
+=== Выравнивание окон (alignment) 15m ===
+  referenceCandleTime: 2026-01-10T15:00:00.000Z
+  BINANCE: ... GRID_OK HORIZON_OK
+  GATE: 14:45 GRID_OK HORIZON_MISMATCH
+  ⚠ HORIZON_MISMATCH 1/5 ...
+  ⚠ MISALIGNED — cannot-aggregate ...
+=== MULTI-EXCHANGE AGGREGATION REFUSED BTC 15m ... ===
+  reason: horizonMismatch ...
+  Действие: per-exchange выше валидны, но агрегация НЕ вычисляется
 ```
 
-Для `5m/15m/4h`:
+При safe:
 
 ```
-=== Выравнивание окон 15m ===
-  BINANCE: ... hour=12 offset=0ms ALIGNED
-  ...
-  ✓ ALIGNED 5/5 — можно агрегировать
-=== Агрегация BTC 15m ... ===
-  direction: LONG votes: LONG 5 ... confirmation: true
+  referenceCandleTime: 2026-01-10T12:00:00.000Z
+  ✓ ALIGNED 5/5 safe — можно агрегировать
+=== Агрегация BTC ... ===
 ```
 
 ## 6. 5m/15m/4h unlock safety vs 1d remaining
 
-| TF | Data integrity | Alignment | SMC can evaluate (diagnostic) | Multi-exchange aggregate | Unlock |
+| TF | Observed integrity | Alignment (grid+horizon) | SMC can evaluate | Multi-exchange aggregate | Unlock |
 |---|---|---|---|---|---|
-| `5m` | 299 each, badStep 0 | `ALIGNED` (все 5 бирж `% 300000 ===0`, BINGX совпадает) | yes (canonical 72/20, только `CLOSED`, детерм.) | `canAggregateSafely=true` | **READY to unlock** — staged `["1h"] → ["1h","5m"]` etc. после ревью, без кода (только Admin/API guard снять) |
-| `15m` | 300 BYBIT / 299 others, badStep 0 | `ALIGNED` (`% 900000 ===0`) | yes | `canAggregateSafely=true` | **READY** — аналогично `5m` |
-| `4h` | 299 each, badStep 0 | `ALIGNED` (`% 14_400_000 ===0`) | yes | `canAggregateSafely=true` | **READY** |
-| `1d` | 299 each, badStep 0 | `MISALIGNED` — BINGX 16 UTC vs others 00 UTC | yes per-exchange (каждая биржа сама консистентна), но cross-exchange окно разное | `REFUSED` для `1d` | **BLOCKED** — требуется `Phase 3E-1d`: либо нормализовать BINGX daily к UTC 00 при записи/чтении (пересчёт `openTime` → предыдущий UTC-день 00:00 или исключение BINGX из `1d` universe), либо хранить `candleIntervalStartUtc` отдельно; до этого `1d` остаётся locked в Admin (`["1h"]`) |
+| `5m` | 299 each | safe when all 5 share same `candleTime` and grid OK | yes canonical | `safe=true` → can aggregate | READY (generic guard прошёл) |
+| `15m` | 300 BYBIT / 299 others | stale 14:45 vs 15:00 → REFUSED (fixed) | yes | safe only if horizon same | READY если horizon same |
+| `4h` | 299 each | 08:00 vs 12:00 → REFUSED | yes | safe only if same | READY если same |
+| `1d` | 299 each | BINGX 16 UTC vs 00 UTC → offGrid+horizonMismatch → REFUSED | yes per-exchange | BLOCKED | Требуется нормализация BINGX к UTC 00 или исключение из 1d |
 
-Никакой разблокировки в этом PR не делается — Admin `SmartMoneyStrategyEditor.tsx` и `app/api/admin/strategies/[id]/route.ts` остаются `["1h"]` locked (Phase 3C), только diagnostic показывает готовность `5m/15m/4h`.
+Никакой разблокировки Admin в этом PR нет — `SmartMoneyStrategyEditor.tsx` и `app/api/admin/strategies/[id]/route.ts` остаются `["1h"]` locked.
 
 ## 7. Гарантии
 
-- `tsc --noEmit` — 0 (включая `diagnostic` и `alignment`).
-- Нет writes: `rg "prisma\.signal\.create|prisma\.strategy\.update" scripts/smart-money-diagnostic.ts lib/strategies/alignment.ts` — пусто; `smart-money-readonly.ts` только `count()` для проверки read-only.
-- Нет workers/Signal Engine: `rg "signal-worker|workers" scripts/smart-money-diagnostic.ts` — пусто.
-- `CLOSED only` + no lookahead + deterministic — покрыто тестами (§4.4).
-- Parent `2850a2c`, push только в `arena/01a08b68-svechnoy-suslik` (Arenas).
-
-## 8. Как запустить
-
-```bash
-# Normal (должен отказать для 15m когда Strategy ["1h"])
-npx tsx scripts/smart-money-readonly.ts --symbol BTC --timeframe 15m
-# → "не поддерживает timeframe 15m"
-
-# Diagnostic (canonical, read-only, per-exchange + alignment, не пишет в DB)
-npx tsx scripts/smart-money-readonly.ts --symbol BTC --timeframe 15m --diagnostic-canonical-config
-npx tsx scripts/smart-money-readonly.ts --market-id 1 --timeframe 1d --diagnostic-canonical-config
-npx tsx scripts/smart-money-diagnostic.ts --symbol BTC --timeframe 1d
-npx tsx scripts/smart-money-diagnostic.ts --symbol BTC --timeframe 15m
-
-# Pure checks
-npx tsx scripts/test-smart-money-diagnostic.ts
-npx tsx scripts/smart-money-diagnostic.ts --self-test
-npx tsc --noEmit
-```
-
----
-_Generated by Phase 3E diagnostic, canonical scoring `defaultSmcScoringConfig(tf)` — minimumSignalScore 72, swing 20/20, ATR 14 etc. — read-only verification only._
+- `tsc --noEmit` — 0
+- `git diff --check` — 0 (no trailing whitespace)
+- Нет writes: нет `prisma.strategy.update/create`, `prisma.signal.create/update`
+- Нет workers/Signal Engine, нет Prisma изменений, нет SMC math
+- Parent `01faac9`, push только Arena

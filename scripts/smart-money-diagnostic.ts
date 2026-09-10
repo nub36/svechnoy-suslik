@@ -21,11 +21,15 @@
  * - endpoint: https://open-api.bingx.com/openApi/spot/v2/market/kline?symbol=BTC-USDT&interval=1d&limit=...
  * - interval mapping: "1d" -> "1d" (bingxInterval), duration 86400000ms
  * - adapter passes raw exchange openTime unchanged: Number(row[0]) as openTime, closeTime=openTime+duration-1, closed=closeTime<now
- * - other adapters (binance, bybit D, gate 1d, kucoin 1day) also pass raw openTime unchanged but their exchanges define 1d at UTC 00
- * - BingX 1d is defined at UTC+8 midnight => UTC 16 previous day, hence misaligned. Adapter correctly reflects exchange's definition; we do NOT resample/rewriting here.
- * - other TF (5m/15m/1h/4h) are UTC-grid aligned for all 5 exchanges (verified VPS badStep 0)
+ * - other adapters (binance, bybit, gate, kucoin) also pass raw openTime unchanged
+ * - Observed DB fact: BINGX BTC 1d candles in PostgreSQL use 16:00 UTC openTime boundary,
+ *   while the other four observed exchanges use 00:00 UTC. Adapter correctly reflects exchange
+ *   data without resampling. We do NOT assert engineered cause (e.g., CST/UTC+8) beyond observation.
+ * - other TF (5m/15m/1h/4h) observed as UTC-grid aligned for all 5 exchanges (badStep 0)
  *
- * Report after VPS: 5m/15m/4h can safely be unlocked (all 5 exchanges canonical-aligned, badStep 0, badClosedCloseTime 0, 299-306 CLOSED each). 1d requires normalization: either exclude BINGX from 1d universe or normalize BINGX daily to UTC 00 (needs proven project rule, not fabricated OHLC). Until then 1d multi-exchange aggregation must be REFUSED.
+ * Observed diagnostic fact: 5m/15m/4h checked for canonical grid + same horizon; when aligned, safe.
+ * 1d observed misaligned: BINGX 16:00 UTC vs others 00:00 UTC. Until normalized (exclude BINGX from 1d universe
+ * or proven UTC-00 normalization without fabricated OHLC), 1d multi-exchange aggregation must be REFUSED.
  *
  * Usage:
  *   npx tsx scripts/smart-money-diagnostic.ts --symbol BTC --timeframe 5m
@@ -90,38 +94,8 @@ async function runSelfTest(): Promise<number> {
     } else console.error(`  ✗ FAIL: ${l}`);
   }
 
-  // Test alignment helper: 1d BINGX 16 UTC vs others 00 UTC => misaligned
-  {
-    const mkRes = (ex: string, hourUTC: number) => ({
-      status: "evaluated" as const,
-      exchange: ex,
-      market: "BTCUSDT",
-      marketId: 1,
-      candleTime: new Date(Date.UTC(2026, 0, 10, hourUTC, 0, 0)),
-      price: 100,
-      longScore: 80,
-      shortScore: 10,
-      direction: "LONG" as const,
-      reasons: [],
-      warnings: [],
-    });
-    const resultsMisaligned = [
-      mkRes("BINANCE", 0),
-      mkRes("BYBIT", 0),
-      mkRes("GATE", 0),
-      mkRes("KUCOIN", 0),
-      mkRes("BINGX", 16),
-    ];
-    const check = checkCandleAlignment(resultsMisaligned as any, "1d");
-    ok(!check.aligned, "1d BINGX 16 vs others 00 => misaligned");
-    ok(check.misaligned.length === 1 && check.misaligned[0].exchange === "BINGX", "1d misaligned is BINGX only");
-    ok(!!check.reason?.includes("BINGX") && !!check.reason?.includes("16"), "1d reason mentions BINGX 16");
-    ok(!canAggregateSafely(check), "1d cannot aggregate safely when misaligned");
-  }
-
-  // 5m/15m/1h/4h all UTC 00 aligned => aligned
-  {
-    const mkRes = (ex: string, ms: number) => ({
+  function mkRes(ex: string, ms: number) {
+    return {
       status: "evaluated" as const,
       exchange: ex,
       market: "BTCUSDT",
@@ -133,23 +107,117 @@ async function runSelfTest(): Promise<number> {
       direction: "LONG" as const,
       reasons: [],
       warnings: [],
-    });
-    const hourAligned = Date.UTC(2026, 0, 10, 12, 0, 0); // 12:00 UTC = aligned for 1h, 4h, etc.
-    const resultsAligned = [
-      mkRes("BINANCE", hourAligned),
-      mkRes("BYBIT", hourAligned),
-      mkRes("GATE", hourAligned),
-      mkRes("KUCOIN", hourAligned),
-      mkRes("BINGX", hourAligned),
-    ];
-    for (const tf of ["5m", "15m", "1h", "4h"] as SmcTimeframe[]) {
-      const c = checkCandleAlignment(resultsAligned as any, tf);
-      ok(c.aligned, `${tf} all UTC top => aligned`);
-      ok(canAggregateSafely(c), `${tf} can aggregate when aligned`);
-    }
+    };
   }
 
-  // Only CLOSED, deterministic etc. already covered by existing self-test in readonly; here just alignment
+  // CASE 1: 15m all 5 @15:00 => safe true (canonical + same horizon)
+  {
+    const ts = Date.UTC(2026, 0, 10, 15, 0, 0);
+    const results = ["BINANCE", "BYBIT", "GATE", "KUCOIN", "BINGX"].map((ex) => mkRes(ex, ts));
+    const c = checkCandleAlignment(results as any, "15m");
+    ok(c.safe === true && c.aligned === true, "15m all 5 @15:00 => safe true");
+    ok(c.offGrid.length === 0, "15m all 5 offGrid empty");
+    ok(c.horizonMismatch.length === 0, "15m all 5 horizonMismatch empty");
+    ok(c.referenceCandleTime?.getTime() === ts, "15m reference is 15:00");
+    ok(canAggregateSafely(c) === true, "15m canAggregateSafely true");
+  }
+
+  // CASE 2: 15m 4 @15:00, 1 @14:45 => safe false, horizonMismatch identifies stale
+  {
+    const ts1500 = Date.UTC(2026, 0, 10, 15, 0, 0);
+    const ts1445 = Date.UTC(2026, 0, 10, 14, 45, 0);
+    const results = [
+      mkRes("BINANCE", ts1500),
+      mkRes("BYBIT", ts1500),
+      mkRes("GATE", ts1445),
+      mkRes("KUCOIN", ts1500),
+      mkRes("BINGX", ts1500),
+    ];
+    const c = checkCandleAlignment(results as any, "15m");
+    ok(c.safe === false, "15m 4@15:00 1@14:45 => safe false");
+    ok(c.offGrid.length === 0, "15m stale offGrid empty (all on-grid)");
+    ok(c.horizonMismatch.length === 1 && c.horizonMismatch[0].exchange === "GATE", "15m horizonMismatch is GATE stale");
+    ok(c.horizonMismatch[0].candleTime.getTime() === ts1445, "15m stale candleTime 14:45");
+    ok(!canAggregateSafely(c), "15m stale cannot aggregate");
+  }
+
+  // CASE 3: 5m 4 @15:15, 1 @15:10 => safe false
+  {
+    const ts1515 = Date.UTC(2026, 0, 10, 15, 15, 0);
+    const ts1510 = Date.UTC(2026, 0, 10, 15, 10, 0);
+    const results = [mkRes("BINANCE", ts1515), mkRes("BYBIT", ts1515), mkRes("GATE", ts1510), mkRes("KUCOIN", ts1515), mkRes("BINGX", ts1515)];
+    const c = checkCandleAlignment(results as any, "5m");
+    ok(c.safe === false, "5m 4@15:15 1@15:10 => safe false");
+    ok(c.horizonMismatch.length === 1 && c.horizonMismatch[0].exchange === "GATE", "5m horizonMismatch GATE");
+  }
+
+  // CASE 4: 4h 4 @12:00, 1 @08:00 => safe false
+  {
+    const ts1200 = Date.UTC(2026, 0, 10, 12, 0, 0);
+    const ts0800 = Date.UTC(2026, 0, 10, 8, 0, 0);
+    const results = [mkRes("BINANCE", ts1200), mkRes("BYBIT", ts1200), mkRes("GATE", ts1200), mkRes("KUCOIN", ts1200), mkRes("BINGX", ts0800)];
+    const c = checkCandleAlignment(results as any, "4h");
+    ok(c.safe === false, "4h 4@12:00 1@08:00 => safe false");
+    ok(c.horizonMismatch.length === 1 && c.horizonMismatch[0].exchange === "BINGX", "4h horizonMismatch BINGX");
+    // Both times are on-grid for 4h (00,04,08,12...) so offGrid empty, but horizon differs
+    ok(c.offGrid.length === 0, "4h offGrid empty (both on-grid)");
+  }
+
+  // CASE 5: 1d 4 @00:00 UTC, BINGX @16:00 UTC => safe false, BINGX offGrid
+  {
+    const ts00 = Date.UTC(2026, 0, 10, 0, 0, 0);
+    const ts16 = Date.UTC(2026, 0, 10, 16, 0, 0);
+    const results = [mkRes("BINANCE", ts00), mkRes("BYBIT", ts00), mkRes("GATE", ts00), mkRes("KUCOIN", ts00), mkRes("BINGX", ts16)];
+    const c = checkCandleAlignment(results as any, "1d");
+    ok(c.safe === false && c.aligned === false, "1d 4@00 1@16 => safe false");
+    ok(c.offGrid.length === 1 && c.offGrid[0].exchange === "BINGX", "1d offGrid is BINGX");
+    ok(c.horizonMismatch.length === 1 && c.horizonMismatch[0].exchange === "BINGX", "1d horizonMismatch BINGX");
+    ok(c.offGrid[0].offsetMs !== 0, "1d BINGX offset non-zero");
+    ok(!canAggregateSafely(c), "1d BINGX cannot aggregate");
+  }
+
+  // CASE 6: 1d all 5 same UTC midnight => safe true
+  {
+    const ts = Date.UTC(2026, 0, 10, 0, 0, 0);
+    const results = ["BINANCE", "BYBIT", "GATE", "KUCOIN", "BINGX"].map((ex) => mkRes(ex, ts));
+    const c = checkCandleAlignment(results as any, "1d");
+    ok(c.safe === true, "1d all 5 same midnight => safe true");
+    ok(c.offGrid.length === 0 && c.horizonMismatch.length === 0, "1d all aligned no mismatches");
+  }
+
+  // CASE 7: zero evaluated => safe false
+  {
+    const c = checkCandleAlignment([] as any, "1h");
+    ok(c.safe === false, "zero evaluated => safe false");
+    ok(c.referenceCandleTime === null, "zero evaluated reference null");
+    ok(c.totalEvaluated === 0, "zero evaluated total 0");
+    ok(!canAggregateSafely(c), "zero cannot aggregate");
+  }
+
+  // CASE 8: one evaluated canonical => temporal safe true, but minExchanges separate
+  {
+    const ts = Date.UTC(2026, 0, 10, 12, 0, 0);
+    const results = [mkRes("BINANCE", ts)];
+    const c = checkCandleAlignment(results as any, "1h");
+    ok(c.safe === true, "one evaluated canonical => safe true (temporal)");
+    ok(c.horizonMismatch.length === 0, "one evaluated horizonMismatch empty");
+    ok(c.offGrid.length === 0, "one evaluated offGrid empty");
+    // Document: minExchanges still enforced at aggregation layer separately
+    const { aggregateAssetGroup } = await import("../lib/strategies/runtime");
+    const agg = aggregateAssetGroup("BTC", "1h", "smart-money-suslik", 1, results as any, 3);
+    ok(agg.direction === "NEUTRAL" && agg.evaluated === 1 && agg.minExchanges === 3, "one evaluated with minExchanges 3 => NEUTRAL (separate requirement)");
+  }
+
+  // Prove unsafe path does NOT call aggregateAssetGroup via pure helper
+  {
+    const ts1500 = Date.UTC(2026, 0, 10, 15, 0, 0);
+    const ts1445 = Date.UTC(2026, 0, 10, 14, 45, 0);
+    const results = [mkRes("BINANCE", ts1500), mkRes("BYBIT", ts1445)];
+    const c = checkCandleAlignment(results as any, "15m");
+    const { shouldAggregateAssetGroup } = await import("../lib/strategies/alignment");
+    ok(shouldAggregateAssetGroup(c) === false, "unsafe check shouldAggregate false");
+    ok(canAggregateSafely(c) === false, "unsafe canAggregate false");
+  }
 
   console.log(`\nDiagnostic self-test: ${passed}/${total}`);
   return passed === total ? 0 : 1;
@@ -285,51 +353,69 @@ async function runSymbolDiagnostic(symbol: string, timeframe: SmcTimeframe): Pro
     }
   }
 
-  // Alignment guard before aggregation
+  // Alignment guard before aggregation — generic for 5m/15m/1h/4h/1d
+  // candleTime is latest CLOSED candle openTime; same timeframe + same candleTime => same interval [candleTime, candleTime+tf)
   const alignment = checkCandleAlignment(results, timeframe);
   console.log(`\n=== Выравнивание окон (alignment) ${timeframe} ===`);
-  for (const d of alignment.details) {
-    console.log(`  ${d.exchange}: candleTime=${d.candleTime.toISOString()} UTC hour=${d.utcHour} offset=${d.offsetMs}ms ${d.aligned ? "ALIGNED" : "MISALIGNED"}`);
-  }
-  if (!alignment.aligned) {
-    console.log(`  ⚠ MISALIGNED — cannot-aggregate for multi-exchange ${timeframe}: ${alignment.reason}`);
-    console.log(`  Пояснение: для ${timeframe} окна должны быть выровнены к canonical UTC границе. BINGX 1d в 16 UTC не совпадает с остальными 00 UTC — разные daily периоды, агрегация запрещена.`);
-    if (timeframe === "1d") {
-      console.log(`  Вывод 1d: оценивается per-exchange независимо, но multi-exchange агрегация REFUSED. Для разблокировки 1d требуется нормализация BINGX daily к UTC 00 или исключение BINGX из 1d universe.`);
-    }
+  if (alignment.referenceCandleTime) {
+    console.log(`  referenceCandleTime: ${alignment.referenceCandleTime.toISOString()} (all evaluated must equal this)`);
   } else {
-    console.log(`  ✓ ALIGNED ${alignment.alignedCount}/${alignment.totalEvaluated} — можно агрегировать`);
+    console.log(`  referenceCandleTime: — (no evaluated markets)`);
+  }
+  for (const d of alignment.details) {
+    const gridFlag = d.aligned ? "GRID_OK" : "OFF_GRID";
+    const horizonFlag = alignment.horizonMismatch.some((h) => h.exchange === d.exchange && h.marketId === d.marketId) ? "HORIZON_MISMATCH" : "HORIZON_OK";
+    console.log(`  ${d.exchange}: candleTime=${d.candleTime.toISOString()} UTC hour=${d.utcHour} offset=${d.offsetMs}ms ${gridFlag} ${horizonFlag}`);
+  }
+  if (alignment.offGrid.length > 0) {
+    console.log(`  ⚠ OFF_GRID ${alignment.offGrid.length}/${alignment.totalEvaluated}: ${alignment.offGrid.map((o) => `${o.exchange} ${o.candleTime.toISOString()} offset=${o.offsetMs}ms`).join("; ")}`);
+  }
+  if (alignment.horizonMismatch.length > 0) {
+    console.log(`  ⚠ HORIZON_MISMATCH ${alignment.horizonMismatch.length}/${alignment.totalEvaluated}: reference=${alignment.referenceCandleTime?.toISOString() ?? "—"} mismatched ${alignment.horizonMismatch.map((h) => `${h.exchange} ${h.candleTime.toISOString()}`).join("; ")}`);
+  }
+  if (!alignment.safe) {
+    console.log(`  ⚠ MISALIGNED — cannot-aggregate for multi-exchange ${timeframe}: ${alignment.reason ?? "unsafe"}`);
+    console.log(`  Пояснение: требуется (A) canonical grid (openTime % tfMs ===0) и (B) одинаковый latest CLOSED candleTime у всех рынков.`);
+  } else {
+    console.log(`  ✓ ALIGNED ${alignment.alignedCount}/${alignment.totalEvaluated} safe — можно агрегировать (grid OK + same horizon)`);
   }
 
-  const agg = aggregateAssetGroup(asset.symbol, timeframe, SMART_MONEY_SLUG, strategyVersion, results, minExchanges);
-  if (!canAggregateSafely(alignment) && timeframe === "1d") {
-    console.log(`\n=== Агрегация ${asset.symbol} ${timeframe} ${SMART_MONEY_SLUG} v${strategyVersion} — REFUSED (misaligned) ===`);
-    console.log(`  direction: ${agg.direction} ${agg.conflict ? "(КОНФЛИКТ)" : ""} — НЕДОСТОВЕРНО для 1d из-за misalignment`);
-    console.log(`  votes: LONG ${agg.longVotes} SHORT ${agg.shortVotes} NEUTRAL ${agg.neutralVotes} evaluated ${agg.evaluated} skipped ${agg.skipped}`);
-    console.log(`  confirmation: ${agg.confirmation} (порог ${agg.minExchanges})`);
-    console.log(`  explanation: ${agg.explanation} — ОТКЛОНЕНО: cross-exchange daily windows не выровнены`);
-    console.log(`  Действие: per-exchange результаты выше валидны, но multi-exchange сигнал для 1d НЕ формируется.`);
+  if (!canAggregateSafely(alignment)) {
+    console.log(`\n=== MULTI-EXCHANGE AGGREGATION REFUSED ${asset.symbol} ${timeframe} ${SMART_MONEY_SLUG} v${strategyVersion} ===`);
+    console.log(`  reason: ${alignment.reason ?? "unsafe alignment"}`);
+    if (alignment.referenceCandleTime) console.log(`  referenceCandleTime: ${alignment.referenceCandleTime.toISOString()}`);
+    if (alignment.offGrid.length > 0) console.log(`  offGrid: ${alignment.offGrid.map((o) => `${o.exchange} ${o.candleTime.toISOString()}`).join(", ")}`);
+    if (alignment.horizonMismatch.length > 0) console.log(`  horizonMismatch: ${alignment.horizonMismatch.map((h) => `${h.exchange} ${h.candleTime.toISOString()}`).join(", ")}`);
+    console.log(`  Действие: per-exchange результаты выше валидны, но multi-exchange агрегация НЕ вычисляется (aggregateAssetGroup не вызван).`);
   } else {
-    console.log(`\n=== Агрегация ${asset.symbol} ${timeframe} ${SMART_MONEY_SLUG} v${strategyVersion} ${alignment.aligned ? "" : "— ALIGNED, can aggregate"} ===`);
+    const agg = aggregateAssetGroup(asset.symbol, timeframe, SMART_MONEY_SLUG, strategyVersion, results, minExchanges);
+    console.log(`\n=== Агрегация ${asset.symbol} ${timeframe} ${SMART_MONEY_SLUG} v${strategyVersion} ===`);
     console.log(`  direction: ${agg.direction} ${agg.conflict ? "(КОНФЛИКТ)" : ""}`);
     console.log(`  votes: LONG ${agg.longVotes} SHORT ${agg.shortVotes} NEUTRAL ${agg.neutralVotes} evaluated ${agg.evaluated} skipped ${agg.skipped}`);
     console.log(`  confirmation: ${agg.confirmation} (порог ${agg.minExchanges})`);
     console.log(`  explanation: ${agg.explanation}`);
+    if (agg.evaluated === 1) {
+      console.log(`  note: single evaluated — temporal safe, но minExchanges=${agg.minExchanges} проверяется отдельно.`);
+    }
   }
 
   const signalCount = await prisma.signal.count().catch(() => 0);
   console.log(`\nSignal в БД (только чтение): ${signalCount} (записей не создано — DIAGNOSTIC ONLY)`);
 
-  // Summary report: can 5m/15m/4h be unlocked?
+  // Summary: generic — safe only if grid OK + same horizon
   if (["5m", "15m", "4h"].includes(timeframe)) {
-    if (alignment.aligned) {
-      console.log(`\nВывод Phase3E: ${timeframe} — all 5 exchanges canonical-aligned (badStep 0), можно SAFELY разблокировать после этого diagnostic (при сохранении CLOSED-only и minExchanges).`);
+    if (alignment.safe) {
+      console.log(`\nВывод Phase3E: ${timeframe} — safe (grid OK + same horizon, badStep 0), можно разблокировать после diagnostic.`);
     } else {
-      console.log(`\nВывод Phase3E: ${timeframe} — MISALIGNED, разблокировка требует доп. проверки.`);
+      console.log(`\nВывод Phase3E: ${timeframe} — MISALIGNED (offGrid ${alignment.offGrid.length}, horizonMismatch ${alignment.horizonMismatch.length}), разблокировка требует проверки.`);
     }
   }
   if (timeframe === "1d") {
-    console.log(`\nВывод Phase3E 1d: misaligned BINGX 16 UTC vs 00 UTC — 1d multi-exchange пока НЕЛЬЗЯ разблокировать. Нужно: нормализация BINGX к UTC 00 или исключение BINGX из 1d, без фабрикации OHLC.`);
+    if (alignment.safe) {
+      console.log(`\nВывод Phase3E 1d: safe — all 5 at same UTC midnight.`);
+    } else {
+      console.log(`\nВывод Phase3E 1d: misaligned (observed BINGX 16:00 UTC vs others 00:00 UTC) — 1d пока НЕЛЬЗЯ разблокировать. Нужно: нормализация или исключение BINGX из 1d, без фабрикации OHLC.`);
+    }
   }
 
   return 0;
