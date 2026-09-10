@@ -158,14 +158,21 @@ export async function PUT(
       );
     }
 
-    // Phase 3C staged enforcement: only ["1h"] allowed until Phase 3E verification.
-    // Rejects crafted PUT before any prisma.strategy.update.
-    const stagedTF = runtimeValidation.timeframes;
-    if (stagedTF.length !== 1 || stagedTF[0] !== "1h") {
+    // Phase 3E verified: only 5m/15m/1h/4h allowed, 1d rejected. Non-empty required. Rejects before prisma.strategy.update.
+    const verifiedTF = runtimeValidation.timeframes;
+    const allowedVerified = new Set(["5m", "15m", "1h", "4h"]);
+    if (verifiedTF.length === 0) {
+      return NextResponse.json(
+        { error: "Выберите хотя бы один таймфрейм" },
+        { status: 400 }
+      );
+    }
+    const hasDisallowed = verifiedTF.some((tf) => !allowedVerified.has(tf as string));
+    if (hasDisallowed) {
       return NextResponse.json(
         {
           error:
-            "Smart Money Phase 3C разрешает только timeframe [\"1h\"] (staged rollout). 5m/15m/4h/1d будут доступны после Phase 3E проверки реальных данных",
+            "1d временно недоступен: на реальных данных BTC обнаружено несовпадение дневной границы BingX (16:00 UTC) с четырьмя другими биржами (00:00 UTC). Multi-exchange aggregation запрещена до отдельного решения.",
         },
         { status: 400 }
       );

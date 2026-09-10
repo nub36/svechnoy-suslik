@@ -2285,6 +2285,8 @@ Public: `/articles`, `/articles/[slug]`
 - NEXT: independently verify 877dc61, run real READ-ONLY diagnostic for BTC 5m/15m/4h/1d;
 - do NOT unlock Admin TF until diagnostic acceptance.
 
+TODO/AUDIT before final Smart Money acceptance — RANGE_POSITION: during real diagnostics observed rangePosition values outside [0,1], e.g. 5m pos ≈ -0.91, 1d pos ≈ 2.24. No math change in this commit. Before final acceptance, verify dealing-range lifecycle/invalidation semantics when price is outside active range — determine whether outside-range position is intended or range should have been invalidated/replaced.
+
 Do NOT claim 877dc61 accepted yet.
 
 ---

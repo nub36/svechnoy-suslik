@@ -292,9 +292,15 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
   void _updateSection;
 
   function toggleTimeframe(tf: string) {
-    // Phase 3C staged: 1h is locked — cannot be removed (would produce [] invalid)
-    if (tf === "1h") return;
-    setTimeframes((cur) => (cur.includes(tf) ? cur.filter((x) => x !== tf) : [...cur, tf]));
+    // Phase 3E: verified 5m/15m/1h/4h selectable, 1d disabled. Prevent transition to [].
+    if (tf === "1d") return;
+    setTimeframes((cur) => {
+      if (cur.includes(tf)) {
+        if (cur.length === 1) return cur;
+        return cur.filter((x) => x !== tf);
+      }
+      return [...cur, tf];
+    });
   }
 
   function resetSection(section: string) {
@@ -468,36 +474,48 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
         />
         <div className="settingBlock">
           <b>Рабочие таймфреймы</b>
-          <small>Phase 3C staged = 1h production-safe. 5m/15m/4h/1d будут доступны после Phase 3E проверки реальных данных.</small>
+          <small>
+            Проверено Phase 3E на реальных BTC данных (5 бирж, CLOSED свечи):{" "}
+            <b>5m, 15m, 1h, 4h — проверено</b>; 1d временно недоступен. Timeframe runtime/alignment verified on BTC across 5
+            exchanges; availability for each asset still depends on stored CLOSED history.
+          </small>
           <div className="timeframeSelector">
             {([...ALLOWED_TFS] as string[]).map((tf) => {
               const active = timeframes.includes(tf);
-              const isLocked = tf === "1h";
-              const isUnverified = tf !== "1h";
+              const isVerified = ["5m", "15m", "1h", "4h"].includes(tf);
+              const isDisabled = tf === "1d";
               return (
                 <button
                   type="button"
                   key={tf}
                   className={active ? "tfActive" : ""}
-                  disabled={isLocked || isUnverified}
+                  disabled={isDisabled}
                   onClick={() => {
-                    if (isLocked || isUnverified) return;
+                    if (isDisabled) return;
                     toggleTimeframe(tf);
                   }}
                   title={
-                    isLocked
-                      ? "1h — проверен и зафиксирован до Phase 3E"
-                      : `${tf} поддерживается SMC core, но временно заблокирован до проверки реальных candle data в Phase 3E.`
+                    isDisabled
+                      ? "1d временно недоступен: на реальных данных BTC обнаружено несовпадение дневной границы BingX (16:00 UTC) с четырьмя другими биржами (00:00 UTC). Multi-exchange aggregation запрещена до отдельного решения."
+                      : `${tf} — проверено Phase 3E`
                   }
                 >
                   {tf}
-                  {isLocked ? " 🔒" : isUnverified ? " *" : ""}
+                  {isVerified ? " ✓" : ""}
+                  {isDisabled ? " ⏸" : ""}
                 </button>
               );
             })}
           </div>
-          <small style={{ color: "#92400e" }}>* 5m/15m/4h/1d — disabled до Phase 3E. Архитектура поддерживает, но closeTime-консистентность подтверждена только для 1h.</small>
-          <small style={{ color: "#065f46", display: "block", marginTop: 4 }}>🔒 1h — проверен и зафиксирован до Phase 3E (не снимается, staged требует ровно ["1h"]).</small>
+          <small style={{ color: "#065f46" }}>✓ 5m/15m/1h/4h — проверено Phase 3E</small>
+          <small style={{ color: "#92400e", display: "block", marginTop: 4 }}>
+            ⏸ 1d временно недоступен: на реальных данных BTC обнаружено несовпадение дневной границы BingX (16:00 UTC) с
+            четырьмя другими биржами (00:00 UTC). Multi-exchange aggregation запрещена до отдельного решения.
+          </small>
+          <small style={{ color: "#6b7280", display: "block", marginTop: 4 }}>
+            Timeframe runtime/alignment verified on BTC across 5 exchanges; availability for each asset still depends on
+            stored CLOSED history.
+          </small>
         </div>
       </section>
 

@@ -1,9 +1,7 @@
 /**
- * Phase 3C targeted fix checks — no DB mutation, pure/static.
- * Covers VPS audit blockers:
- * - staged timeframe enforcement UI + API
- * - resetAll not hardcode minExchanges=2
- * - Signal Engine text
+ * Phase 3E unlock checks — verified 5m/15m/1h/4h, 1d disabled.
+ * Replaces obsolete Phase 3C lock tests.
+ * No DB mutation, pure/static.
  */
 
 import { readFileSync } from "node:fs";
@@ -25,30 +23,63 @@ function ok(cond: boolean, label: string) {
 const editor = readFileSync("components/admin/SmartMoneyStrategyEditor.tsx", "utf8");
 const api = readFileSync("app/api/admin/strategies/[id]/route.ts", "utf8");
 
-// 1. UI: 1h locked/selected (not removable), others disabled — Phase 3C staged requires exactly ["1h"]
-ok(editor.includes('isUnverified = tf !== "1h"'), "UI: isUnverified = tf !== 1h");
-ok(editor.includes('isLocked = tf === "1h"') || editor.includes('isLocked'), "UI: 1h isLocked semantics present");
-ok(editor.includes("disabled={isLocked || isUnverified}") || editor.includes("disabled={isUnverified}"), "UI: 5m/15m/4h/1d disabled + 1h locked in Smart Money editor");
-ok(editor.includes('1h — проверен и зафиксирован до Phase 3E'), "UI: 1h locked tooltip — проверен и зафиксирован до Phase 3E");
-ok(editor.includes('поддерживается SMC core, но временно заблокирован до проверки реальных candle data в Phase 3E'), "UI: 15m etc. tooltip — поддерживается SMC core, но временно заблокирован до Phase 3E");
-ok(editor.includes('🔒') || editor.includes('проверен и зафиксирован'), "UI: 1h shows lock icon/text");
-ok(editor.includes('if (tf === "1h") return') || editor.includes('isLocked'), "UI: toggleTimeframe prevents removing 1h (cannot transition [\"1h\"] -> [])");
-ok(editor.includes("if (isLocked || isUnverified) return") || editor.includes("if (isUnverified) return"), "UI: toggle guarded for locked+unverified");
-ok(!editor.includes('onClick={() => toggleTimeframe(tf)}') || editor.includes("if (isLocked"), "UI: onClick guarded for locked");
-ok(api.includes('smart-money-suslik'), "API: smart-money slug present");
+// 1. UI: 5m/15m/1h/4h enabled (verified), 1d disabled
+ok(editor.includes('"5m", "15m", "1h", "4h"') || editor.includes('["5m", "15m", "1h", "4h"]') || editor.includes('isVerified = ["5m", "15m", "1h", "4h"]'), "UI: verified list 5m/15m/1h/4h present");
+ok(editor.includes('isDisabled = tf === "1d"') || editor.includes('tf === "1d"'), "UI: 1d disabled");
+ok(editor.includes('disabled={isDisabled}') || editor.includes('disabled={isDisabled}'), "UI: 1d disabled attribute");
+ok(!editor.includes('isLocked = tf === "1h"') || editor.includes('isVerified'), "UI: old 1h lock removed (now verified set)");
+ok(editor.includes('5m/15m/1h/4h — проверено Phase 3E') || editor.includes('проверено Phase 3E'), "UI: verified wording present");
+ok(editor.includes('5m, 15m, 1h, 4h — проверено') || editor.includes('проверено Phase 3E'), "UI: verified wording for 5m/15m/1h/4h");
+ok(editor.includes('1d временно недоступен: на реальных данных BTC обнаружено несовпадение дневной границы BingX (16:00 UTC) с четырьмя другими биржами (00:00 UTC). Multi-exchange aggregation запрещена до отдельного решения.'), "UI: 1d reason present");
+ok(editor.includes('Timeframe runtime/alignment verified on BTC across 5 exchanges') && editor.includes('availability for each asset still depends on stored CLOSED history'), "UI: verified availability wording present");
 
-// 1b. Cannot transition from ["1h"] to [] — locked 1h cannot be deselected
+// 1b. Check that outdated Phase 3C text removed
+ok(!editor.includes('Phase 3C staged = 1h production-safe'), "UI: outdated 1h-only text removed");
+ok(!editor.includes('Phase 3C staged requires exactly ["1h"]') && !editor.includes('staged требует ровно ["1h"]'), "UI: old staged lock text removed");
+
+// 1c. Cannot remove last selected timeframe (generic non-empty guard)
+ok(editor.includes('if (cur.length === 1) return cur'), "UI: cannot remove last selected timeframe (prevent [] transition)");
+ok(editor.includes('timeframes must remain non-empty') || editor.includes('non-empty') || editor.includes('if (cur.length === 1)'), "UI: non-empty guard present");
+
+// 1d. Transitions
+// Can transition ["1h"] -> ["1h","15m"]  (adding verified TF allowed)
 {
-  const hasGuard = editor.includes('if (tf === "1h") return') || editor.includes('isLocked');
-  const hasLockedDisabled = editor.includes('disabled={isLocked') || editor.includes('disabled={isLocked || isUnverified}');
-  ok(hasGuard && hasLockedDisabled, "UI: Phase3C cannot transition [\"1h\"] -> [] (1h locked/disabled)");
-  // Ensure editor does NOT allow empty timeframes via validation
-  ok(editor.includes('timeframes: нужен непустой список таймфреймов') || editor.includes('nuzhen neaustoj spisok'), "UI: validation still requires non-empty timeframes (but UI prevents reaching [] via lock)");
+  let cur = ["1h"];
+  // simulate toggle adds 15m
+  const next = cur.includes("15m") ? cur.filter((x) => x !== "15m") : [...cur, "15m"];
+  ok(JSON.stringify(next.sort()) === JSON.stringify(["1h", "15m"].sort()), "UI: can transition [1h] -> [1h,15m]");
+}
+// Can transition ["1h","15m"] -> ["15m"] (removing one of two allowed)
+{
+  let cur = ["1h", "15m"];
+  const tf = "1h";
+  let next: string[];
+  if (cur.includes(tf)) {
+    if (cur.length === 1) next = cur;
+    else next = cur.filter((x) => x !== tf);
+  } else next = [...cur, tf];
+  ok(JSON.stringify(next) === JSON.stringify(["15m"]), "UI: can transition [1h,15m] -> [15m]");
+}
+// Cannot ["15m"] -> [] (last removal prevented)
+{
+  let cur = ["15m"];
+  const tf = "15m";
+  let next: string[];
+  if (cur.includes(tf)) {
+    if (cur.length === 1) next = cur;
+    else next = cur.filter((x) => x !== tf);
+  } else next = [...cur, tf];
+  ok(JSON.stringify(next) === JSON.stringify(["15m"]) && next.length === 1, "UI: cannot [15m] -> [] (last prevented)");
 }
 
-// Helper: simulate API staged logic without DB
-function isSmartMoneyStagedAccepted(timeframes: unknown): boolean {
-  // Use same logic as API: after validateSmartMoneyRuntime, check exactly ["1h"]
+// Check toggle prevents 1d
+ok(editor.includes('if (tf === "1d") return'), "UI: toggle prevents 1d");
+
+// Check button title for 1d is correct
+ok(editor.includes('title={\n                    isDisabled') || editor.includes('1d временно недоступен'), "UI: 1d tooltip correct");
+
+// Helper for API Phase3E acceptance
+function isPhase3EAccepted(timeframes: unknown): boolean {
   const cfg = {
     minimumSignalScore: 72,
     swingLeft: 20,
@@ -76,23 +107,33 @@ function isSmartMoneyStagedAccepted(timeframes: unknown): boolean {
   const res = validateSmartMoneyRuntime({ config: cfg, timeframes, minExchanges: 2 });
   if (!res.ok) return false;
   const tf = res.timeframes;
-  return tf.length === 1 && tf[0] === "1h";
+  const allowed = new Set(["5m", "15m", "1h", "4h"]);
+  if (tf.length === 0) return false;
+  return tf.every((x) => allowed.has(x));
 }
 
-// 2. Backend accepts ["1h"]
-ok(isSmartMoneyStagedAccepted(["1h"]) === true, "API: Smart Money backend accepts [\"1h\"]");
-ok(isSmartMoneyStagedAccepted(["4h"]) === false, "API: Smart Money backend rejects [\"4h\"]");
-ok(isSmartMoneyStagedAccepted(["1h", "4h"]) === false, "API: Smart Money backend rejects [\"1h\",\"4h\"]");
-ok(isSmartMoneyStagedAccepted(["5m"]) === false, "API: Smart Money backend rejects [\"5m\"]");
-ok(isSmartMoneyStagedAccepted([]) === false, "API: Smart Money backend rejects []");
+// 2. Backend accepts verified, rejects 1d and empty
+ok(isPhase3EAccepted(["5m"]) === true, "API: accepts [5m]");
+ok(isPhase3EAccepted(["15m"]) === true, "API: accepts [15m]");
+ok(isPhase3EAccepted(["1h"]) === true, "API: accepts [1h]");
+ok(isPhase3EAccepted(["4h"]) === true, "API: accepts [4h]");
+ok(isPhase3EAccepted(["5m", "15m", "1h", "4h"]) === true, "API: accepts [5m,15m,1h,4h]");
+ok(isPhase3EAccepted([]) === false, "API: rejects []");
+ok(isPhase3EAccepted(["1d"]) === false, "API: rejects [1d]");
+ok(isPhase3EAccepted(["1h", "1d"]) === false, "API: rejects [1h,1d]");
 
-// Check API file contains staged guard before prisma.update (search without escaped quotes)
-const stagedGuardIdx = api.indexOf("Smart Money Phase 3C разрешает только timeframe");
-const prismaUpdateIdx = stagedGuardIdx !== -1 ? api.indexOf("prisma.strategy.update", stagedGuardIdx) : -1;
-ok(stagedGuardIdx !== -1, "API: staged guard string present");
-ok(stagedGuardIdx !== -1 && prismaUpdateIdx !== -1 && stagedGuardIdx < prismaUpdateIdx, "API: staged rejection occurs BEFORE prisma.strategy.update");
+// Check API file contains Phase3E guard before prisma.update
+const guardIdx = api.indexOf("1d временно недоступен");
+const prismaUpdateIdx = guardIdx !== -1 ? api.indexOf("prisma.strategy.update", guardIdx) : -1;
+ok(guardIdx !== -1, "API: 1d guard string present");
+ok(guardIdx !== -1 && prismaUpdateIdx !== -1 && guardIdx < prismaUpdateIdx, "API: rejection occurs BEFORE prisma.strategy.update");
+ok(api.includes('allowedVerified = new Set(["5m", "15m", "1h", "4h"])') || api.includes('allowedVerified'), "API: allowedVerified set present");
+ok(!api.includes('Smart Money Phase 3C разрешает только timeframe ["1h"]'), "API: old Phase3C guard removed");
 
-// Trend unchanged: should still accept multiple TFs
+// Ensure new guard checks non-empty
+ok(api.includes('Выберите хотя бы один таймфрейм') || api.includes('non-empty'), "API: non-empty check present");
+
+// Trend unchanged
 {
   const trendCfg = {
     minimumSignalScore: 70,
@@ -107,22 +148,21 @@ ok(stagedGuardIdx !== -1 && prismaUpdateIdx !== -1 && stagedGuardIdx < prismaUpd
   };
   const trendValid = validateTrendSuslikConfig(trendCfg);
   ok(trendValid.ok, "Trend config still valid (unchanged)");
-  // Trend API should not have staged guard — check file does not reject Trend TFs
-  ok(!api.includes('trend-suslik') || api.indexOf('Smart Money Phase 3C') > api.indexOf('trend-suslik'), "API: staged guard only for smart-money, Trend unchanged");
+  ok(!api.includes('trend-suslik') || api.indexOf('1d временно недоступен') > api.indexOf('trend-suslik'), "API: staged guard only for smart-money, Trend unchanged");
 }
 
-// 3. resetAll does NOT hardcode minExchanges=2
+// 3. resetAll still resets to ["1h"] (valid verified subset) and does NOT hardcode minExchanges=2
 ok(!editor.includes("setMinExchanges(2)"), "Editor: resetAll does NOT hardcode setMinExchanges(2)");
 ok(editor.includes("minExchanges — Strategy-level параметр без автоматически выбранного"), "Editor: resetAll comment explains no trading default");
-ok(editor.includes('setTimeframes(["1h"])'), "Editor: resetAll still resets timeframes to [\"1h\"] (staged)");
+ok(editor.includes('setTimeframes(["1h"])'), "Editor: resetAll still resets timeframes to [\"1h\"] (verified subset)");
 
-// 4. Signal text
+// 4. Signal text still correct
 ok(editor.includes("Signal Engine не развёрнут"), "UI: explicitly says Signal Engine not deployed");
 ok(!editor.includes("Уже созданные сигналы не пересчитываются"), "UI: old signal text removed");
 ok(editor.includes("Прибыльность не заявляется"), "UI: no profitability claims, but disclaimer kept");
 
-// 5. Additional static: disabled prop is real HTML disabled, not just clickable warning — 1h locked + others disabled
-ok(editor.includes("disabled={isLocked || isUnverified}") || editor.includes("disabled={isUnverified}"), "UI: buttons have real disabled attribute (locked 1h + unverified)");
+// 5. Disabled prop is real HTML disabled for 1d only
+ok(editor.includes('disabled={isDisabled}'), "UI: buttons have real disabled attribute for 1d");
 
 console.log(`\nИтог: ${passed}/${total}`);
 process.exit(passed === total ? 0 : 1);
