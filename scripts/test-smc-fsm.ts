@@ -524,6 +524,279 @@ function eventSummary(result: SmcStructureResult): string[] {
   );
 }
 
+/* ---------- FIX 1: reversal temporal eligibility ---------- */
+
+/* Fixture eligibility (layer swing, left=1, right=2).
+ * B-пивот = high 108, anchor i6, right-window подтверждает
+ * его ТОЛЬКО на effClose(i8) = T0+9h — ПОСЛЕ CHOCH
+ * (conf effClose(i7) = T0+8h), хотя anchor ДО CHOCH-свечи.
+ * По старому eventTime-правилу такой pivot был бы отклонён и
+ * reversal не подтвердился бы; по confirmedAt — подтверждается.
+ * Хронометрика:
+ *   i0:(100,103) i1:(103,105) i2:(105,100,h104,l97)
+ *   i3:(100,102) i4:(102,103) i5:(103,95) i6:(104,104,h108,l102)
+ *   i7:(104,106) i8:(106,105) i9:(105,110)
+ * Пивоты: high 105 (anchor1, conf T0+4h), low 97 (anchor2,
+ * conf T0+5h), low 95 (anchor5, conf T0+8h), high 108
+ * (anchor6, conf T0+9h).
+ * События: BOS_down(97)@i5, CHOCH_up(105)@i7, BOS_up(108)@i9. */
+{
+  const ELIG: StructureParams = {
+    tf: "1h",
+    layer: "swing",
+    left: 1,
+    right: 2
+  };
+
+  const input: SmcRawCandle[] = [
+    mk(0, 100, 103),
+    mk(1, 103, 105),
+    mk(2, 103, 100, 104, 97),
+    mk(3, 100, 102),
+    mk(4, 102, 103),
+    mk(5, 103, 95),
+    mk(6, 104, 104, 108, 102),
+    mk(7, 104, 106),
+    mk(8, 106, 105),
+    mk(9, 105, 110)
+  ];
+
+  const result = evaluateStructure(
+    input,
+    ELIG,
+    new Date(T0 + 10 * HOUR)
+  );
+
+  ok(
+    eventSummary(result).join(",") ===
+      "BOS:down,CHOCH:up,BOS:up",
+    "FIX1 B/D: pre-CHOCH anchor + post-CHOCH confirmedAt подтверждает reversal"
+  );
+
+  const choch = result.events[1];
+  const reversal = result.events[2];
+  const pivot108 = result.pivots.find(
+    (pivot) => pivot.price === 108
+  );
+
+  ok(
+    pivot108 !== undefined &&
+      reversal.brokenPivotKey === pivot108.key,
+    "FIX1 D: eligible target — pivot с confirmedAt СТРОГО после CHOCH"
+  );
+  ok(
+    pivot108 !== undefined &&
+      pivot108.eventTime.getTime() === T0 + 6 * HOUR &&
+      choch.eventTime.getTime() === T0 + 7 * HOUR,
+    "FIX1 B: eventTime пивота ДО CHOCH-якоря — eligibility определяется confirmedAt, не eventTime"
+  );
+  ok(
+    pivot108 !== undefined &&
+      pivot108.confirmedAt.getTime() === T0 + 9 * HOUR &&
+      choch.confirmedAt.getTime() === T0 + 8 * HOUR &&
+      pivot108.confirmedAt.getTime() >
+        choch.confirmedAt.getTime(),
+    "FIX1 D: pivot.confirmedAt > chochConfirmedAt (строго)"
+  );
+
+  /* FIX 1 A/C — геометрические инварианты (зафиксированы
+   * комментариями и проверкой, fixture не придумываем):
+   * A) eventTime ПОСЛЕ CHOCH-якоря при confirmedAt <= CHOCH
+   *    невозможен: anchor > t ⟹ confirmedAt =
+   *    effClose(anchor+right) >= effClose(t+1+right) >
+   *    effClose(t) = chochConfirmedAt (right >= 1).
+   * C) target с confirmedAt == chochConfirmedAt невозможен:
+   *    same-kind пивоты на одной boundary не существуют
+   *    (FIX 3), а cross-kind не является reversal-target'ом;
+   *    пивот того же рода, подтверждённый на boundary CHOCH,
+   *    регистрируется ДО перехода той же свечи и становится
+   *    protected-уровнем сам (latest confirmed), вытесняя
+   *    старый уровень — CHOCH по старому уровню на этой же
+   *    boundary не возникает. Проверяем A рантайм-инвариантом;
+   *    strict `>` в коде при этом обязателен. */
+  let invariantA = true;
+
+  for (const event of result.events) {
+    if (event.type !== "CHOCH") {
+      continue;
+    }
+
+    for (const pivot of result.pivots) {
+      if (
+        pivot.eventTime.getTime() >
+          event.eventTime.getTime() &&
+        pivot.confirmedAt.getTime() <=
+          event.confirmedAt.getTime()
+      ) {
+        invariantA = false;
+      }
+    }
+  }
+
+  ok(
+    invariantA,
+    "FIX1 A: инвариант — eventTime после CHOCH-якоря ⟹ confirmedAt > CHOCH confirmedAt (геометрия right-window)"
+  );
+}
+
+/* ---------- FIX 2/3: same-confirmedAt + invalidation identity ---------- */
+
+/* Пивоты high 20 (run i2..i3) и low 12 (run i2..i3)
+ * подтверждены ОДНОЙ boundary effClose(4) = T0+5h:
+ * cross-kind same-confirmedAt физически возможен и здесь
+ * проверяется. Same-kind same-confirmedAt НЕВОЗМОЖЕН:
+ * plateau одного kind — непересекающиеся run'ы ⟹ разные
+ * end ⟹ разные end+right ⟹ разные effectiveCloseTime
+ * (инвариант проверяется ниже); fixture не придумываем.
+ * События: BOS_up(20)@i6, CHOCH_down(12)@i8,
+ * CHOCH_INVALIDATED_up@i9 (reclaim).
+ *   i0:(9,9,h10,l8) i1:(14,15,h15,l14) i2:(16,19,h20,l12)
+ *   i3:(19,16,h20,l12) i4:(15,14,h15,l13) i5:(17,20,h25,l16)
+ *   i6:(21,22,h26,l17) i7:(22,19,h23,l17) i8:(19,11,h19,l10)
+ *   i9:(11,18,h19,l10) i10:(18,21,h24,l17) i11:(21,10,h21,l9) */
+{
+  const input: SmcRawCandle[] = [
+    mk(0, 9, 9, 10, 8),
+    mk(1, 14, 15, 15, 14),
+    mk(2, 16, 19, 20, 12),
+    mk(3, 19, 16, 20, 12),
+    mk(4, 15, 14, 15, 13),
+    mk(5, 17, 20, 25, 16),
+    mk(6, 21, 22, 26, 17),
+    mk(7, 22, 19, 23, 17),
+    mk(8, 19, 11, 19, 10),
+    mk(9, 11, 18, 19, 10),
+    mk(10, 18, 21, 24, 17),
+    mk(11, 21, 10, 21, 9)
+  ];
+
+  const asOfFull = new Date(T0 + 12 * HOUR);
+  const run1 = evaluateStructure(input, SWING_LR1, asOfFull);
+  const run2 = evaluateStructure(input, SWING_LR1, asOfFull);
+
+  const pivotHigh20 = run1.pivots.find(
+    (pivot) => pivot.kind === "high" && pivot.price === 20
+  );
+  const pivotLow12 = run1.pivots.find(
+    (pivot) => pivot.kind === "low" && pivot.price === 12
+  );
+
+  ok(
+    pivotHigh20 !== undefined &&
+      pivotLow12 !== undefined &&
+      pivotHigh20.confirmedAt.getTime() ===
+        pivotLow12.confirmedAt.getTime() &&
+      pivotHigh20.confirmedAt.getTime() === T0 + 5 * HOUR,
+    "FIX3: cross-kind пивоты (high 20 / low 12) подтверждены одной boundary"
+  );
+
+  ok(
+    JSON.stringify(run1) === JSON.stringify(run2),
+    "FIX3: AVAILABLE selection детерминирован (повторный запуск байт-в-байт)"
+  );
+
+  ok(
+    eventSummary(run1).join(",") ===
+      "BOS:up,CHOCH:down,CHOCH_INVALIDATED:up",
+    "FIX3: BOS_up(20) → CHOCH_down(12) → reclaim; consumed уровни не пере-выбираются (нет дубликатов BOS/CHOCH)"
+  );
+
+  /* Consumed не выбирается снова: close(i11)=10 НИЖЕ
+   * consumed CHOCH-уровня 12 — если бы CONSUMED был
+   * выбираемым, здесь возник бы второй CHOCH_down(12). */
+  ok(
+    run1.events.filter(
+      (event) =>
+        event.type === "CHOCH" &&
+        event.brokenLevelPrice === 12
+    ).length === 1 &&
+      run1.events.filter(
+        (event) =>
+          event.type === "BOS" &&
+          event.brokenLevelPrice === 20
+      ).length === 1,
+    "FIX3: close 10 < consumed 12 без нового CHOCH; close 21 > consumed 20 без нового BOS"
+  );
+
+  const consumed = run1.levels.filter(
+    (level) => level.state === "CONSUMED"
+  );
+
+  ok(
+    consumed.length === 2 &&
+      consumed.every(
+        (level) =>
+          level.consumedByEventKey !== null &&
+          level.consumedAt !== null
+      ) &&
+      new Set(consumed.map((level) => level.pivotKey)).size ===
+        2,
+    "FIX3: consumed уровни ровно 2 (high 20, low 12), каждый потреблён один раз"
+  );
+
+  /* FIX 2: CHOCH_INVALIDATED ссылается на ОРИГИНАЛЬНЫЙ
+   * pivot low 12: тот же brokenPivotKey/brokenLevelPrice,
+   * другие eventTime/confirmedAt (от reclaim-свечи i9),
+   * deterministic key = original pivot key + reclaim openTime. */
+  const chochDown = run1.events.find(
+    (event) => event.type === "CHOCH"
+  );
+  const invalidated = run1.events.find(
+    (event) => event.type === "CHOCH_INVALIDATED"
+  );
+
+  ok(
+    chochDown !== undefined &&
+      invalidated !== undefined &&
+      invalidated.brokenPivotKey === chochDown.brokenPivotKey &&
+      invalidated.brokenPivotKey === pivotLow12!.key &&
+      invalidated.brokenLevelPrice ===
+        chochDown.brokenLevelPrice &&
+      invalidated.eventTime.getTime() !==
+        chochDown.eventTime.getTime() &&
+      invalidated.confirmedAt.getTime() !==
+        chochDown.confirmedAt.getTime(),
+    "FIX2: CHOCH и CHOCH_INVALIDATED — один brokenPivotKey/price (оригинальный pivot), разные eventTime/confirmedAt"
+  );
+
+  ok(
+    invalidated !== undefined &&
+      invalidated.key ===
+        `SMC1|E|1h|swing|CHOCH_INVALIDATED|up|${pivotLow12!.key}|${T0 + 9 * HOUR}` &&
+      invalidated.eventTime.getTime() === T0 + 9 * HOUR &&
+      invalidated.confirmedAt.getTime() === T0 + 10 * HOUR,
+    "FIX2: deterministic key на original pivot key + reclaim openTime, времена — от reclaim-свечи (без ghost pivot)"
+  );
+
+  /* Same-kind инвариант: confirmedAt строго возрастают внутри
+   * kind (следствие непересекающихся run'ов) — на двух
+   * fixture сразу. */
+  let sameKindStrict = true;
+
+  for (const run of [run1, ...[FIXTURE_A].map((fixture) => evaluateStructure(
+    fixture.map(([o, c], i) => mk(i, o, c)),
+    SWING_LR1,
+    new Date(T0 + 16 * HOUR)
+  ))]) {
+    for (const kind of ["high", "low"] as const) {
+      const confs = run.pivots
+        .filter((pivot) => pivot.kind === kind)
+        .map((pivot) => pivot.confirmedAt.getTime());
+
+      for (let i = 1; i < confs.length; i++) {
+        if (confs[i] <= confs[i - 1]) {
+          sameKindStrict = false;
+        }
+      }
+    }
+  }
+
+  ok(
+    sameKindStrict,
+    "FIX3: same-kind confirmedAt строго возрастают — exact same-confirmedAt физически невозможен (зафиксировано инвариантом)"
+  );
+}
+
 /* ---------- итог ---------- */
 
 console.log(`Itog: ${passed}/${total}`);

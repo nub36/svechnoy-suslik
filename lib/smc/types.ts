@@ -50,10 +50,17 @@ export type SmcPivotKind = "high" | "low";
  * openTime DateTime, open/high/low/close Float,
  * closed Boolean @default(true).
  *
- * Поля closeTime/volume/marketId/id СОЗНАТЕЛЬНО не входят:
- * closeTime в БД nullable и не используется каноническими
- * путями проекта (freshness/границы строятся на openTime),
- * поэтому горизонт считается от openTime детерминированно.
+ * Поля closeTime/volume/marketId/id СОЗНАТЕЛЬНО не входят.
+ * SMC намеренно НЕ использует nullable exchange closeTime
+ * как canonical asOf-границу: берётся теоретический конец
+ * интервала, чтобы определить CLOSED-горизонт едиобразно и
+ * консервативно. Read-only проба production БД подтвердила
+ * формулу только для 1h: closeTime = openTime + 1h - 1ms
+ * (20/20 sampled CLOSED), т.е. effectiveCloseTime на 1ms
+ * консервативнее; для 5m/15m/4h/1d реальных строк не было —
+ * runtime-консистентность БД пока не доказана. Само поле
+ * closeTime при этом используется exchange ingestion и
+ * snapshots — но не SMC core.
  */
 export interface SmcRawCandle {
   openTime: Date;

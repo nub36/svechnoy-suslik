@@ -20,10 +20,12 @@
  *
  *   REVERSAL_PENDING_DOWN
  *     ├── close > уровня CHOCH (reclaim) →
- *     │   CHOCH_INVALIDATED_up, TREND_UP (failed CHoCH)
- *     └── close < НОВОГО (eventTime > eventTime CHOCH)
- *         подтверждённого swing-low → BOS_down,
- *         TREND_DOWN (confirmed reversal)
+ *     │   CHOCH_INVALIDATED_up, TREND_UP (failed CHoCH;
+ *     │   событие ссылается на ОРИГИНАЛЬНЫЙ protected pivot,
+ *     │   без synthetic-уровней)
+ *     └── close < НОВОГО post-CHOCH swing-low
+ *         (pivot.confirmedAt СТРОГО > chochConfirmedAt)
+ *         → BOS_down, TREND_DOWN (confirmed reversal)
  *
  *   TREND_DOWN / REVERSAL_PENDING_UP — зеркально.
  *
@@ -40,6 +42,15 @@
  *   возможен ТОЛЬКО после нового подтверждённого target'а.
  * - protectedLow/High = последний AVAILABLE pivot
  *   противоположного рода (без фильтра по этажу потребления).
+ * - TEMPORAL ELIGIBILITY (confirmation-time semantics):
+ *   reversal-target обязан иметь pivot.confirmedAt СТРОГО
+ *   позже chochConfirmedAt (effectiveCloseTime CHOCH-свечи).
+ *   eventTime (исторический anchor) в eligibility НЕ
+ *   участвует: anchor не определяет момент, когда pivot стал
+ *   известен алгоритму — right-window сдвигает подтверждение
+ *   вперёд от anchor. Пивот, подтверждённый на той же
+ *   boundary, что и CHOCH, уже был известен на ней и не
+ *   является новой post-CHOCH структурой.
  * - Pivot становится AVAILABLE строго со своего confirmedAt и
  *   может быть сломан свечой, чей close >= его confirmedAt
  *   («подтверждён до/на момент break candle»).
@@ -95,19 +106,28 @@ interface FsmLevel {
 interface PendingReversal {
   /** Направление CHOCH-разрыва (down = падение из TREND_UP). */
   dir: "up" | "down";
+  /** Оригинальный protected pivot, пробитый CHOCH. */
   levelKey: string;
   levelPrice: number;
-  /** openTime CHOCH-свечи; новые targets должны быть позже. */
-  eventTimeMs: number;
+  /** openTime CHOCH-свечи — исторический anchor для overlay;
+   * в temporal eligibility НЕ используется. */
+  chochEventTimeMs: number;
+  /** effectiveCloseTime CHOCH-свечи; reversal-target обязан
+   * иметь pivot.confirmedAt СТРОГО позже этого момента. */
+  chochConfirmedAtMs: number;
 }
 
 /** Детерминированный выбор уровня: последний подтверждённый
  * среди подходящих; tie → позднее eventTime; tie → выше цена;
- * далее первый встречный (полная детерминированность). */
+ * далее первый встречный (полная детерминированность).
+ * minConfirmedMs — включительно (continuation-фильтр stale
+ * уровней); afterConfirmedExclusiveMs — СТРОГО исключающая
+ * граница по confirmedAt (reversal eligibility:
+ * pivot.confirmedAt > chochConfirmedAt). */
 function pickTarget(
   levels: FsmLevel[],
   minConfirmedMs: number,
-  afterEventTimeMs: number | null
+  afterConfirmedExclusiveMs: number | null
 ): FsmLevel | null {
   let best: FsmLevel | null = null;
 
@@ -123,8 +143,8 @@ function pickTarget(
     }
 
     if (
-      afterEventTimeMs !== null &&
-      level.pivot.eventTime.getTime() <= afterEventTimeMs
+      afterConfirmedExclusiveMs !== null &&
+      confirmedMs <= afterConfirmedExclusiveMs
     ) {
       continue;
     }
@@ -191,27 +211,42 @@ function runStructureFsm(
   let lastConsumedUpConfirmMs = -1;
   let lastConsumedDownConfirmMs = -1;
 
-  const emitEvent = (
+  const pushEvent = (
     type: SmcStructureEventType,
     dir: "up" | "down",
-    level: FsmLevel,
+    brokenPivotKey: string,
+    brokenLevelPrice: number,
     candle: SmcCandle
   ): string => {
-    const key = `SMC1|E|${params.tf}|${params.layer}|${type}|${dir}|${level.pivot.key}|${candle.openTime.getTime()}`;
+    const key = `SMC1|E|${params.tf}|${params.layer}|${type}|${dir}|${brokenPivotKey}|${candle.openTime.getTime()}`;
 
     events.push({
       key,
       layer: params.layer,
       type,
       dir,
-      brokenPivotKey: level.pivot.key,
-      brokenLevelPrice: level.pivot.price,
+      brokenPivotKey,
+      brokenLevelPrice,
       eventTime: candle.openTime,
       confirmedAt: candle.effectiveCloseTime
     });
 
     return key;
   };
+
+  const emitEvent = (
+    type: SmcStructureEventType,
+    dir: "up" | "down",
+    level: FsmLevel,
+    candle: SmcCandle
+  ): string =>
+    pushEvent(
+      type,
+      dir,
+      level.pivot.key,
+      level.pivot.price,
+      candle
+    );
 
   const consume = (
     level: FsmLevel,
@@ -343,7 +378,8 @@ function runStructureFsm(
           dir: "down",
           levelKey: protectedLow!.pivot.key,
           levelPrice: protectedLow!.pivot.price,
-          eventTimeMs: candle.openTime.getTime()
+          chochEventTimeMs: candle.openTime.getTime(),
+          chochConfirmedAtMs: closeMs
         };
         phase = "REVERSAL_PENDING_DOWN";
       }
@@ -396,7 +432,8 @@ function runStructureFsm(
           dir: "up",
           levelKey: protectedHigh!.pivot.key,
           levelPrice: protectedHigh!.pivot.price,
-          eventTimeMs: candle.openTime.getTime()
+          chochEventTimeMs: candle.openTime.getTime(),
+          chochConfirmedAtMs: closeMs
         };
         phase = "REVERSAL_PENDING_UP";
       }
@@ -409,35 +446,27 @@ function runStructureFsm(
 
       if (close > reversal.levelPrice) {
         // Failed CHoCH: reclaim вверх, тренд восстановлен.
-        const ghost: FsmLevel = {
-          pivot: {
-            key: reversal.levelKey,
-            layer: params.layer,
-            kind: "low",
-            price: reversal.levelPrice,
-            eventTime: new Date(reversal.eventTimeMs),
-            confirmedAt: new Date(reversal.eventTimeMs)
-          },
-          state: "AVAILABLE",
-          consumedAtMs: null,
-          consumedByEventKey: null
-        };
-
-        const key = emitEvent(
+        // Событие ссылается на ОРИГИНАЛЬНЫЙ protected pivot
+        // (тот же brokenPivotKey/brokenLevelPrice, что и у
+        // CHOCH) — без synthetic/ghost уровня с поддельными
+        // временами; eventTime/confirmedAt — от reclaim-свечи.
+        pushEvent(
           "CHOCH_INVALIDATED",
           "up",
-          ghost,
+          reversal.levelKey,
+          reversal.levelPrice,
           candle
         );
-
-        void key;
         pending = null;
         phase = "TREND_UP";
       } else {
+        // TEMPORAL ELIGIBILITY (confirmation-time semantics):
+        // строго target.pivot.confirmedAt > chochConfirmedAt;
+        // eventTime (исторический anchor) не участвует.
         const target = pickTarget(
           lowLevels,
           -1,
-          reversal.eventTimeMs
+          reversal.chochConfirmedAtMs
         );
 
         if (target !== null && close < target.pivot.price) {
@@ -467,28 +496,23 @@ function runStructureFsm(
       const reversal = pending!;
 
       if (close < reversal.levelPrice) {
-        const ghost: FsmLevel = {
-          pivot: {
-            key: reversal.levelKey,
-            layer: params.layer,
-            kind: "high",
-            price: reversal.levelPrice,
-            eventTime: new Date(reversal.eventTimeMs),
-            confirmedAt: new Date(reversal.eventTimeMs)
-          },
-          state: "AVAILABLE",
-          consumedAtMs: null,
-          consumedByEventKey: null
-        };
-
-        emitEvent("CHOCH_INVALIDATED", "down", ghost, candle);
+        // Failed CHoCH (зеркало): ссылка на оригинальный
+        // protected pivot, без ghost-уровня.
+        pushEvent(
+          "CHOCH_INVALIDATED",
+          "down",
+          reversal.levelKey,
+          reversal.levelPrice,
+          candle
+        );
         pending = null;
         phase = "TREND_DOWN";
       } else {
+        // Зеркальный temporal eligibility по confirmedAt.
         const target = pickTarget(
           highLevels,
           -1,
-          reversal.eventTimeMs
+          reversal.chochConfirmedAtMs
         );
 
         if (target !== null && close > target.pivot.price) {
