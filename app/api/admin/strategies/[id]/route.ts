@@ -158,6 +158,19 @@ export async function PUT(
       );
     }
 
+    // Phase 3C staged enforcement: only ["1h"] allowed until Phase 3E verification.
+    // Rejects crafted PUT before any prisma.strategy.update.
+    const stagedTF = runtimeValidation.timeframes;
+    if (stagedTF.length !== 1 || stagedTF[0] !== "1h") {
+      return NextResponse.json(
+        {
+          error:
+            "Smart Money Phase 3C разрешает только timeframe [\"1h\"] (staged rollout). 5m/15m/4h/1d будут доступны после Phase 3E проверки реальных данных",
+        },
+        { status: 400 }
+      );
+    }
+
     const updated = await prisma.strategy.update({
       where: { id: strategyId },
       data: {

@@ -329,9 +329,10 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
   function resetAll() {
     if (!confirm("Сбросить ВСЕ параметры Smart Money к canonical defaults? Потребуется явное сохранение.")) return;
     setConfig({ ...DEFAULT_CONFIG, weights: { ...DEFAULT_WEIGHTS }, filters: { ...DEFAULT_CONFIG.filters } });
-    setMinExchanges(2);
     setTimeframes(["1h"]);
-    // enabled оставляем как был — не сбрасываем включение без явного действия
+    // minExchanges — Strategy-level параметр без автоматически выбранного SMC trading default;
+    // не меняем его при Reset all, чтобы не превращать тестовое значение 2 в production decision.
+    // enabled тоже оставляем как был.
   }
 
   async function save() {
@@ -389,7 +390,7 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
       </section>
 
       <div className="adminPanel" style={{ background: "#fffbeb", border: "1px solid #fcd34d", padding: 12, borderRadius: 8, marginBottom: 16 }}>
-        <b>Предупреждение:</b> изменение параметров меняет будущий runtime-результат (longScore/shortScore/direction) для новых свечей. Уже созданные сигналы не пересчитываются. Прибыльность не заявляется — параметры являются инженерными гипотезами (Phase 3A).
+        <b>Предупреждение:</b> Изменение параметров влияет на будущие runtime-расчёты Smart Money. Signal Engine не развёрнут. Прибыльность не заявляется.
       </div>
 
       {errors.length > 0 && (
@@ -427,7 +428,7 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
         />
         <div className="settingBlock">
           <b>Рабочие таймфреймы</b>
-          <small>На каких периодах стратегия будет искать сигналы. Phase 3C staged = 1h production-safe. 5m/15m/4h/1d — не проверено на реальных данных.</small>
+          <small>Phase 3C staged = 1h production-safe. 5m/15m/4h/1d будут доступны после Phase 3E проверки реальных данных.</small>
           <div className="timeframeSelector">
             {([...ALLOWED_TFS] as string[]).map((tf) => {
               const active = timeframes.includes(tf);
@@ -437,9 +438,16 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
                   type="button"
                   key={tf}
                   className={active ? "tfActive" : ""}
-                  onClick={() => toggleTimeframe(tf)}
-                  title={isUnverified ? "Не проверено на реальных данных (Phase 3E)" : "Production-safe"}
-                  style={isUnverified && active ? { outline: "2px dashed #f59e0b" } : undefined}
+                  disabled={isUnverified}
+                  onClick={() => {
+                    if (isUnverified) return;
+                    toggleTimeframe(tf);
+                  }}
+                  title={
+                    isUnverified
+                      ? "Будет доступно после Phase 3E проверки реальных данных"
+                      : "Production-safe: closeTime проверен на реальных данных"
+                  }
                 >
                   {tf}
                   {isUnverified ? " *" : ""}
@@ -447,7 +455,7 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
               );
             })}
           </div>
-          <small style={{ color: "#92400e" }}>* 5m/15m/4h/1d — архитектура поддерживает, но closeTime-консистентность подтверждена только для 1h. Включайте только после Phase 3E проверки.</small>
+          <small style={{ color: "#92400e" }}>* 5m/15m/4h/1d — disabled до Phase 3E. Архитектура поддерживает, но closeTime-консистентность подтверждена только для 1h.</small>
         </div>
       </section>
 
