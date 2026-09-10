@@ -14,6 +14,29 @@ type SmcWeights = {
   confluence: number;
 };
 
+type SmartMoneyAdvancedDisplacement = {
+  bodyAtrMin: number;
+  rangeAtrMin: number;
+  bullCloseLocMin: number;
+  bearCloseLocMax: number;
+};
+type SmartMoneyAdvancedFvg = {
+  minGapAtr: number;
+  maxAgeCandles: number;
+};
+type SmartMoneyAdvancedLiquidity = {
+  eqToleranceAtr: number;
+  eqConfirmBars: number;
+  sweepMinPenetrationAtr: number;
+  maxAgeCandles: number;
+};
+type SmartMoneyAdvancedOrderBlock = {
+  impulseMaxCandles: number;
+  confirmMaxCandles: number;
+  maxAgeCandles: number;
+  sweepLookbackCandles: number;
+};
+
 type SmartMoneyConfig = {
   minimumSignalScore: number;
   swingLeft: number;
@@ -31,7 +54,10 @@ type SmartMoneyConfig = {
     minimumQuoteVolume24h: number;
     top500Only: boolean;
   };
-  // optional, ignore
+  displacement?: SmartMoneyAdvancedDisplacement;
+  fvg?: SmartMoneyAdvancedFvg;
+  liquidity?: SmartMoneyAdvancedLiquidity;
+  orderBlock?: SmartMoneyAdvancedOrderBlock;
   tf?: string;
 };
 
@@ -62,6 +88,29 @@ const DEFAULT_WEIGHTS: SmcWeights = {
   confluence: 5,
 };
 
+const DEFAULT_DISPLACEMENT: SmartMoneyAdvancedDisplacement = {
+  bodyAtrMin: 1.5,
+  rangeAtrMin: 2.0,
+  bullCloseLocMin: 0.6,
+  bearCloseLocMax: 0.4,
+};
+const DEFAULT_FVG: SmartMoneyAdvancedFvg = {
+  minGapAtr: 0.1,
+  maxAgeCandles: 0,
+};
+const DEFAULT_LIQUIDITY: SmartMoneyAdvancedLiquidity = {
+  eqToleranceAtr: 0.1,
+  eqConfirmBars: 2,
+  sweepMinPenetrationAtr: 0.05,
+  maxAgeCandles: 0,
+};
+const DEFAULT_ORDERBLOCK: SmartMoneyAdvancedOrderBlock = {
+  impulseMaxCandles: 3,
+  confirmMaxCandles: 10,
+  maxAgeCandles: 750,
+  sweepLookbackCandles: 5,
+};
+
 const DEFAULT_CONFIG: SmartMoneyConfig = {
   minimumSignalScore: 72,
   swingLeft: 20,
@@ -79,6 +128,10 @@ const DEFAULT_CONFIG: SmartMoneyConfig = {
     minimumQuoteVolume24h: 0,
     top500Only: false,
   },
+  displacement: { ...DEFAULT_DISPLACEMENT },
+  fvg: { ...DEFAULT_FVG },
+  liquidity: { ...DEFAULT_LIQUIDITY },
+  orderBlock: { ...DEFAULT_ORDERBLOCK },
 };
 
 const ALLOWED_TFS = ["5m", "15m", "1h", "4h", "1d"] as const;
@@ -89,12 +142,16 @@ function NumberField({
   value,
   onChange,
   step = "1",
+  min,
+  max,
 }: {
   label: string;
   description: string;
   value: number;
   onChange: (v: number) => void;
   step?: string;
+  min?: string;
+  max?: string;
 }) {
   return (
     <label className="settingField">
@@ -105,6 +162,8 @@ function NumberField({
       <input
         type="number"
         step={step}
+        min={min}
+        max={max}
         value={Number.isFinite(value) ? value : 0}
         onChange={(e) => {
           const v = e.target.value === "" ? 0 : Number(e.target.value);
@@ -119,6 +178,33 @@ function normalizeConfig(raw: unknown): SmartMoneyConfig {
   const r = (raw ?? {}) as Record<string, unknown>;
   const w = (r.weights ?? {}) as Record<string, unknown>;
   const f = (r.filters ?? {}) as Record<string, unknown>;
+  const d = (r.displacement ?? {}) as Record<string, unknown>;
+  const fv = (r.fvg ?? {}) as Record<string, unknown>;
+  const li = (r.liquidity ?? {}) as Record<string, unknown>;
+  const ob = (r.orderBlock ?? {}) as Record<string, unknown>;
+  // For old DB without advanced groups, fill canonical scoring fallbacks (not blank/NaN)
+  const disp: SmartMoneyAdvancedDisplacement = {
+    bodyAtrMin: typeof d.bodyAtrMin === "number" ? (d.bodyAtrMin as number) : DEFAULT_DISPLACEMENT.bodyAtrMin,
+    rangeAtrMin: typeof d.rangeAtrMin === "number" ? (d.rangeAtrMin as number) : DEFAULT_DISPLACEMENT.rangeAtrMin,
+    bullCloseLocMin: typeof d.bullCloseLocMin === "number" ? (d.bullCloseLocMin as number) : DEFAULT_DISPLACEMENT.bullCloseLocMin,
+    bearCloseLocMax: typeof d.bearCloseLocMax === "number" ? (d.bearCloseLocMax as number) : DEFAULT_DISPLACEMENT.bearCloseLocMax,
+  };
+  const fvg: SmartMoneyAdvancedFvg = {
+    minGapAtr: typeof fv.minGapAtr === "number" ? (fv.minGapAtr as number) : DEFAULT_FVG.minGapAtr,
+    maxAgeCandles: typeof fv.maxAgeCandles === "number" ? (fv.maxAgeCandles as number) : DEFAULT_FVG.maxAgeCandles,
+  };
+  const liq: SmartMoneyAdvancedLiquidity = {
+    eqToleranceAtr: typeof li.eqToleranceAtr === "number" ? (li.eqToleranceAtr as number) : DEFAULT_LIQUIDITY.eqToleranceAtr,
+    eqConfirmBars: typeof li.eqConfirmBars === "number" ? (li.eqConfirmBars as number) : DEFAULT_LIQUIDITY.eqConfirmBars,
+    sweepMinPenetrationAtr: typeof li.sweepMinPenetrationAtr === "number" ? (li.sweepMinPenetrationAtr as number) : DEFAULT_LIQUIDITY.sweepMinPenetrationAtr,
+    maxAgeCandles: typeof li.maxAgeCandles === "number" ? (li.maxAgeCandles as number) : DEFAULT_LIQUIDITY.maxAgeCandles,
+  };
+  const obc: SmartMoneyAdvancedOrderBlock = {
+    impulseMaxCandles: typeof ob.impulseMaxCandles === "number" ? (ob.impulseMaxCandles as number) : DEFAULT_ORDERBLOCK.impulseMaxCandles,
+    confirmMaxCandles: typeof ob.confirmMaxCandles === "number" ? (ob.confirmMaxCandles as number) : DEFAULT_ORDERBLOCK.confirmMaxCandles,
+    maxAgeCandles: typeof ob.maxAgeCandles === "number" ? (ob.maxAgeCandles as number) : DEFAULT_ORDERBLOCK.maxAgeCandles,
+    sweepLookbackCandles: typeof ob.sweepLookbackCandles === "number" ? (ob.sweepLookbackCandles as number) : DEFAULT_ORDERBLOCK.sweepLookbackCandles,
+  };
   return {
     minimumSignalScore:
       typeof r.minimumSignalScore === "number"
@@ -194,6 +280,10 @@ function normalizeConfig(raw: unknown): SmartMoneyConfig {
           ? (f.top500Only as boolean)
           : DEFAULT_CONFIG.filters.top500Only,
     },
+    displacement: disp,
+    fvg,
+    liquidity: liq,
+    orderBlock: obc,
   };
 }
 
@@ -204,7 +294,6 @@ function validateLocal(
 ): string[] {
   const errors: string[] = [];
 
-  // minimumSignalScore
   if (!Number.isInteger(config.minimumSignalScore) || config.minimumSignalScore < 0 || config.minimumSignalScore > 100) {
     errors.push("minimumSignalScore: ожидается целое 0..100");
   }
@@ -222,7 +311,6 @@ function validateLocal(
   if (!Number.isFinite(config.eqBand) || config.eqBand < 0 || config.eqBand >= 0.5) {
     errors.push("eqBand: ожидается 0 ≤ eqBand < 0.5");
   }
-  // weights
   const keys = Object.keys(DEFAULT_WEIGHTS) as (keyof SmcWeights)[];
   let sum = 0;
   for (const k of keys) {
@@ -231,25 +319,47 @@ function validateLocal(
     sum += v;
   }
   if (sum !== 100) errors.push(`weights: сумма весов должна быть ровно 100 (сейчас ${sum})`);
-  // filters
   if (!Number.isFinite(config.filters.minimumQuoteVolume24h) || config.filters.minimumQuoteVolume24h < 0) {
     errors.push("filters.minimumQuoteVolume24h: ожидается число ≥0");
   }
   if (typeof config.filters.top500Only !== "boolean") {
     errors.push("filters.top500Only: ожидается boolean");
   }
-  // timeframes
   if (!Array.isArray(timeframes) || timeframes.length === 0) {
     errors.push("timeframes: нужен непустой список таймфреймов");
   } else {
     const allowed = new Set<string>([...ALLOWED_TFS]);
     const bad = timeframes.filter((tf) => !allowed.has(tf));
     if (bad.length) errors.push(`timeframes: недопустимые значения: ${bad.join(", ")}`);
+    if (timeframes.includes("1d")) errors.push("timeframes: 1d временно недоступен (BINGX 16:00 UTC vs 00:00 UTC)");
   }
-  // minExchanges
   if (!Number.isInteger(minExchanges) || minExchanges < 1 || minExchanges > 5) {
     errors.push("minExchanges: ожидается целое 1..5");
   }
+
+  // ---- Phase 3D advanced UI ranges (client-side, backend remains authoritative) ----
+  const d = config.displacement ?? DEFAULT_DISPLACEMENT;
+  if (!Number.isFinite(d.bodyAtrMin) || d.bodyAtrMin < 0 || d.bodyAtrMin > 10) errors.push("displacement.bodyAtrMin: ожидается число 0..10 (UI), core допускает ≥0");
+  if (!Number.isFinite(d.rangeAtrMin) || d.rangeAtrMin < 0 || d.rangeAtrMin > 10) errors.push("displacement.rangeAtrMin: ожидается число 0..10");
+  if (!Number.isFinite(d.bullCloseLocMin) || d.bullCloseLocMin < 0 || d.bullCloseLocMin > 1) errors.push("displacement.bullCloseLocMin: ожидается число 0..1");
+  if (!Number.isFinite(d.bearCloseLocMax) || d.bearCloseLocMax < 0 || d.bearCloseLocMax > 1) errors.push("displacement.bearCloseLocMax: ожидается число 0..1");
+
+  const fv = config.fvg ?? DEFAULT_FVG;
+  if (!Number.isFinite(fv.minGapAtr) || fv.minGapAtr < 0 || fv.minGapAtr > 5) errors.push("fvg.minGapAtr: ожидается число 0..5");
+  if (!Number.isInteger(fv.maxAgeCandles) || fv.maxAgeCandles < 0 || fv.maxAgeCandles > 5000) errors.push("fvg.maxAgeCandles: ожидается целое 0..5000 (0=выключено)");
+
+  const li = config.liquidity ?? DEFAULT_LIQUIDITY;
+  if (!Number.isFinite(li.eqToleranceAtr) || li.eqToleranceAtr < 0 || li.eqToleranceAtr > 1) errors.push("liquidity.eqToleranceAtr: ожидается число 0..1");
+  if (!Number.isInteger(li.eqConfirmBars) || li.eqConfirmBars < 0 || li.eqConfirmBars > 20) errors.push("liquidity.eqConfirmBars: ожидается целое 0..20");
+  if (!Number.isFinite(li.sweepMinPenetrationAtr) || li.sweepMinPenetrationAtr < 0 || li.sweepMinPenetrationAtr > 1) errors.push("liquidity.sweepMinPenetrationAtr: ожидается число 0..1");
+  if (!Number.isInteger(li.maxAgeCandles) || li.maxAgeCandles < 0 || li.maxAgeCandles > 5000) errors.push("liquidity.maxAgeCandles: ожидается целое 0..5000");
+
+  const ob = config.orderBlock ?? DEFAULT_ORDERBLOCK;
+  if (!Number.isInteger(ob.impulseMaxCandles) || ob.impulseMaxCandles < 1 || ob.impulseMaxCandles > 10) errors.push("orderBlock.impulseMaxCandles: ожидается целое 1..10");
+  if (!Number.isInteger(ob.confirmMaxCandles) || ob.confirmMaxCandles < 1 || ob.confirmMaxCandles > 100) errors.push("orderBlock.confirmMaxCandles: ожидается целое 1..100");
+  if (!Number.isInteger(ob.maxAgeCandles) || ob.maxAgeCandles < 0 || ob.maxAgeCandles > 5000) errors.push("orderBlock.maxAgeCandles: ожидается целое 0..5000");
+  if (!Number.isInteger(ob.sweepLookbackCandles) || ob.sweepLookbackCandles < 0 || ob.sweepLookbackCandles > 100) errors.push("orderBlock.sweepLookbackCandles: ожидается целое 0..100");
+
   return errors;
 }
 
@@ -279,7 +389,6 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
 
   const canSave = isDirty && errors.length === 0 && !saving;
 
-  // kept for potential nested updates; currently weights/filters use direct setConfig
   function _updateSection<K extends keyof SmartMoneyConfig>(section: K, values: Partial<SmartMoneyConfig[K]>) {
     setConfig((cur) => ({
       ...cur,
@@ -292,7 +401,6 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
   void _updateSection;
 
   function toggleTimeframe(tf: string) {
-    // Phase 3E: verified 5m/15m/1h/4h selectable, 1d disabled. Prevent transition to [].
     if (tf === "1d") return;
     setTimeframes((cur) => {
       if (cur.includes(tf)) {
@@ -331,16 +439,21 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
       setConfig((c) => ({ ...c, weights: { ...DEFAULT_WEIGHTS } }));
     } else if (section === "Filters") {
       setConfig((c) => ({ ...c, filters: { ...DEFAULT_CONFIG.filters } }));
+    } else if (section === "Импульс / Displacement") {
+      setConfig((c) => ({ ...c, displacement: { ...DEFAULT_DISPLACEMENT } }));
+    } else if (section === "Ценовой дисбаланс / FVG") {
+      setConfig((c) => ({ ...c, fvg: { ...DEFAULT_FVG } }));
+    } else if (section === "Ликвидность") {
+      setConfig((c) => ({ ...c, liquidity: { ...DEFAULT_LIQUIDITY } }));
+    } else if (section === "Блоки ордеров / Order Blocks") {
+      setConfig((c) => ({ ...c, orderBlock: { ...DEFAULT_ORDERBLOCK } }));
     }
   }
 
   function resetAll() {
     if (!confirm("Сбросить ВСЕ параметры Smart Money к canonical defaults? Потребуется явное сохранение.")) return;
-    setConfig({ ...DEFAULT_CONFIG, weights: { ...DEFAULT_WEIGHTS }, filters: { ...DEFAULT_CONFIG.filters } });
+    setConfig({ ...DEFAULT_CONFIG, weights: { ...DEFAULT_WEIGHTS }, filters: { ...DEFAULT_CONFIG.filters }, displacement: { ...DEFAULT_DISPLACEMENT }, fvg: { ...DEFAULT_FVG }, liquidity: { ...DEFAULT_LIQUIDITY }, orderBlock: { ...DEFAULT_ORDERBLOCK } });
     setTimeframes(["1h"]);
-    // minExchanges — Strategy-level параметр без автоматически выбранного SMC trading default;
-    // не меняем его при Reset all, чтобы не превращать тестовое значение 2 в production decision.
-    // enabled тоже оставляем как был.
   }
 
   async function save() {
@@ -364,7 +477,6 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
         return;
       }
       setMessage("✓ Настройки сохранены в PostgreSQL");
-      // update initial refs to new saved state
       initialConfigRef.current = JSON.parse(JSON.stringify(config));
       initialMinExchangesRef.current = minExchanges;
       initialTimeframesRef.current = [...timeframes];
@@ -447,7 +559,6 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
 
       {isDirty && <div style={{ fontSize: 13, color: "#92400e", marginBottom: 12 }}>• Есть несохранённые изменения</div>}
 
-      {/* Общие */}
       <section className="editorSection">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <h2>Общие</h2>
@@ -519,7 +630,6 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
         </div>
       </section>
 
-      {/* Market Structure */}
       <section className="editorSection">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <h2>Структура рынка (Market Structure)</h2>
@@ -562,7 +672,6 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
         </div>
       </section>
 
-      {/* Volatility */}
       <section className="editorSection">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <h2>Волатильность (ATR)</h2>
@@ -584,7 +693,6 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
         />
       </section>
 
-      {/* Freshness */}
       <section className="editorSection">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <h2>Свежесть событий (в свечах)</h2>
@@ -625,7 +733,6 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
         </div>
       </section>
 
-      {/* Dealing Range */}
       <section className="editorSection">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <h2>Ценовой диапазон: Premium / Discount (Dealing Range)</h2>
@@ -647,9 +754,204 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
           step="0.01"
           onChange={(v) => setConfig({ ...config, eqBand: v })}
         />
+        <div style={{ background: "#fffbeb", border: "1px solid #fcd34d", padding: 10, borderRadius: 6, marginTop: 12 }}>
+          <small>
+            <b>Примечание о Range:</b> позиция цены намеренно <b>не clamp</b> — может быть &lt;0 или &gt;1. Текущее scoring всё ещё
+            начисляет баллы: ниже диапазона — как Discount (LONG), выше — как Premium (SHORT). Желаемый lifecycle после выхода цены за
+            диапазон (maxAge / “N баров вне → expired” vs оставить breakout) пока на аудите и не решён — не заявляется как оптимизированный.
+          </small>
+        </div>
       </section>
 
-      {/* Scoring */}
+      {/* Phase 3D advanced groups */}
+      <section className="editorSection" style={{ border: "1px solid #93c5fd", background: "#eff6ff" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h2>Импульс / Displacement</h2>
+          <button type="button" onClick={() => resetSection("Импульс / Displacement")} style={{ fontSize: 12 }}>
+            Сбросить секцию
+          </button>
+        </div>
+        <p className="sectionDescription">
+          Определяет, насколько сильным должен быть импульс, чтобы считаться <b>displacement</b>. После 3D-B пороги
+          <b> едины</b> для top-level оценки и для внутреннего детектирования в блоках ордеров (OB). Изменение влияет и на прямой
+          вес displacement, и на формирование OB (через общий примитив).
+        </p>
+        <div className="fieldGrid">
+          <NumberField
+            label="Тело импульса — минимум ATR (displacement.bodyAtrMin) — default 1.5"
+            description="Что контролирует: минимальное тело свечи в единицах ATR. Увеличение → строже: только более вытянутые тела проходят; уменьшение → мягче. Допустимо 0..10, шаг 0.1. Зависит от atrPeriod. Влияет на OB как общий примитив."
+            value={config.displacement?.bodyAtrMin ?? DEFAULT_DISPLACEMENT.bodyAtrMin}
+            step="0.1"
+            min="0"
+            max="10"
+            onChange={(v) => setConfig((c) => ({ ...c, displacement: { ...(c.displacement ?? DEFAULT_DISPLACEMENT), bodyAtrMin: v } }))}
+          />
+          <NumberField
+            label="Размах — минимум ATR (displacement.rangeAtrMin) — default 2.0"
+            description="Что контролирует: полный размах high-low в ATR. Увеличение → требуется более широкий размах; уменьшение → допускаются более узкие свечи. 0..10, шаг 0.1. Совместно с bodyAtrMin и closeLocation."
+            value={config.displacement?.rangeAtrMin ?? DEFAULT_DISPLACEMENT.rangeAtrMin}
+            step="0.1"
+            min="0"
+            max="10"
+            onChange={(v) => setConfig((c) => ({ ...c, displacement: { ...(c.displacement ?? DEFAULT_DISPLACEMENT), rangeAtrMin: v } }))}
+          />
+          <NumberField
+            label="Бычье закрытие — минимум позиции (displacement.bullCloseLocMin) — default 0.60"
+            description="Что контролирует: где внутри размаха должна закрыться бычья импульсная свеча. Увеличение → требуется закрытие ближе к максимуму; уменьшение → мягче. 0..1, шаг 0.05."
+            value={config.displacement?.bullCloseLocMin ?? DEFAULT_DISPLACEMENT.bullCloseLocMin}
+            step="0.05"
+            min="0"
+            max="1"
+            onChange={(v) => setConfig((c) => ({ ...c, displacement: { ...(c.displacement ?? DEFAULT_DISPLACEMENT), bullCloseLocMin: v } }))}
+          />
+          <NumberField
+            label="Медвежье закрытие — максимум позиции (displacement.bearCloseLocMax) — default 0.40"
+            description="Что контролирует: где внутри размаха должна закрыться медвежья импульсная свеча. Уменьшение → строже (ближе к минимуму); увеличение → мягче. 0..1, шаг 0.05. Предупреждение: слишком широкое окно размывает направленный смысл."
+            value={config.displacement?.bearCloseLocMax ?? DEFAULT_DISPLACEMENT.bearCloseLocMax}
+            step="0.05"
+            min="0"
+            max="1"
+            onChange={(v) => setConfig((c) => ({ ...c, displacement: { ...(c.displacement ?? DEFAULT_DISPLACEMENT), bearCloseLocMax: v } }))}
+          />
+        </div>
+      </section>
+
+      <section className="editorSection" style={{ border: "1px solid #86efac", background: "#f0fdf4" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h2>Ценовой дисбаланс / FVG</h2>
+          <button type="button" onClick={() => resetSection("Ценовой дисбаланс / FVG")} style={{ fontSize: 12 }}>
+            Сбросить секцию
+          </button>
+        </div>
+        <p className="sectionDescription">
+          Определяет геометрию имбаланса и его жизненный цикл. <b>minGapAtr</b> — общий примитив для top-level FVG и для OB
+          (после 3D-B). <b>maxAgeCandles</b> влияет только на top-level FVG scoring/доступность, <b>не</b> влияет на OB
+          <code>hasFvgInImpulse</code> (OB проверяет интервал подтверждения, а не later state).
+        </p>
+        <div className="fieldGrid">
+          <NumberField
+            label="Минимальный разрыв — ATR (fvg.minGapAtr) — default 0.10"
+            description="Что контролирует: минимальный размер ценового разрыва. Увеличение → только более широкие FVG проходят; уменьшение → больше мелких FVG. 0..5, шаг 0.05. Общий для top-level и OB."
+            value={config.fvg?.minGapAtr ?? DEFAULT_FVG.minGapAtr}
+            step="0.05"
+            min="0"
+            max="5"
+            onChange={(v) => setConfig((c) => ({ ...c, fvg: { ...(c.fvg ?? DEFAULT_FVG), minGapAtr: v } }))}
+          />
+          <NumberField
+            label="Время жизни FVG — свечей (fvg.maxAgeCandles) — default 0"
+            description="Что контролирует: через сколько закрытых свечей после подтверждения FVG становится EXPIRED и перестаёт участвовать в scoring. 0 = expiry выключен (текущий scoring default). Увеличение → FVG живёт дольше; уменьшение → быстрее истекает. 0..5000, целое. Не влияет на OB confluence."
+            value={config.fvg?.maxAgeCandles ?? DEFAULT_FVG.maxAgeCandles}
+            step="1"
+            min="0"
+            max="5000"
+            onChange={(v) => setConfig((c) => ({ ...c, fvg: { ...(c.fvg ?? DEFAULT_FVG), maxAgeCandles: Math.round(v) } }))}
+          />
+        </div>
+      </section>
+
+      <section className="editorSection" style={{ border: "1px solid #fca5a5", background: "#fef2f2" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h2>Ликвидность</h2>
+          <button type="button" onClick={() => resetSection("Ликвидность")} style={{ fontSize: 12 }}>
+            Сбросить секцию
+          </button>
+        </div>
+        <p className="sectionDescription">
+          Определяет формирование уровней ликвидности, их ровность, подтверждение и жизненный цикл. Изменение влияет на количество
+          уровней и частоту sweep/break.
+        </p>
+        <div className="fieldGrid">
+          <NumberField
+            label="Допуск ровности — ATR (liquidity.eqToleranceAtr) — default 0.10"
+            description="Что контролирует: насколько близко два экстремума должны быть, чтобы считаться equal highs/lows. Увеличение → допускаются более неровные уровни (больше EQ-групп); уменьшение → только почти идеально ровные. 0..1, шаг 0.01."
+            value={config.liquidity?.eqToleranceAtr ?? DEFAULT_LIQUIDITY.eqToleranceAtr}
+            step="0.01"
+            min="0"
+            max="1"
+            onChange={(v) => setConfig((c) => ({ ...c, liquidity: { ...(c.liquidity ?? DEFAULT_LIQUIDITY), eqToleranceAtr: v } }))}
+          />
+          <NumberField
+            label="Подтверждение ровности — баров (liquidity.eqConfirmBars) — default 2"
+            description="Что контролирует: сколько закрытых свечей подряд должны подтвердить ровность после второго экстремума. Увеличение → строже, дольше ждать; уменьшение → быстрее формируется. 0..20, целое. 0 = подтверждение не требуется."
+            value={config.liquidity?.eqConfirmBars ?? DEFAULT_LIQUIDITY.eqConfirmBars}
+            step="1"
+            min="0"
+            max="20"
+            onChange={(v) => setConfig((c) => ({ ...c, liquidity: { ...(c.liquidity ?? DEFAULT_LIQUIDITY), eqConfirmBars: Math.round(v) } }))}
+          />
+          <NumberField
+            label="Глубина съёма — минимум ATR (liquidity.sweepMinPenetrationAtr) — default 0.05"
+            description="Что контролирует: насколько глубоко свеча должна проникнуть за уровень, чтобы считалось sweep. Увеличение → требуется более глубокий прокол; уменьшение → достаточно небольшого прокола. 0..1, шаг 0.01."
+            value={config.liquidity?.sweepMinPenetrationAtr ?? DEFAULT_LIQUIDITY.sweepMinPenetrationAtr}
+            step="0.01"
+            min="0"
+            max="1"
+            onChange={(v) => setConfig((c) => ({ ...c, liquidity: { ...(c.liquidity ?? DEFAULT_LIQUIDITY), sweepMinPenetrationAtr: v } }))}
+          />
+          <NumberField
+            label="Время жизни уровня — свечей (liquidity.maxAgeCandles) — default 0"
+            description="Что контролирует: через сколько закрытых свечей уровень становится EXPIRED, если не снят/не пробит. 0 = expiry выключен (текущий scoring default, модуль default 750 остаётся для изолированных тестов). Увеличение → уровни живут дольше. 0..5000, целое."
+            value={config.liquidity?.maxAgeCandles ?? DEFAULT_LIQUIDITY.maxAgeCandles}
+            step="1"
+            min="0"
+            max="5000"
+            onChange={(v) => setConfig((c) => ({ ...c, liquidity: { ...(c.liquidity ?? DEFAULT_LIQUIDITY), maxAgeCandles: Math.round(v) } }))}
+          />
+        </div>
+      </section>
+
+      <section className="editorSection" style={{ border: "1px solid #fde68a", background: "#fffbeb" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h2>Блоки ордеров / Order Blocks</h2>
+          <button type="button" onClick={() => resetSection("Блоки ордеров / Order Blocks")} style={{ fontSize: 12 }}>
+            Сбросить секцию
+          </button>
+        </div>
+        <p className="sectionDescription">
+          Определяет формирование импульса, ожидание структурного подтверждения и жизненный цикл зоны. Зависит от displacement/FVG
+          примитивов (единые пороги) и от swing-окон.
+        </p>
+        <div className="fieldGrid">
+          <NumberField
+            label="Максимум свечей импульса (orderBlock.impulseMaxCandles) — default 3"
+            description="Что контролирует: сколько свечей подряд одного направления может входить в impulse grouping (начиная с displacement). Увеличение → допускаются более длинные импульсы; уменьшение → только короткие. 1..10, целое. Зависит от displacement."
+            value={config.orderBlock?.impulseMaxCandles ?? DEFAULT_ORDERBLOCK.impulseMaxCandles}
+            step="1"
+            min="1"
+            max="10"
+            onChange={(v) => setConfig((c) => ({ ...c, orderBlock: { ...(c.orderBlock ?? DEFAULT_ORDERBLOCK), impulseMaxCandles: Math.round(v) } }))}
+          />
+          <NumberField
+            label="Максимум ожидания подтверждения — свечей (orderBlock.confirmMaxCandles) — default 10"
+            description="Что контролирует: сколько закрытых свечей после конца импульса может ждать BOS/CHOCH подтверждения. Увеличение → дольше ждать; уменьшение → строже по времени. 1..100, целое."
+            value={config.orderBlock?.confirmMaxCandles ?? DEFAULT_ORDERBLOCK.confirmMaxCandles}
+            step="1"
+            min="1"
+            max="100"
+            onChange={(v) => setConfig((c) => ({ ...c, orderBlock: { ...(c.orderBlock ?? DEFAULT_ORDERBLOCK), confirmMaxCandles: Math.round(v) } }))}
+          />
+          <NumberField
+            label="Время жизни зоны — свечей (orderBlock.maxAgeCandles) — default 750"
+            description="Что контролирует: через сколько закрытых свечей после подтверждения зона становится EXPIRED. 0 = expiry выключен. Увеличение → зоны живут дольше; уменьшение → быстрее истекают. 0..5000, целое."
+            value={config.orderBlock?.maxAgeCandles ?? DEFAULT_ORDERBLOCK.maxAgeCandles}
+            step="1"
+            min="0"
+            max="5000"
+            onChange={(v) => setConfig((c) => ({ ...c, orderBlock: { ...(c.orderBlock ?? DEFAULT_ORDERBLOCK), maxAgeCandles: Math.round(v) } }))}
+          />
+          <NumberField
+            label="Контекст sweep — lookback свечей (orderBlock.sweepLookbackCandles) — default 5"
+            description="Что контролирует: сколько предыдущих закрытых свечей искать SWEPT ликвидность перед началом импульса для конfluence. 0 = конfluence выключен. Увеличение → учитывается более давний sweep; уменьшение → только недавний. 0..100, целое."
+            value={config.orderBlock?.sweepLookbackCandles ?? DEFAULT_ORDERBLOCK.sweepLookbackCandles}
+            step="1"
+            min="0"
+            max="100"
+            onChange={(v) => setConfig((c) => ({ ...c, orderBlock: { ...(c.orderBlock ?? DEFAULT_ORDERBLOCK), sweepLookbackCandles: Math.round(v) } }))}
+          />
+        </div>
+      </section>
+
       <section className="editorSection">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <h2>Оценка сигнала — веса факторов (Scoring)</h2>
@@ -709,7 +1011,6 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
         </div>
       </section>
 
-      {/* Filters */}
       <section className="editorSection">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <h2>Фильтры рынков</h2>
@@ -741,41 +1042,10 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
         </label>
       </section>
 
-      {/* Informational hardcoded */}
-      <details className="editorSection" style={{ padding: 12 }}>
-        <summary style={{ cursor: "pointer", fontWeight: 600 }}>Продвинутые параметры — Phase 3D (только просмотр)</summary>
-        <p className="muted" style={{ fontSize: 13, marginTop: 8 }}>
-          Следующие параметры сейчас фиксированы в SMC core и не настраиваются в Phase 3C. Сейчас эти параметры доступны
-          только для просмотра. Возможность настройки будет добавлена после отдельной проверки Phase 3D.
-        </p>
-        <div style={{ fontSize: 13, marginTop: 12 }}>
-          <p>
-            <b>Displacement (импульс):</b> определяет, насколько сильным должен быть импульс относительно ATR и где
-            закрывается импульсная свеча. Текущие значения: bodyAtrMin 1.5, rangeAtrMin 2.0, bullCloseLocMin 0.60,
-            bearCloseLocMax 0.40.
-          </p>
-          <p>
-            <b>Fair Value Gap (FVG):</b> определяет минимальный размер ценового дисбаланса и правила его жизненного цикла.
-            Текущие: minGapAtr 0.10, maxAgeCandles 0 (expiry выключен).
-          </p>
-          <p>
-            <b>Liquidity (ликвидность):</b> определяет допуск для equal highs/lows, подтверждение liquidity pool и
-            минимальную глубину sweep. Текущие: eqToleranceAtr 0.10, eqConfirmBars 2, sweepMinPenetrationAtr 0.05, maxAge 0.
-          </p>
-          <p>
-            <b>Order Blocks (блоки ордеров):</b> определяет правила поиска исходной свечи/зоны, импульсного подтверждения,
-            возраста и контекста sweep. Текущие: impulseMaxCandles 3, confirmMaxCandles 10, maxAge 750, sweepLookback 5.
-          </p>
-          <p>
-            <b>Dealing Range:</b> кроме eqBand и swing-окон, остальные правила диапазона фиксированы в core.
-          </p>
-        </div>
-      </details>
-
       <div className="editorSaveBar">
         <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
           <button type="button" onClick={resetAll} style={{ fontSize: 13 }}>
-            Сбросить все к defaults
+            Сбросить всё к defaults
           </button>
           {message && <span>{message}</span>}
         </div>

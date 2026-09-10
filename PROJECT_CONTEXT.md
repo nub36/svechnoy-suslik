@@ -2486,3 +2486,45 @@ SmcScoringConfig {
 **Admin / DB:** Advanced groups still NOT exposed in Admin until 3D-D; 1d remains blocked in Admin/API; no PostgreSQL mutation, no workers, no Signal Engine.
 
 **Deliverable:** ONE commit exact parent `2fc18ae` (this commit), push clean Phase3D branch only, STOP after 3D-C.
+
+==================================================
+38. SMART MONEY PHASE 3D-D — ADMIN + API FOR ALL 14 ADVANCED PARAMETERS (IMPLEMENTED) 10.09.2026
+==================================================
+
+**Baseline:** `980b4087ca163b6108dda0de1811267b8ed67f5e` (Phase 3D-C commit, parent `2fc18aeb09164dc36b7316a9295ad944c995122a`), branch `arena/01a08b68-svechnoy-suslik-phase3d-clean` (exact parent, no parallel history).
+**Scope:** Admin UI + API for all 14 advanced parameters through already accepted `validateSmartMoneyRuntime→validateSmartMoneyConfig→canonical validator`, no second model. No schema/Signal/alignment/chart/range math/core changes.
+
+**Problem (3D-C drop):** `components/admin/SmartMoneyStrategyEditor.tsx` показывал продвинутые параметры только read-only (`«Phase 3D (только просмотр)»`) — 14 полей не редактировались, старые DB без advanced выглядели пусто/blank. После 3D-D все 14 должны быть редактируемы, old config загружает canonical defaults, no migration.
+
+**Implementation — `components/admin/SmartMoneyStrategyEditor.tsx` (единственный изменённый runtime-файл, `app/api/admin/strategies/[id]/route.ts` уже корректен):**
+- Типы `SmartMoneyAdvancedDisplacement/Fvg/Liquidity/OrderBlock` + константы `DEFAULT_DISPLACEMENT 1.5/2.0/0.60/0.40`, `DEFAULT_FVG 0.10/0`, `DEFAULT_LIQUIDITY 0.10/2/0.05/0`, `DEFAULT_ORDERBLOCK 3/10/750/5` (единственный источник для UI fallback, backend остаётся authoritative).
+- `normalizeConfig(raw)` — для old DB без advanced групп дополняет каждую группу canonical defaults (проверка `typeof === "number"` → иначе default, no blank/NaN), covers `displacement 4 + fvg 2 + liquidity 4 + orderBlock 4 = 14`.
+- `validateLocal(config, timeframes, minExchanges)` — UI-валидация (client-side, backend authoritative): `minimumSignalScore 0..100 целое`, `swing/internal 1..500`, `freshBars ≥0`, `eqBand 0..0.5`, `weights Σ=100`, `timeframes []/1d` rejected, `minExchanges 1..5` + 14 advanced UI ranges: `displacement body 0..10 / range 0..10 / bull 0..1 / bear 0..1`, `fvg minGap 0..5 / maxAge 0..5000 целое`, `liquidity eqTol 0..1 / eqConfirm 0..20 целое / sweep 0..1 / maxAge 0..5000 целое`, `orderBlock impulse 1..10 целое / confirm 1..100 целое / maxAge 0..5000 целое / sweepLookback 0..100 целое`; integer checks via `Number.isInteger`.
+- **4 editable grouped sections (Russian):**
+  - `Импульс / Displacement` — 4 поля + описание shared top-level+OB (единый примитив), что контролирует/увеличение/уменьшение/диапазон/default/зависимость от `atrPeriod`.
+  - `Ценовой дисбаланс / FVG` — 2 поля: `minGapAtr` shared (top-level+OB), `maxAgeCandles` top-level only (не влияет на OB `hasFvgInImpulse` — interval check), 0=выключено.
+  - `Ликвидность` — 4 поля: eqTolerance/eqConfirmBars/sweepMin/maxAge (lifecycle, 0=выключено).
+  - `Блоки ордеров / Order Blocks` — 4 поля: `impulseMax 1..10 / confirmMax 1..100 / maxAge 0..5000 (0=выключено) / sweepLookback 0..100 (0=выключено)` + dependencies от displacement/FVG/swing.
+  - Каждая секция: кнопка `Сбросить секцию`, `NumberField` с `min/max/step` (body/range 0.1, bull/bear 0.05, fvg 0.05/1, liquidity 0.01/1, OB 1), русское объяснение what-it-controls/increase/decrease/range/default/dependencies, no profitability claims.
+- **Range note:** `position не clamp — may be <0 or >1, Discount/Premium, lifecycle audit open` — сохранено, no clamp change.
+- **Reset:** `resetSection(Импульс/FVG/Ликвидность/Order Blocks)` → `...DEFAULT_*`, `resetAll()` → `...DEFAULT_CONFIG` + `weights/filters/displacement/fvg/liquidity/orderBlock` + `timeframes ["1h"]`, preserves `enabled/status` (не трогает `setEnabled`).
+- **Save:** `body: JSON.stringify({enabled, minExchanges, timeframes, config})` — `config` содержит 4 groups 14 fields; `canSave = isDirty && errors.length===0`; `isDirty` via `useMemo(JSON.stringify)`.
+
+**API — `app/api/admin/strategies/[id]/route.ts` (проверен, изменений не требуется):**
+- Уже вызывает `validateSmartMoneyRuntime({config, timeframes, minExchanges})` ДО `prisma.strategy.update` (preserve `config` exact, reject malformed/unknown before update).
+- `allowedVerified = ["5m","15m","1h","4h"]` (verified Phase 3E), `1d` → `400 1d временно недоступен`, `[]`/mixed `1d` rejected, subsets `5m/15m/1h/4h` allowed via `validateSmartMoneyRuntime` + API guard; `Trend` unchanged; no `prisma.signal`.
+
+**Backward compat:**
+- Old config (no advanced, как DB id=2 DRAFT enabled=false ["1h"] minExchanges 3) → `normalizeConfig` shows 14 canonical defaults, `validateSmartMoneyConfig` ok, derived `1.5/2.0/0.6/0.4` etc; no migration, no blank/NaN.
+
+**Tests (new):**
+- `scripts/test-smc-phase3d-d.ts` **87/87**: §1 old→14 defaults + normalize + 4 groups present + read-only removed, §2 14 represented, §3 reset section/all + preserve enabled, §4 UI ranges 0..10/0..1/0..5/0..5000 etc, §5 integer, §6 prospective payload includes 4 groups 14 fields `1.6/2.1/0.7/0.3 etc` validates, §7 backend accepts valid all14 / rejects NaN/unknown `displecement`/nested unknown before update + API validates before prisma, §8 []/1d/mixed rejected + 5m/15m/1h/4h accepted, §9 Trend unchanged, §10 Range note `<0/>1` + lifecycle audit + evaluateSmc still works, §11 no Signal Engine exists claim (честно `не развёрнут`), §12 no DB mutation (no `PrismaClient`/`await prisma.`), §13 client validation via `validateLocal` not just HTML min/max.
+
+**Regression (strict, no || true):**
+- `test-smc-phase3d-c` 91/91, `test-smc-phase3d-config` 70/70, `test-smc-phase3d-b` 55/55, `test-smart-money` 62/62, `smart-money-diagnostic` 95/95, `test-admin-consistency` 84/84, `test-smc-*` 23/23/37/37/48/48/63/63/31/31/50/50/63/63/24/24/62/62, `tsc --noEmit` 0, `next build` compiled successfully, `git diff --check` 0, `edf3732` NOT ancestor, NO DB mutation (only in-memory, `prisma.strategy.update` only via existing API guard), Signal 0.
+
+**UI safety:** Suggested UI ranges not clamped at core (backend `finite≥0` authoritative, UI 0..10 etc only for operator comfort).
+
+**Status:** 3D-D implemented, **not final-ready** (Phase 3D-E regression/alignment/no-Signal still pending before final acceptance). Only `components/admin/SmartMoneyStrategyEditor.tsx`, `scripts/test-smc-phase3d-d.ts`, `PROJECT_CONTEXT.md` changed; `prisma/schema`, `Signal`, `alignment`, chart/range math не тронуты.
+
+**Deliverable:** ONE commit exact parent `980b408`, push only `arena/01a08b68-svechnoy-suslik-phase3d-clean`, STOP after 3D-D.
