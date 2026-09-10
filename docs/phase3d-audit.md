@@ -175,29 +175,38 @@ All are **A) actually existing hardcoded**. No **C) future invented** needed bey
      else EQUILIBRIUM → 0
      ```
      Where `zone` is derived from `position <0.5-eqBand` etc. (range.ts:316-322). So:
-     - `position = -0.91` → `<0.48` → `DISCOUNT` → **still awards LONG points** (10)
+     - `position = -0.91` → `<0.48` → `DISCOUNT` → **still awards LONG points** (10) with current implementation
      - `position = 2.24` → `>0.52` → `PREMIUM` → **awards SHORT points**
      - No clamp, no error, no `outsideRange` check in scoring — `outsideRange` is payload only, not gating.
-     - Scoring safely handles <0/>1, but **semantically treats deep outside as strong DISCOUNT/PREMIUM** — intentional breakout view, not neutral.
+     - Scoring safely handles <0/>1 **as code** (treats deep outside as strong DISCOUNT/PREMIUM), but **whether this should be desired product semantics is not established by scoring tests** (see point 9).
 
-8. **Are -0.91/2.24 evidence of ...?**
-   - **Intended breakout behavior per current code**, but **product decision ambiguous**:
-     - **Intended:** code explicitly allows unbounded and scores outside as directional (no invalidation on excursion).
-     - **Stale lifecycle concern:** range from an old BOS (e.g., 1d range `low/high` from weeks ago) could remain active while price has trended far outside, still awarding points even though that range may no longer be relevant. No `maxAge` or price-based invalidation exists for range (unlike FVG/OB/liquidity which have `maxAgeCandles`).
-     - **Missing invalidation:** No `close beyond range → close range` logic; only `CHOCH` or new `BOS` closes. So a strong breakout does not invalidate until opposite structure breaks.
-     - **Conclusion:** **Not a bug in current spec, but ambiguous product semantics.** Need product decision: should `outsideRange` for N bars trigger `replacedAt` or be treated as `EQUILIBRIUM`/`NO_ACTIVE`? The audit cannot decide — requires backtest/UX decision.
-   - **Evidence:** No existing test asserts `position` must be in [0,1]; tests treat -0.91/2.24 as valid (they were observed, not asserted as failure).
+8. **How is this covered by tests? (corrected after VPS review)**
+   - **RANGE MODULE representation contract — CONFIRMED / TESTED:**
+     - `scripts/test-smc-range.ts:686-750` explicitly tests unbounded position **без clamp**:
+       - price `201` on range `[100,200]` → `position = 1.01`, `outsideRange = true`, `zone = PREMIUM` (`"без clamp"`)
+       - price `-201` on mirrored range `[-200,-100]` → `position = -0.01`, `outsideRange = true`, `zone = DISCOUNT` (`"без clamp"`)
+       - plus boundaries: `100 → 0.0`, `200 → 1.0` with `outsideRange = false` (690-710). This proves representation intentionally permits and flags outside [0,1].
+     - Therefore **position <0 / >1 with outsideRange=true is intentionally tested at range-module level**.
+   - **SCORING MODULE tests — LIMITED:**
+     - `scripts/test-smc-scoring.ts:320-360` RANGE_POSITION cases currently test **only inside range**:
+       - `position 0.2, outsideRange false → DISCOUNT LONG +10`
+       - `position 0.8, outsideRange false → PREMIUM SHORT +10`
+       - `position 0.5, outsideRange false → EQUILIBRIUM 0`
+     - No scoring test provides `outsideRange = true` (e.g., `1.01` or `-0.01`) to assert whether outside should continue receiving directional points. Scoring implementation ignores `outsideRange` and uses `zone` only, so current tests **do not establish product desire** for outside scoring.
+   - **Conclusion:** range representation outside [0,1] is tested; scoring of outside is **implemented as zone-based award but not verified as desired** by tests.
 
-9. **Does any existing test encode intended semantics?**
-   - `lib/smc/range.ts` tests (not shown) and `scoring.ts` tests likely check zone thresholds, not that outside is disallowed. No test expects `outsideRange` to be false. Scoring tests check `RANGE_POSITION` with `pos` payload, not that it must be clamped.
+9. **Precise three-part conclusion (do NOT conflate):**
+   - **A) REPRESENTATION CONTRACT — CONFIRMED / TESTED:** `position=(price-low)/(high-low)` is intentionally **not clamped** (`lib/smc/range.ts:13-14 "БЕЗ clamp", 334-340`). `position <0` and `>1` are explicitly tested (`test-smc-range.ts:686-750`) and flagged via `outsideRange = position<0||>1` (`range.ts:340`). This is correct behavior.
+   - **B) CURRENT SCORING IMPLEMENTATION — CONFIRMED:** `scoring.ts:340-360` ignores `outsideRange`; `zone` still becomes `DISCOUNT` for below-range and `PREMIUM` for above-range; therefore **current implementation awards RANGE_POSITION directional points even when outside**. This is what observed `5m ≈ -0.91 → DISCOUNT LONG` and `1d ≈ 2.24 → PREMIUM SHORT` demonstrate.
+   - **C) PRODUCT / LIFECYCLE SEMANTICS — NOT YET DECIDED:** **Whether an old active range SHOULD remain scoring-relevant after price leaves [low,high] is not established by existing scoring tests.** Current lifecycle has **no `maxAge` or price-excursion invalidation** for dealing range (unlike FVG/OB/liquidity with `maxAgeCandles`). Only `CHOCH` and new `BOS` close/replace (`range.ts:278-290`); price excursion alone never invalidates. Decision requires explicit semantics (e.g., `outsideRange for N bars → expired` or `EQUILIBRIUM` or keep breakout view) and later backtest/out-of-sample evidence. **Do not clamp** — clamping would conceal lifecycle by hiding `outsideRange` and distorting `pos` payload.
 
 10. **Would clamping change semantics or conceal lifecycle problems?**
     - **Yes, both.** Clamping `position` to [0,1] would:
       - Change `zone` determination for outside values (e.g., -0.91 clamped to 0 → still DISCOUNT, same, but 2.24 clamped to 1 → still PREMIUM, same zone, but payload `pos` would be wrong).
       - More importantly, **conceal** that price is far outside — the `outsideRange` flag would become false, hiding that range may be stale. Better to keep unbounded and add explicit `outsideRange` handling or `maxAge` if needed.
-    - **Recommendation:** **DO NOT clamp** in this audit. If lifecycle is deemed stale, add explicit invalidation (e.g., `maxAge` or `N bars outside → expired`) rather than clamping.
+    - **Recommendation:** **DO NOT clamp** in this audit. If lifecycle is deemed stale, add explicit invalidation (e.g., `maxAge` or `N bars outside → expired`) rather than clamping. Preserve observed diagnostics `5m ≈ -0.91` and `1d ≈ 2.24` as evidence of current behavior.
 
-**Source locations for every conclusion:** `range.ts:260-290` (creation), `buildDealingRangeFromBos:160-175` (high/low), `closeActive:270-280` (replace), no price-based invalidation (search shows no `outsideRange` used to close), `range.ts:334-340` (unbounded position), `scoring.ts:340-360` (handles <0/>1), tests: implicit (no clamp test).
+**Source locations for every conclusion:** `range.ts:260-290` (creation), `buildDealingRangeFromBos:160-175` (high/low), `closeActive:270-280` (replace), no price-based invalidation (search shows no `outsideRange` used to close), `range.ts:334-340` (unbounded position), `scoring.ts:340-360` (handles <0/>1 via zone), `scripts/test-smc-range.ts:686-750` (1.01/-0.01 outsideRange true без clamp), `scripts/test-smc-scoring.ts:320-360` (0.2/0.8/0.5 outsideRange false only).
 
 ---
 
@@ -335,7 +344,10 @@ Group logically:
 
 - **No code change in this audit commit.**
 - **No DB writes, no workers, no Signal, no Prisma schema.**
-- **RANGE_POSITION conclusion:** outside [0,1] is **intended per current code** (unbounded, scored as DISCOUNT/PREMIUM), but **ambiguous product semantics** — likely needs explicit lifecycle decision (maxAge or outside→expired) rather than clamping. **Do not clamp.**
+- **RANGE_POSITION conclusion (precise after VPS review):**
+  - **A) REPRESENTATION CONTRACT — CONFIRMED:** `position=(price-low)/(high-low)` **не clamp** (`range.ts:13-14,334-340`), `<0` and `>1` explicitly tested (`scripts/test-smc-range.ts:686-750` `1.01`/`-0.01` `outsideRange=true` `без clamp`), `outsideRange` flags — correct.
+  - **B) CURRENT SCORING — CONFIRMED:** `scoring.ts:340-360` **ignores** `outsideRange`, uses `zone` only (`DISCOUNT`/`PREMIUM` still awarded outside); observed `5m ≈ -0.91` / `1d ≈ 2.24` demonstrate this current behavior. **No scoring test establishes whether this outside award is desired** (`test-smc-scoring.ts:320-360` only `0.2/0.8/0.5` `outsideRange=false`).
+  - **C) PRODUCT / LIFECYCLE — NOT YET DECIDED:** whether old active range should remain scoring-relevant after price leaves `[low,high]` not decided — **no `maxAge`/price-excursion invalidation** (`range.ts:278-290` only `CHOCH`/`BOS`), **do not clamp**, preserve diagnostics `5m ≈ -0.91` / `1d ≈ 2.24`, requires explicit semantics + backtest/OOS.
 - **Recommended sequence:** 3D-A → 3D-B → 3D-C → 3D-D → 3D-E (above).
 
 ---
