@@ -31,6 +31,7 @@ components/UserMenu.tsx
 components/admin/AdminNav.tsx
 components/admin/StrategyEditor.tsx
 components/chart/CandleChart.tsx
+lib/admin/overview.ts
 lib/analysis/analyze.ts
 lib/chart/history.ts
 lib/chart/params.ts

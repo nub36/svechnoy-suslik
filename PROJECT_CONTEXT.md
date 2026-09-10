@@ -1874,3 +1874,21 @@ VPS browser review 3af152c: acceptance в основном
 Тест scripts/test-admin-consistency.ts фиксирует всё
 это (42/42). ЭТАП B не начат; 3af152c/фикс в
 production не переносится без решения владельца.
+
+---
+
+## §31d. Фикс runtime-бага Overview (10.09.2026)
+
+VPS-ревью 8a1ae16 нашло реальный runtime-баг:
+рассинхрон деструктурирования Promise.all в
+app/admin/page.tsx (вставка universeMarkets-запроса
+без сдвига имён). Решение: lib/admin/overview.ts —
+хелпер buildOverviewQueries с константой
+OVERVIEW_QUERY_ORDER; тест на подставной БД проверяет
+позицию каждого запроса семантически (запись вызовов),
+перестановка ловится (проверено: swap → 58/63 exit 1).
+topUniverseRankFilter усилен gte:1 (эквивалентность
+isInTopUniverse), admin/data на общем хелпере.
+Урок: изменения Promise.all сопровождать сдвигом
+деструктурирования в том же коммите; позиционные
+списки — только через именованный проверяемый контракт.

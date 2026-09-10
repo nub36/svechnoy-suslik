@@ -1,6 +1,7 @@
 import AdminNav from "@/components/admin/AdminNav";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { topUniverseRankFilter } from "@/lib/universe";
 import { redirect } from "next/navigation";
 import {
   ALLOWED_TIMEFRAMES
@@ -118,10 +119,7 @@ async function loadHealthData() {
     prisma.asset.count({
       where: {
         enabled: true,
-        rank: {
-          lte: 100,
-          not: null
-        }
+        ...topUniverseRankFilter()
       }
     }),
     // исторический флаг Top-500 (факт БД)

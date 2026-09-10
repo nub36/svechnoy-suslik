@@ -61,10 +61,11 @@ export function isInTopUniverse(
 
 /** Условие Prisma для выборки universe-активов. */
 export function topUniverseRankFilter(): {
-  rank: { lte: number; not: null };
+  rank: { gte: number; lte: number; not: null };
 } {
   return {
     rank: {
+      gte: 1,
       lte: TOP_UNIVERSE_SIZE,
       not: null
     }

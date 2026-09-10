@@ -839,3 +839,34 @@ Signal Engine (после живого прогона Runtime на VPS).
   closed/open SQL-семантика Monitoring, рынки Top-100
   через rank-фильтр (без top500), честный empty-state
   уведомлений.
+
+
+### Фикс runtime-бага Overview по VPS-ревью 8a1ae16 (10.09.2026)
+- app/admin/page.tsx: при добавлении запроса
+  universeMarkets в 3af152c→8a1ae16 деструктурирование
+  Promise.all не было сдвинуто — assets получал счётчик
+  рынков Top-100 (~401), universeMarkets — счётчик
+  активов (100), markets — bare enabled-count,
+  activeMarkets вычислялся и не использовался;
+  исправлено: запросы Overview вынесены в проверяемый
+  хелпер lib/admin/overview.ts (OVERVIEW_QUERY_ORDER
+  фиксирует порядок; деструктурирование на странице
+  строго соответствует); дублирующий enabled-count и
+  неиспользуемый activeMarkets удалены;
+- семантика карточек: «Рынков Top-100» = enabled+
+  ACTIVE+SPOT+USDT рынки активов rank 1..100; «всего
+  активных в БД» = те же фильтры без ограничения
+  Top-100; Top активов = Asset.count universe;
+- lib/universe.ts: topUniverseRankFilter теперь
+  { gte: 1, lte: 100, not: null } — семантически
+  эквивалентен isInTopUniverse; admin/data переведён
+  с inline-фильтра на хелпер;
+- тесты: test-admin-consistency 63/63 — позиции
+  Promise.all проверяются на ПОДСТАВНОЙ БД с записью
+  вызовов (перестановка запросов ловится: проверено
+  обратной перестановкой — 58/63, exit 1); границы
+  rank 1/100 проходят, 0/-1/101/null — нет; ровно 2
+  счётчика рынков; activeMarkets отсутствует;
+- tsc: ошибок в app/lib/components нет; 12 TS7006 в
+  scripts/rank-assets.ts — известные, запрещены к
+  правке правилом 34, логика не менялась с этапа A.

@@ -21,6 +21,11 @@ import {
   TOP_UNIVERSE_SIZE,
   topUniverseRankFilter
 } from "../lib/universe";
+import {
+  buildOverviewQueries,
+  OVERVIEW_QUERY_ORDER,
+  type OverviewDb
+} from "../lib/admin/overview";
 
 let passed = 0;
 let total = 0;
@@ -58,13 +63,25 @@ const rankFilter = topUniverseRankFilter();
 
 ok(
   JSON.stringify(rankFilter) ===
-    '{"rank":{"lte":100,"not":null}}',
-  "universe: фильтр rank 1..100 (не top500)"
+    '{"rank":{"gte":1,"lte":100,"not":null}}',
+  "universe: фильтр rank 1..100 с нижней границей (не top500)"
 );
 
 ok(
+  isInTopUniverse(1) === true,
+  "universe: GRANITSA rank=1 входит"
+);
+ok(
   isInTopUniverse(100) === true,
   "universe: GRANITSA rank=100 входит"
+);
+ok(
+  isInTopUniverse(0) === false,
+  "universe: GRANITSA rank=0 не входит"
+);
+ok(
+  isInTopUniverse(-1) === false,
+  "universe: GRANITSA rank=-1 не входит"
 );
 ok(
   isInTopUniverse(101) === false,
@@ -199,7 +216,7 @@ ok(
 const overview = read("app/admin/page.tsx");
 
 ok(
-  overview.includes(
+  read("lib/admin/overview.ts").includes(
     "asset: topUniverseRankFilter()"
   ),
   "overview: рынки Top-100 считаются через rank-фильтр universe"
@@ -243,7 +260,306 @@ ok(
   "notifications: нет выдуманных каналов/токенов"
 );
 
-/* ---------- итог ---------- */
+/* ---------- Overview: семантика Promise.all ----------
+ *
+ * Подставная БД ЗАПОМИНАЕТ каждый вызов; тест
+ * доказывает позицию КАЖДОГО запроса в promises
+ * (перестановка местами не может пройти зелёной):
+ * позиция 1 = Asset.count Top-100, позиция 2 =
+ * Market.count с rank-фильтром universe, позиция 3 =
+ * Market.count ACTIVE/SPOT/USDT БЕЗ ограничения
+ * Top-100, и т.д. по OVERVIEW_QUERY_ORDER.
+ */
 
-console.log(`Itog: ${passed}/${total}`);
-process.exit(passed === total ? 0 : 1);
+type RecordedCall = {
+  model: string;
+  op: string;
+  arg?: unknown;
+};
+
+function makeFakeDb(): {
+  db: OverviewDb;
+  calls: RecordedCall[];
+} {
+  const calls: RecordedCall[] = [];
+
+  const db: OverviewDb = {
+    strategy: {
+      findMany(args) {
+        calls.push({
+          model: "Strategy",
+          op: "findMany",
+          arg: args
+        });
+
+        return Promise.resolve([
+          {
+            id: 1,
+            slug: "trend-suslik",
+            name: "Трендовый Суслик",
+            description: null,
+            version: 1,
+            enabled: true,
+            status: "PUBLISHED",
+            timeframes: ["1h"],
+            minExchanges: 2
+          }
+        ]);
+      }
+    },
+
+    asset: {
+      count(args) {
+        calls.push({
+          model: "Asset",
+          op: "count",
+          arg: args
+        });
+
+        return Promise.resolve(100);
+      }
+    },
+
+    market: {
+      count(args) {
+        calls.push({
+          model: "Market",
+          op: "count",
+          arg: args
+        });
+
+        return Promise.resolve(401);
+      },
+      findMany(args) {
+        calls.push({
+          model: "Market",
+          op: "findMany",
+          arg: args
+        });
+
+        return Promise.resolve([
+          { exchange: "BINANCE" }
+        ]);
+      }
+    },
+
+    signal: {
+      count(args) {
+        calls.push({
+          model: "Signal",
+          op: "count",
+          arg: args
+        });
+
+        return Promise.resolve(0);
+      }
+    },
+
+    candle: {
+      count() {
+        calls.push({
+          model: "Candle",
+          op: "count"
+        });
+
+        return Promise.resolve(14731);
+      }
+    },
+
+    $queryRaw(strings) {
+      calls.push({
+        model: "$queryRaw",
+        op: "raw",
+        arg: strings.join("")
+      });
+
+      return Promise.resolve([
+        { t: new Date("2026-09-10T09:00:00Z") }
+      ]);
+    }
+  };
+
+  return { db, calls };
+}
+
+async function checkOverviewSemantics(): Promise<void> {
+  const { db, calls } = makeFakeDb();
+
+  const { names, promises } =
+    buildOverviewQueries(db);
+
+  // Имена и длина зафиксированы.
+  ok(
+    names.length === promises.length,
+    "overview: число имён = числу promises"
+  );
+  ok(
+    JSON.stringify(names) ===
+      JSON.stringify([
+        "strategies",
+        "assetsTop100",
+        "marketsTop100",
+        "marketsActiveTotal",
+        "candles",
+        "signalsActive",
+        "exchangesDistinct",
+        "lastClosed1h"
+      ]),
+    "overview: порядок запросов зафиксирован константой"
+  );
+
+  const results = await Promise.all(promises);
+
+  // Позиция 0: стратегии.
+  ok(
+    calls[0].model === "Strategy" &&
+      calls[0].op === "findMany" &&
+      Array.isArray(results[0]) &&
+      results[0][0]?.slug === "trend-suslik",
+    "overview[0]: strategies получает Strategy.findMany"
+  );
+
+  // Позиция 1: ТОЧНО Asset.count Top-100 (не рынки!).
+  const assetWhere = (calls[1]?.arg as {
+    where?: Record<string, unknown>;
+  })?.where;
+  ok(
+    calls[1].model === "Asset" &&
+      calls[1].op === "count" &&
+      results[1] === 100,
+    "overview[1]: assets получает Asset.count (Top-100)"
+  );
+  ok(
+    JSON.stringify(assetWhere?.rank) ===
+      '{"gte":1,"lte":100,"not":null}' &&
+      assetWhere?.enabled === true,
+    "overview[1]: where = enabled + rank 1..100 (gte/lte)"
+  );
+
+  // Позиция 2: Market.count С rank-фильтром universe.
+  const top100Where = (calls[2]?.arg as {
+    where?: Record<string, unknown>;
+  })?.where as Record<string, unknown>;
+  const top100Asset =
+    top100Where?.asset as Record<string, unknown>;
+  ok(
+    calls[2].model === "Market" &&
+      calls[2].op === "count",
+    "overview[2]: universeMarkets получает Market.count"
+  );
+  ok(
+    JSON.stringify(top100Asset?.rank) ===
+      '{"gte":1,"lte":100,"not":null}',
+    "overview[2]: фильтр asset.rank 1..100 (universe, не top500)"
+  );
+  ok(
+    top100Where?.enabled === true &&
+      top100Where?.status === "ACTIVE" &&
+      top100Where?.quote === "USDT" &&
+      top100Where?.marketType === "SPOT",
+    "overview[2]: enabled + ACTIVE + SPOT + USDT"
+  );
+
+  // Позиция 3: Market.count БЕЗ ограничения Top-100,
+  // но с ACTIVE/SPOT/USDT (total active, не bare enabled).
+  const totalWhere = (calls[3]?.arg as {
+    where?: Record<string, unknown>;
+  })?.where as Record<string, unknown>;
+  ok(
+    calls[3].model === "Market" &&
+      calls[3].op === "count",
+    "overview[3]: total активных получает Market.count"
+  );
+  ok(
+    totalWhere?.enabled === true &&
+      totalWhere?.status === "ACTIVE" &&
+      totalWhere?.quote === "USDT" &&
+      totalWhere?.marketType === "SPOT" &&
+      totalWhere?.asset === undefined,
+    "overview[3]: total = ACTIVE/SPOT/USDT без asset-фильтра"
+  );
+
+  // Ровно ДВА счётчика рынков: Top-100 + total.
+  // (отсутствие третьего = нет дубля enabled-count
+  //  и неиспользуемого activeMarkets)
+  ok(
+    calls.filter(
+      (c) =>
+        c.model === "Market" && c.op === "count"
+    ).length === 2,
+    "overview: ровно 2 счётчика рынков (нет дублей/неиспользуемых)"
+  );
+
+  // Позиция 4/5: свечи и сигналы.
+  ok(
+    calls[4].model === "Candle" &&
+      calls[4].op === "count" &&
+      results[4] === 14731,
+    "overview[4]: candleCount получает Candle.count"
+  );
+  ok(
+    calls[5].model === "Signal" &&
+      calls[5].op === "count" &&
+      (calls[5].arg as { where?: unknown })?.where !=
+        null &&
+      results[5] === 0,
+    "overview[5]: signals получает Signal.count"
+  );
+
+  // Позиция 6: биржи из ДАННЫХ БД.
+  ok(
+    calls[6].model === "Market" &&
+      calls[6].op === "findMany" &&
+      results[6][0]?.exchange === "BINANCE",
+    "overview[6]: exchanges получает Market.findMany"
+  );
+
+  // Позиция 7: последняя ЗАКРЫТАЯ 1h свеча.
+  ok(
+    calls[7].model === "$queryRaw" &&
+      String(calls[7].arg).includes(
+        "closed = true"
+      ) &&
+      String(calls[7].arg).includes(
+        "timeframe = '1h'"
+      ) &&
+      results[7][0]?.t instanceof Date,
+    "overview[7]: lastClosed1h — $queryRaw по закрытой 1h"
+  );
+}
+
+/* ---------- страница: потребление контракта ---------- */
+
+const overviewPage = read("app/admin/page.tsx");
+
+ok(
+  overviewPage.includes(
+    "const { promises } =\n      buildOverviewQueries(prisma);"
+  ),
+  "overview-page: запросы берутся из проверяемого хелпера"
+);
+
+// Деструктурирование строго в порядке
+// OVERVIEW_QUERY_ORDER — иначе позиции поедут.
+// (комментарии внутри списка вырезаются перед проверкой)
+const pageNoComments = overviewPage.replace(
+  /\/\/[^\n]*/g,
+  ""
+);
+const destructureRe =
+  /const \[\s*strategies,\s*assets,\s*universeMarkets,\s*markets,\s*candleCount,\s*signals,\s*exchanges,\s*lastClosedRows\s*\] = await Promise\.all\(promises\);/;
+ok(
+  destructureRe.test(pageNoComments),
+  "overview-page: деструктурирование = порядок хелпера (8 позиций)"
+);
+ok(
+  !overviewPage.includes("activeMarkets"),
+  "overview-page: неиспользуемого activeMarkets больше нет"
+);
+
+/* ---------- итог (после async-проверок) ---------- */
+
+checkOverviewSemantics().then(() => {
+  console.log(`Itog: ${passed}/${total}`);
+  process.exit(passed === total ? 0 : 1);
+});

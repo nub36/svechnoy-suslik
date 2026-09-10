@@ -1,7 +1,7 @@
 import Link from "next/link";
 import AdminNav from "@/components/admin/AdminNav";
 import { auth } from "@/auth";
-import { topUniverseRankFilter } from "@/lib/universe";
+import { buildOverviewQueries } from "@/lib/admin/overview";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import {
@@ -62,88 +62,31 @@ export default async function AdminPage() {
   try {
     const started = Date.now();
 
+    // Порядок запросов зафиксирован в
+    // lib/admin/overview.ts (OVERVIEW_QUERY_ORDER) и
+    // проверяется тестом на подставной БД; деструктурирование
+    // ниже строго соответствует этому порядку:
+    const { promises } =
+      buildOverviewQueries(prisma);
+
     const [
+      // 1 strategies
       strategies,
+      // 2 assetsTop100
       assets,
+      // 3 marketsTop100
       universeMarkets,
+      // 4 marketsActiveTotal (все активные SPOT USDT БД)
       markets,
+      // 5 candles
       candleCount,
+      // 6 signalsActive
       signals,
-      activeMarkets,
+      // 7 exchangesDistinct
       exchanges,
+      // 8 lastClosed1h
       lastClosedRows
-    ] = await Promise.all([
-      prisma.strategy.findMany({
-        orderBy: [
-          { slug: "asc" },
-          { version: "desc" }
-        ]
-      }),
-
-      // рынки ОСНОВНОГО Top-100 universe (rank 1..100)
-      prisma.market.count({
-        where: {
-          enabled: true,
-          status: "ACTIVE",
-          quote: "USDT",
-          marketType: "SPOT",
-          asset: topUniverseRankFilter()
-        }
-      }),
-
-      // основной universe Top-100 (lib/universe.ts)
-      prisma.asset.count({
-        where: {
-          enabled: true,
-          ...topUniverseRankFilter()
-        }
-      }),
-
-      prisma.market.count({
-        where: {
-          enabled: true
-        }
-      }),
-
-      prisma.candle.count(),
-
-      prisma.signal.count({
-        where: {
-          status: "ACTIVE"
-        }
-      }),
-
-      // точный смысл карточки «Рынков»
-      prisma.market.count({
-        where: {
-          enabled: true,
-          status: "ACTIVE",
-          quote: "USDT",
-          marketType: "SPOT"
-        }
-      }),
-
-      // факт о ДАННЫХ в БД, не о доступности API бирж
-      prisma.market.findMany({
-        where: {
-          enabled: true,
-          status: "ACTIVE",
-          quote: "USDT",
-          marketType: "SPOT"
-        },
-        select: { exchange: true },
-        distinct: ["exchange"]
-      }),
-
-      // последняя ЗАКРЫТАЯ 1h свеча для worker-статуса
-      (prisma.$queryRaw<{ t: Date | null }[]>`
-        SELECT MAX(c."openTime") FILTER (
-          WHERE c.closed = true
-        ) AS t
-        FROM "Candle" c
-        WHERE c.timeframe = '1h'
-      `) as unknown as { t: Date | null }[]
-    ]);
+    ] = await Promise.all(promises);
 
     data = {
       strategies,
