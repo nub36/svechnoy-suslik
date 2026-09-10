@@ -36,7 +36,7 @@ import {
 import {
   parseSmartMoneyArgs,
   validateCliArgs,
-} from "./smart-money-readonly";
+} from "./smart-money-cli-args";
 import { aggregateAssetGroup } from "../lib/strategies/runtime";
 import { validateTrendSuslikConfig } from "../lib/strategies/config";
 import { runTrendSuslik } from "../lib/strategies/trend-suslik";
@@ -514,6 +514,25 @@ console.log("Smart Money — Phase 3B checks");
     p12.args.symbol === "BTC" && p12.args.timeframe === "1h",
     "parser: смешанная форма --symbol=BTC + --timeframe 1h"
   );
+}
+
+
+// 24 pure parser module is side-effect-free: import does not launch CLI/DB
+{
+  const pure = readFileSync("scripts/smart-money-cli-args.ts", "utf-8");
+  ok(!pure.includes("PrismaClient") && !pure.includes("prisma.") && !pure.includes("$disconnect"), "pure parser: no Prisma/DB imports");
+  ok(!pure.includes("process.exit") && !pure.includes("process.argv"), "pure parser: no process.exit / argv side effect (кроме параметра функции)");
+  // The pure module exports parseSmartMoneyArgs/validateCliArgs and is importable without DB
+  ok(pure.includes("export function parseSmartMoneyArgs") && pure.includes("export function validateCliArgs"), "pure parser: exports parseSmartMoneyArgs + validateCliArgs");
+  // Importing pure module did not trigger CLI main (this file itself imported it and still ran — if it had side effect we'd have exited)
+  ok(typeof parseSmartMoneyArgs === "function" && typeof validateCliArgs === "function", "pure parser: import does not launch CLI (functions available)");
+  // CLI теперь импортирует из pure модуля и не экспортирует парсер (или по крайней мере не содержит мёртвого кода getArg/hasFlag/includes guard)
+  const cliTxt = readFileSync("scripts/smart-money-readonly.ts", "utf-8");
+  ok(cliTxt.includes('from "./smart-money-cli-args"'), "CLI imports parser from pure module");
+  ok(!cliTxt.includes("function getArg") && !cliTxt.includes("function hasFlag") && !cliTxt.includes("function parseArgs()"), "dead getArg/hasFlag/parseArgs удалены из CLI");
+  ok(!cliTxt.includes('includes("smart-money-readonly")') && !cliTxt.includes("includes('smart-money-readonly')"), "fragile substring guard удалён из CLI");
+  // Pure module itself is not importing CLI (no circular)
+  ok(!pure.includes("smart-money-readonly"), "pure parser не импортирует CLI (нет цикла)");
 }
 
 {
