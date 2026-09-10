@@ -2332,3 +2332,57 @@ TODO/AUDIT before final Smart Money acceptance — RANGE_POSITION: during real d
 8. **Тест-план (docs §8):** old-config эквивалентность, канонические дефолты, эффект каждого параметра, malformed/boundary/dependencies, deterministic/no-lookahead/CLOSED/cannot-evaluate/multi-TF+exchange/Trend неизменён/no Signal/no ancestry + RANGE_POSITION 4 кейса.
 
 Файлы аудита изменены в этом коммите: `docs/phase3d-audit.md` (новый) + этот §34.
+
+==================================================
+35. SMART MONEY PHASE 3D-A — CANONICAL ADVANCED CONFIG CONTRACT (IMPLEMENTED) 10.09.2026
+==================================================
+
+**Baseline:** `b06943112ff0c1aa9a4a8c23f474b0aa4c203076` (clean Phase3D branch, parent `b60de921931afe9920b4635fd7374f142d8921e6`; NOT the parallel SuslikChart chain `2c6b166`).
+**Scope:** Config contract + canonical resolution/default mechanism only. No Admin UI, no API acceptance, no Prisma/DB, no workers, no Signal.
+**Files:** `lib/smc/config.ts` (contract + resolver + validation + deriveSubConfigs wiring top-level), `scripts/test-smc-phase3d-config.ts` (61 tests).
+
+**Exact config shape (optional, backward-compatible):**
+```ts
+SmcScoringConfig {
+  // existing: tf, minimumScore, swingLeft/Right, internalLeft/Right, atrPeriod, freshBars, eqBand, weights
+  displacement?: { bodyAtrMin?: number; rangeAtrMin?: number; bullCloseLocMin?: number; bearCloseLocMax?: number }
+  fvg?: { minGapAtr?: number; maxAgeCandles?: number }
+  liquidity?: { eqToleranceAtr?: number; eqConfirmBars?: number; sweepMinPenetrationAtr?: number; maxAgeCandles?: number }
+  orderBlock?: { impulseMaxCandles?: number; confirmMaxCandles?: number; maxAgeCandles?: number; sweepLookbackCandles?: number }
+}
+```
+Не вводит dealing-range lifecycle параметры (phase 3D defer).
+
+**Canonical fallback values (единственный источник — defaultXConfig + scoring override):**
+- `displacement 1.5 / 2.0 / 0.6 / 0.4` (`defaultDisplacementConfig tf` + atrPeriod)
+- `fvg 0.10 / maxAge 0` — module default 500 остаётся для изолированных FVG-тестов, scoring fallback MUST be 0 (как и до Phase3D: `config.ts:195-199` override 0)
+- `liquidity 0.10 / 2 / 0.05 / maxAge 0` — module default 750, scoring fallback MUST be 0
+- `orderBlock 3 / 10 / 750 / 5` (`defaultOrderBlockConfig`)
+Проверить `scripts/test-smc-phase3d-config.ts` §1 — модуль defaults 500/750 остаются, scoring resolved 0.
+
+**Canonical resolution:** `resolveSmcAdvancedConfig(config)` — единственная чистая функция, покрывает 4 группы, дополняет недостающие поля fallback'ами, не дублирует magic constants. `deriveSubConfigs` уже использует resolved значения для top-level `displacement/fvg/liquidity/orderBlockSwing/orderBlockInternal` (старые конфиги → exact old behavior, т.к. fallback === hardcoded).
+
+**Validation (fail-closed, в `assertValidSmcScoringConfig`):**
+- `displacement.*` finite >=0 (каждый если задан)
+- `fvg.minGapAtr` finite >=0; `fvg.maxAgeCandles` integer >=0
+- `liquidity.eqToleranceAtr/sweepMinPenetrationAtr` finite >=0; `eqConfirmBars/maxAge` integer >=0
+- `orderBlock.impulseMaxCandles` integer 1..10; `confirmMaxCandles` integer 1..100; `maxAge/sweepLookback` integer >=0
+- malformed (NaN/Infinity/negative/fractional/0/11/101) → `SmcInputError`; edge 0/1/10/100 валидны. Границы — из существующих `assertValid*` модулей, без изобретения новых upper bounds (Admin UX bound 0..5000 — только UI рекомендация).
+
+**NO RANGE LIFECYCLE CHANGE:** representation <0/>1 не clamp, scoring outsideRange игнорирует и начисляет via zone, lifecycle без maxAge/price-invalidation, `5m ≈ -0.91 / 1d ≈ 2.24` сохранены — verified `test-smc-phase3d-config.ts` §5 и `test-smc-range` 50/50.
+
+**Exact semantic equivalence proofs (`test-smc-phase3d-config.ts` 61/61):**
+1. Old config (no Phase3D fields) → resolved `1.5/2.0/0.6/0.4`, `0.1/0`, `0.1/2/0.05/0`, `3/10/750/5` (`deriveSubConfigs` identical).
+2. Partial `{displacement:{bodyAtrMin:2.5}}` → остальные `2.0/0.6/0.4` fallback; аналогично для fvg/liquidity/orderBlock + empty groups.
+3. Malformed → `SmcInputError` (26 кейсов) + edge valid.
+4. Deterministic fixture 120 свечей: `deriveSubConfigs(old) ≡ explicit defaults` serialized, `evaluateSmc(old) ≡ explicit` deep identical, future-injection `full(T) ≡ prefix(T)` для обоих, `resolve` identical, scores/direction identical.
+5. Range regression 5a/b outsideRange true still LONG/SHORT 10.
+6. Trend `validateTrendSuslikConfig` still ok.
+7. Signal: `lib/smc/config.ts` без `prisma.signal`; old resolved `1.5 === OB hardcoded 1.5` (no divergence for old); custom `3.0` demonstrates divergence — **deferred to 3D-B as documented**.
+
+**What remains intentionally deferred to 3D-B (documented):**
+- `findOrderBlocks` внутри всё ещё хардкодит `1.5/2.0/0.6/0.4` и `minGap 0.1` (`lib/smc/order-blocks.ts:260`); top-level displacement/FVG уже резолвятся, но OB internal остаётся divergent для кастомных значений. Для старых конфигов fallback === hardcoded, поэтому observable semantics идентична; для кастомных `3.0` divergence существует и устраняется в 3D-B пробросом resolved displacement/FVG в OB sub-evaluation. Типы/plumbing без семантического изменения допустимы, но не введены в 3D-A чтобы держать scope minimal (`lib/smc/config.ts` only).
+
+**Tests (песочница):** `test-smc-phase3d-config.ts` 61/61, `test-smc-scoring` 63/63, `test-smc-range` 50/50, `test-smc-evaluate` 31/31, `smart-money` 62/62, `smart-money-readonly --self-test` 43/43, `test-admin-consistency` 84/84, `tsc --noEmit` 0, `git diff --check` 0.
+**Signal ancestry:** `git merge-base --is-ancestor edf3732 HEAD` → NOT ancestor (проверено).
+**DB:** No `prisma.strategy.*`/`prisma.signal.*`, no workers, Strategy id=2 остаётся `DRAFT enabled=false timeframes=["1h"]`, Signal 0→0 (read-only).
