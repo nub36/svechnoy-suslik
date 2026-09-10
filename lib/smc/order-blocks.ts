@@ -23,7 +23,14 @@
  *      участвует в matching, а последующий reversal-BOS
  *      matches impulse и его confirmedAt (позже CHOCH) является
  *      confirmedAt OB. Failed CHOCH (reclaim) такой BOS в окне
- *      не порождает → OB нет.
+ *      не порождает → OB нет. CAUSAL CONSTRAINT для
+ *      reversal-confirming BOS (BOS, непосредственно следующий
+ *      за CHOCH того же направления в хронологии events): он
+ *      матчит только impulse, принадлежащий reversal-ноге, —
+ *      impulse не закончился ДО CHOCH-свечи
+ *      (impulse.endIndex >= chochIdx); pre-CHOCH impulse
+ *      прежней структуры не переиспользуется лишь потому, что
+ *      попал в окно confirmMaxCandles.
  *   4) temporal: confirmation candle в пределах
  *      obConfirmMaxCandles CLOSED boundaries после impulseEnd
  *      (eventIdx - impulseEndIdx <= max, eventIdx >= impulseEndIdx).
@@ -79,9 +86,17 @@
  *   интервале [clusterStart .. impulseEnd] и fvg.confirmedAt <=
  *   structureConfirmedAt (будущие FVG исключены);
  *   hasLiquiditySweepBeforeImpulse: существует SWEPT level
- *   ПРОТИВОПОЛОЖНОЙ стороны (bullish → SELL_SIDE) с resolvedAt
- *   <= impulseStart.openTime и в окне sweepLookbackCandles
- *   последующих CLOSED свеч перед impulseStart.
+ *   ПРОТИВОПОЛОЖНОЙ стороны (bullish → SELL_SIDE), чья
+ *   resolving-свеча (resolvedByCandleTime = её openTime →
+ *   канонический индекс CLOSED-массива horizon) строго
+ *   ПРЕДШЕСТВУЕТ impulseStart, а индексная дистанция
+ *   distance = impulseStartIndex − sweepCandleIndex лежит в
+ *   [1 .. sweepLookbackCandles] (lookback = число CLOSED свеч;
+ *   семантика канонических индексов, НЕ wall-clock: таймгэпы
+ *   истории на eligible не влияют); дополнительно resolvedAt <=
+ *   impulseStart.openTime; resolvedByCandleTime не маппится на
+ *   horizon → level не eligible; sweepLookbackCandles = 0 →
+ *   confluence выключена (всегда false).
  *
  * DUPLICATES: не merge; каждый matched event — отдельный OB с
  * отдельным key; overlapping зоны остаются раздельными events.
@@ -119,7 +134,6 @@ import {
   validateAndPrepare
 } from "./validate";
 import {
-  SMCTIMEFRAME_MS,
   SmcCandle,
   SmcDirection,
   SmcLayer,
@@ -142,7 +156,9 @@ export interface SmcOrderBlockConfig {
   confirmMaxCandles: number;
   /** INITIAL ENGINEERING DEFAULT / HYPOTHESIS: 750; 0 = выкл. */
   maxAgeCandles: number;
-  /** INITIAL ENGINEERING DEFAULT / HYPOTHESIS: 5 */
+  /** INITIAL ENGINEERING DEFAULT / HYPOTHESIS: 5. Семантика —
+   * число CLOSED свеч (канонические индексы) между
+   * resolving-свечей sweep и impulseStart; 0 = confluence выкл. */
   sweepLookbackCandles: number;
 }
 
@@ -291,7 +307,6 @@ export function findOrderBlocks(
 ): SmcOrderBlock[] {
   assertValidOrderBlockConfig(config);
 
-  const durationMs = SMCTIMEFRAME_MS[config.tf];
   const closeMs = candles.map((candle) =>
     candle.effectiveCloseTime.getTime()
   );
@@ -445,6 +460,18 @@ export function findOrderBlocks(
             top = Math.max(top, candle.high);
             j -= 1;
           }
+
+          // Defensive invariant: канонический OHLC (validate:
+          // high >= max(open,close), low <= min(open,close)) для
+          // opposite-свечи гарантирует high > low каждой свечи
+          // кластера, т.е. top > bottom СТРОГО — знаменатель
+          // maxPenetrationFraction (top−bottom) не может быть 0.
+          // Защита от вырожденного кластера (например, direct
+          // вызов findOrderBlocks вне validate) без epsilon:
+          // top <= bottom → candidate отвергается.
+          if (!(top > bottom)) {
+            hasCandidate = false;
+          }
         }
       }
 
@@ -472,6 +499,45 @@ export function findOrderBlocks(
   const confirmers = structure.events.filter(
     (event: SmcStructureEvent) => event.type === "BOS"
   );
+
+  // Reversal-confirmation BOS: BOS, непосредственно следующий
+  // (в хронологическом events — один event максимум за свечу)
+  // за CHOCH ТОГО ЖЕ направления. Из REVERSAL_PENDING_X
+  // возможны ровно два перехода — CHOCH_INVALIDATED или BOS X,
+  // поэтому "prev = CHOCH X" детерминированно идентифицирует
+  // reversal-подтверждение без изменения FSM. Значение —
+  // канонический индекс CHOCH-свечи (или null, если BOS не
+  // reversal-confirmation / CHOCH-свеча вне horizon).
+  const reversalChochIdxByEventKey = new Map<
+    string,
+    number | null
+  >();
+
+  for (let i = 0; i < structure.events.length; i++) {
+    const event = structure.events[i];
+
+    if (event.type !== "BOS") {
+      continue;
+    }
+
+    const prev = i > 0 ? structure.events[i - 1] : null;
+    const choch =
+      prev !== null &&
+      prev.type === "CHOCH" &&
+      prev.dir === event.dir
+        ? prev
+        : null;
+    const chochIdx =
+      choch === null
+        ? null
+        : indexByOpen.get(choch.eventTime.getTime());
+
+    reversalChochIdxByEventKey.set(
+      event.key,
+      chochIdx === undefined ? null : chochIdx
+    );
+  }
+
   const out: SmcOrderBlock[] = [];
 
   const hasFvgInInterval = (
@@ -509,24 +575,62 @@ export function findOrderBlocks(
 
   const hasOppositeSweepBefore = (
     dir: SmcDirection,
-    impulseStartOpenMs: number
+    impulseStartIndex: number
   ): boolean => {
+    // sweepLookbackCandles = 0 → confluence выключена.
+    if (config.sweepLookbackCandles === 0) {
+      return false;
+    }
+
     const wantedSide =
       dir === "up" ? "SELL_SIDE" : "BUY_SIDE";
-    const maxAgeMs =
-      config.sweepLookbackCandles * durationMs;
 
-    return liquidity.some(
-      (level) =>
-        level.state === "SWEPT" &&
-        level.side === wantedSide &&
-        level.resolvedAt !== null &&
-        level.resolvedAt.getTime() <=
-          impulseStartOpenMs &&
-        impulseStartOpenMs -
-          level.resolvedAt.getTime() <=
-          maxAgeMs
-    );
+    for (const level of liquidity) {
+      if (
+        level.state !== "SWEPT" ||
+        level.side !== wantedSide ||
+        level.resolvedAt === null ||
+        level.resolvedByCandleTime === null
+      ) {
+        continue;
+      }
+
+      // (1) sweep разрешён не позднее границы перед
+      // impulseStart.
+      if (
+        level.resolvedAt.getTime() >
+        openMs[impulseStartIndex]
+      ) {
+        continue;
+      }
+
+      // (2) resolving-свеча по каноническому индексу
+      // (resolvedByCandleTime = её openTime); НЕ маппится на
+      // horizon-массив → level не eligible. wall-clock
+      // миллисекунды для дистанции НЕ используются.
+      const sweepIdx = indexByOpen.get(
+        level.resolvedByCandleTime.getTime()
+      );
+
+      if (sweepIdx === undefined) {
+        continue;
+      }
+
+      // (3) distance = impulseStartIndex − sweepCandleIndex;
+      // eligible при distance ∈ [1 .. sweepLookbackCandles]
+      // (lookback=5 ⇒ sweep-свеча — одна из предыдущих 5
+      // CLOSED свеч перед impulseStart; окно включительно).
+      const distance = impulseStartIndex - sweepIdx;
+
+      if (
+        distance >= 1 &&
+        distance <= config.sweepLookbackCandles
+      ) {
+        return true;
+      }
+    }
+
+    return false;
   };
 
   for (const event of confirmers) {
@@ -539,6 +643,8 @@ export function findOrderBlocks(
     }
 
     let target: ImpulseRec | null = null;
+    const reversalChochIdx =
+      reversalChochIdxByEventKey.get(event.key) ?? null;
 
     for (const impulse of impulses) {
       if (
@@ -553,6 +659,18 @@ export function findOrderBlocks(
         impulse.endIndex > eventIdx ||
         eventIdx - impulse.endIndex >
           config.confirmMaxCandles
+      ) {
+        continue;
+      }
+
+      // Causal constraint для reversal-confirming BOS:
+      // impulse принадлежит reversal-ноге только если он НЕ
+      // закончился ДО CHOCH-свечи (endIndex >= chochIdx).
+      // Pre-CHOCH impulse прежней структуры не переиспользуется
+      // лишь потому, что попал в окно confirmMaxCandles.
+      if (
+        reversalChochIdx !== null &&
+        impulse.endIndex < reversalChochIdx
       ) {
         continue;
       }
@@ -647,7 +765,7 @@ export function findOrderBlocks(
       hasLiquiditySweepBeforeImpulse:
         hasOppositeSweepBefore(
           event.dir,
-          openMs[target.startIndex]
+          target.startIndex
         ),
       state: "OPEN"
     };

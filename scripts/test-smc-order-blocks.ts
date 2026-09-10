@@ -10,6 +10,13 @@
  * conf effClose(17) = T0+19h). ATR-маржины displacement ≥1.7/2.1
  * (проверяются прогоном), а не точные равенства.
  * Зеркала — точная инверсия (негатив) значений.
+ *
+ * Фикс-блоки: 41/42 — sweep lookback в семантике CLOSED-свеч
+ * (канонические индексы, НЕ wall-clock; таймгэп-регрессия),
+ * 43–46 — консервативный CHOCH/BOS аудит A–E (CHOCH не
+ * подтверждает; reversal только последующим BOS; failed CHOCH;
+ * pre-CHOCH impulse не переиспользуется), 47 — инвариант ширины
+ * зоны (top > bottom строго).
  */
 
 import {
@@ -18,7 +25,12 @@ import {
   SmcOrderBlock,
   SmcOrderBlockConfig
 } from "../lib/smc/order-blocks";
-import { SmcRawCandle, SmcTimeframe } from "../lib/smc/types";
+import { evaluateStructure } from "../lib/smc/fsm";
+import {
+  SmcRawCandle,
+  SmcTimeframe,
+  StructureParams
+} from "../lib/smc/types";
 
 let passed = 0;
 let total = 0;
@@ -57,6 +69,25 @@ function mk(
 ): SmcRawCandle {
   return {
     openTime: new Date(T0 + i * HOUR),
+    open: o,
+    high,
+    low,
+    close: c,
+    closed: true
+  };
+}
+
+/** Свеча с явным openTime (таймгэпы/неравномерный шаг —
+ * validate требует только строгого возрастания openTime). */
+function mkAt(
+  openMs: number,
+  o: number,
+  c: number,
+  high: number,
+  low: number
+): SmcRawCandle {
+  return {
+    openTime: new Date(openMs),
     open: o,
     high,
     low,
@@ -157,6 +188,33 @@ function fixtureC(): SmcRawCandle[] {
     mk(17, 105.5, 108, 108.4, 105.2),  // reversal BOS up (> 107.5)
     mk(18, 107.8, 107.5, 108, 106.8),
     mk(19, 107.6, 107.4, 108, 107)
+  ];
+}
+
+/** Fixture E (аудит CHOCH/BOS, кейс E): bootstrap BOS up @10 →
+ * pre-CHOCH bearish displacement impulse [14] (close 86 > 82 —
+ * CHOCH ещё нет, impulse ЗАКАНЧИВАЕТСЯ на 14-й свече) → CHOCH
+ * down @15 (close 81 < 82; свеча bullish — continuation run'а
+ * не продолжает) → reversal BOS down @17 (close 76 < pivot low
+ * 79.5@15). Индекс reversal-BOS в окне confirmMax от endIndex
+ * старого impulse (17 − 14 = 3 <= 10), но impulse принадлежит
+ * прежней структуре → reversal-BOS не должен его переиспользовать. */
+function fixtureE(): SmcRawCandle[] {
+  return [
+    ...flats(0, 4),
+    mk(5, 86.05, 87.05, 105, 84.05), // pivot high 105
+    flat(6),
+    mk(7, 86.07, 87.07, 90.07, 82),  // pivot low 82
+    ...flats(8, 9),
+    mk(10, 104, 108, 108.5, 103.5),  // bootstrap BOS up (close 108 > 105)
+    mk(11, 106.11, 107.11, 110.11, 104.11),
+    mk(12, 106.12, 107.12, 110.12, 104.12),
+    mk(13, 106.13, 107.13, 110.13, 104.13),
+    mk(14, 106.5, 86, 107, 85),      // bearish displacement (pre-CHOCH)
+    mk(15, 80, 81, 81.5, 79.5),      // CHOCH down; bullish → impulse [14] завершён
+    mk(16, 81, 80.5, 82, 80),
+    mk(17, 79, 76, 79.5, 75.5),      // reversal BOS down (close 76 < 79.5@15)
+    mk(18, 77, 78, 79, 76)
   ];
 }
 
@@ -410,6 +468,131 @@ function twoImpulses(): SmcRawCandle[] {
   ok(
     bullish(failed, T0 + 22 * HOUR).length === 0,
     "16: failed CHOCH (reclaim вниз) без последующего BOS up → reversal OB не существует"
+  );
+}
+
+/* ---------- 43–46. консервативный CHOCH/BOS аудит (A–E) ---------- */
+
+const auditParams: StructureParams = {
+  tf: "1h",
+  layer: "swing",
+  left: 1,
+  right: 1
+};
+
+{
+  // A/B: CHOCH up @14 (conf T0+15h) существует и подтверждён,
+  // reversal ещё НЕ подтверждён — FSM в REVERSAL_PENDING_UP;
+  // OB при этом НЕТ (фильтр confirmers type === BOS).
+  const raw = fixtureC();
+  const asOf = new Date(T0 + 15 * HOUR);
+  const structure = evaluateStructure(raw, auditParams, asOf);
+  const choch = structure.events.find(
+    (event) => event.type === "CHOCH"
+  );
+
+  ok(
+    choch !== undefined &&
+      choch.dir === "up" &&
+      choch.confirmedAt.getTime() === T0 + 15 * HOUR,
+    "43/A: fixtureC содержит подтверждённый CHOCH up (conf T0+15h) — путь реально исполняется"
+  );
+  ok(
+    structure.phase === "REVERSAL_PENDING_UP" &&
+      bullish(raw, asOf.getTime()).length === 0,
+    "43/B: REVERSAL_PENDING_UP — сам CHOCH OB не порождает (confirmers = только BOS)"
+  );
+
+  // C: reversal-подтверждение — ПЕРВЫЙ post-CHOCH BOS up,
+  // переводящий FSM в установившийся противоположный тренд;
+  // OB привязан к НЕМУ, не к CHOCH.
+  const full = fixtureC();
+  const fullAsOf = new Date(T0 + 20 * HOUR);
+  const fullStructure = evaluateStructure(
+    full,
+    auditParams,
+    fullAsOf
+  );
+  const chochFull =
+    fullStructure.events[fullStructure.events.length - 2];
+  const reversal =
+    fullStructure.events[fullStructure.events.length - 1];
+
+  ok(
+    chochFull.type === "CHOCH" &&
+      chochFull.dir === "up" &&
+      reversal.type === "BOS" &&
+      reversal.dir === "up" &&
+      fullStructure.phase === "TREND_UP",
+    "44/C: хронология [..., CHOCH up, BOS up] — reversal-BOS непосредственно за CHOCH, FSM → TREND_UP"
+  );
+
+  const reversalObs = bullishUp(
+    bullish(full, fullAsOf.getTime())
+  );
+
+  ok(
+    reversalObs.length === 1 &&
+      reversalObs[0].structureEventKey === reversal.key &&
+      reversalObs[0].confirmedAt.getTime() ===
+        reversal.confirmedAt.getTime() &&
+      reversalObs[0].confirmedAt.getTime() >
+        chochFull.confirmedAt.getTime() &&
+      reversalObs[0].impulseStartAt.getTime() >=
+        chochFull.eventTime.getTime(),
+    "44/C: OB подтверждён reversal-BOS (conf T0+18h > CHOCH T0+15h); impulse reversal-ноги начинается на CHOCH-свече (каузально)"
+  );
+
+  // D: failed CHOCH — reclaim вниз → CHOCH_INVALIDATED; OB из
+  // этой CHOCH-ветки не существует.
+  const failedRaw = fixtureC();
+  failedRaw[15] = mk(15, 83, 74, 83.5, 73.5);
+  failedRaw[16] = mk(16, 74, 72, 74.5, 71);
+  failedRaw[17] = mk(17, 72, 73, 73.5, 71.5);
+  const failedAsOf = new Date(T0 + 22 * HOUR);
+  const failedStructure = evaluateStructure(
+    failedRaw,
+    auditParams,
+    failedAsOf
+  );
+  const chochEv = failedStructure.events.find(
+    (event) => event.type === "CHOCH"
+  );
+  const invalidatedEv = failedStructure.events.find(
+    (event) => event.type === "CHOCH_INVALIDATED"
+  );
+
+  ok(
+    chochEv !== undefined &&
+      chochEv.dir === "up" &&
+      invalidatedEv !== undefined &&
+      invalidatedEv.dir === "down" &&
+      bullish(failedRaw, failedAsOf.getTime()).length === 0,
+    "45/D: failed CHOCH (CHOCH up → CHOCH_INVALIDATED down) — reversal OB из CHOCH-ветки не существует"
+  );
+
+  // E: reversal-confirming BOS down не переиспользует
+  // pre-CHOCH impulse [14] (endIndex 14 < chochIdx 15),
+  // хотя формально 17 − 14 = 3 <= confirmMax 10. В
+  // reversal-ноге displacement нет → bearish OB НЕТ.
+  const rawE = fixtureE();
+  const asOfE = new Date(T0 + 19 * HOUR);
+  const structureE = evaluateStructure(rawE, auditParams, asOfE);
+  const kindsE = structureE.events
+    .map((event) => `${event.type}:${event.dir}`)
+    .join("|");
+
+  ok(
+    kindsE === "BOS:up|CHOCH:down|BOS:down" &&
+      structureE.events[2].confirmedAt.getTime() ===
+        T0 + 18 * HOUR,
+    "46/E: FSM-путь [BOS up, CHOCH down, reversal BOS down] существует; reversal-BOS в окне confirmMax от pre-CHOCH impulse (17−14=3)"
+  );
+  ok(
+    bullish(rawE, asOfE.getTime()).filter(
+      (ob) => ob.direction === "down"
+    ).length === 0,
+    "46/E: reversal-confirming BOS down НЕ переиспользовал pre-CHOCH impulse [14] (endIndex 14 < chochIdx 15) — bearish OB нет"
   );
 }
 
@@ -688,7 +871,120 @@ function sweepFixture(sweepCandle: SmcRawCandle): SmcRawCandle[] {
   ok(
     far.length === 1 &&
       far[0].hasLiquiditySweepBeforeImpulse === false,
-    "34: sweep resolvedAt T0+6h, impulseStart T0+16h → 10h > lookback 5 → confluence false"
+    "34: sweep resolving-свеча @5, impulseStart @14 → индексная дистанция 9 > lookback 5 → confluence false"
+  );
+}
+
+/* ---------- 41/42. sweep lookback — семантика CLOSED-свеч ---------- */
+
+/** Sweep @14 и impulseStart @15 — СОСЕДНИЕ CLOSED-свечи
+ * (индексная дистанция 1), но между ними таймгэп 200h:
+ * wall-clock дистанция ~199h >> lookback. Sweep-свеча @14 —
+ * сама bearish candidate (sweep 82, close 85 > 82), зона
+ * [81, 90.5]. */
+function gapFixture(): SmcRawCandle[] {
+  return [
+    ...flats(0, 4),
+    mk(5, 86.05, 87.05, 90.05, 82), // pivot low 82@5
+    ...flats(6, 13),
+    mk(14, 86, 85, 90.5, 81),       // SELL_SIDE sweep 82 + bearish candidate
+    mkAt(T0 + 214 * HOUR, 91, 104, 108, 91),       // displacement (гэп 200h)
+    mkAt(T0 + 215 * HOUR, 103, 101, 103.5, 95),    // стоп
+    mkAt(T0 + 216 * HOUR, 107, 109, 109.5, 106.5), // BOS up (close > 108)
+    mkAt(T0 + 217 * HOUR, 107.8, 107.5, 108, 106.8),
+    mkAt(T0 + 218 * HOUR, 107.6, 107.4, 108, 107)
+  ];
+}
+
+/** Инверсия: между sweep (@14) и impulseStart (@16) ДВЕ CLOSED
+ * свечи (индексная дистанция 2 > lookback 1), но шаг серии
+ * 0.5h — wall-clock дистанция 0h. Validate требует только
+ * строгого возрастания openTime — серия валидна. */
+function inverseGapFixture(): SmcRawCandle[] {
+  const at = (i: number): number =>
+    T0 + Math.round((i * HOUR) / 2);
+
+  const cflat = (i: number): SmcRawCandle => {
+    const b = i * 0.01;
+
+    return mkAt(at(i), 86 + b, 87 + b, 90 + b, 84 + b);
+  };
+
+  const cf = (from: number, to: number): SmcRawCandle[] => {
+    const out: SmcRawCandle[] = [];
+
+    for (let i = from; i <= to; i++) {
+      out.push(cflat(i));
+    }
+
+    return out;
+  };
+
+  return [
+    ...cf(0, 4),
+    mkAt(at(5), 86.05, 87.05, 90.05, 82), // pivot low 82@5
+    ...cf(6, 13),
+    mkAt(at(14), 86, 85, 90.5, 81),          // sweep + candidate
+    mkAt(at(15), 86.15, 85.15, 90.6, 85.15), // candidate #2
+    mkAt(at(16), 91, 104, 108, 91),          // displacement (impulseStart)
+    mkAt(at(17), 103, 101, 103.5, 95),
+    mkAt(at(18), 107, 109, 109.5, 106.5),    // BOS up
+    mkAt(at(19), 107.8, 107.5, 108, 106.8),
+    mkAt(at(20), 107.6, 107.4, 108, 107)
+  ];
+}
+
+{
+  // SELL_SIDE sweep @14, candidate @15, displacement @16 →
+  // impulseStart index 16; индексная дистанция = 16 − 14 = 2.
+  const sweptRaw = sweepFixture(mk(14, 84.14, 85.14, 85.34, 81));
+  const sweepFlag = (lookback: number): boolean =>
+    bullish(
+      sweptRaw,
+      T0 + 22 * HOUR,
+      obCfg("swing", { sweepLookbackCandles: lookback })
+    )[0].hasLiquiditySweepBeforeImpulse;
+
+  ok(
+    sweepFlag(0) === false,
+    "41: sweepLookbackCandles = 0 → confluence выключена (SWEPT существует, окно нулевое)"
+  );
+  ok(
+    sweepFlag(1) === false,
+    "41: lookback 1 < индексная дистанция 2 → false (wall-clock 1h прошёл бы старую dur-семантику)"
+  );
+  ok(
+    sweepFlag(2) === true,
+    "41: lookback 2 = индексная дистанция 2 → true (граница окна включительно)"
+  );
+
+  const gapOb = bullishUp(
+    bullish(
+      gapFixture(),
+      T0 + 219 * HOUR,
+      obCfg("swing", { sweepLookbackCandles: 1 })
+    )
+  )[0];
+
+  ok(
+    gapOb !== undefined &&
+      gapOb.confirmedAt.getTime() === T0 + 217 * HOUR &&
+      gapOb.hasLiquiditySweepBeforeImpulse === true,
+    "42: таймгэп 200h между соседними CLOSED-свечами (sweep @14 → impulseStart @15): дистанция 1 <= lookback 1 → confluence TRUE (wall-clock дал бы false)"
+  );
+
+  const inverseOb = bullishUp(
+    bullish(
+      inverseGapFixture(),
+      T0 + 22 * HOUR,
+      obCfg("swing", { sweepLookbackCandles: 1 })
+    )
+  )[0];
+
+  ok(
+    inverseOb !== undefined &&
+      inverseOb.hasLiquiditySweepBeforeImpulse === false,
+    "42: инверсия — между sweep и impulseStart 2 CLOSED-свечи > lookback 1 → confluence FALSE (wall-clock 0h дал бы true)"
   );
 }
 
@@ -814,6 +1110,63 @@ function sweepFixture(sweepCandle: SmcRawCandle): SmcRawCandle[] {
         late.firstTouchedAt?.getTime() &&
       early.retests <= late.retests,
     "40: исторический snapshot не переписывается — identity/history стабильны, lifecycle только дополняется"
+  );
+}
+
+/* ---------- 47. инвариант ширины зоны OB ---------- */
+
+{
+  // Канонический OHLC (validate: high >= max(open,close),
+  // low <= min(open,close)) для каждой opposite-свечи кластера
+  // даёт high > low, а кластер непуст ⇒ top > bottom СТРОГО ⇒
+  // знаменатель maxPenetrationFraction (top−bottom) не нулевой.
+  // Проверка на всех OB всех фикстур; в модуле — defensive guard
+  // (top <= bottom → candidate отвергается, без epsilon).
+  const suites: SmcRawCandle[][] = [
+    canonical(),
+    negate(canonical()),
+    fixtureC(),
+    negate(fixtureC()),
+    twoImpulses(),
+    lifecycle(),
+    sweepFixture(mk(14, 84.14, 85.14, 85.34, 81)),
+    gapFixture(),
+    inverseGapFixture(),
+    fixtureE()
+  ];
+
+  let checked = 0;
+  let allValid = true;
+
+  for (const suite of suites) {
+    for (const ob of bullish(suite, T0 + 700 * HOUR)) {
+      checked += 1;
+
+      if (
+        !Number.isFinite(ob.top) ||
+        !Number.isFinite(ob.bottom) ||
+        !(ob.top > ob.bottom) ||
+        ob.maxPenetrationFraction < 0 ||
+        ob.maxPenetrationFraction > 1
+      ) {
+        allValid = false;
+      }
+    }
+  }
+
+  ok(
+    checked > 0 && allValid,
+    `47: все ${checked} OB всех фикстур — top > bottom строго (инвариант кластера opposite-свеч), fraction ∈ [0,1] — знаменатель не нулевой`
+  );
+
+  const canonicalOb = bullishUp(
+    bullish(canonical(), T0 + 20 * HOUR)
+  )[0];
+
+  closeTo(
+    canonicalOb.top - canonicalOb.bottom,
+    6.14,
+    "47: канонический кластер — ширина зоны 6.14 > 0 (bottom 84, top 90.14)"
   );
 }
 
