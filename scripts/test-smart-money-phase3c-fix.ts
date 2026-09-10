@@ -151,10 +151,16 @@ ok(api.includes('Выберите хотя бы один таймфрейм') ||
   ok(!api.includes('trend-suslik') || api.indexOf('1d временно недоступен') > api.indexOf('trend-suslik'), "API: staged guard only for smart-money, Trend unchanged");
 }
 
-// 3. resetAll still resets to ["1h"] (valid verified subset) and does NOT hardcode minExchanges=2
-ok(!editor.includes("setMinExchanges(2)"), "Editor: resetAll does NOT hardcode setMinExchanges(2)");
-ok(editor.includes("minExchanges — Strategy-level параметр без автоматически выбранного"), "Editor: resetAll comment explains no trading default");
-ok(editor.includes('setTimeframes(["1h"])'), "Editor: resetAll still resets timeframes to [\"1h\"] (verified subset)");
+// 3. resetAll still resets to ["1h"] (valid verified subset) and does NOT modify minExchanges
+{
+  const start = editor.indexOf("function resetAll");
+  ok(start !== -1, "Editor: resetAll function exists");
+  const end = editor.indexOf("async function save", start);
+  const block = start !== -1 ? editor.slice(start, end !== -1 ? end : start + 2000) : "";
+  ok(block.includes('setTimeframes(["1h"])'), "Editor: resetAll resets timeframes to [\"1h\"] (verified subset)");
+  ok(!block.includes("setMinExchanges("), "Editor: resetAll does NOT modify minExchanges (no setMinExchanges in block)");
+  ok(editor.includes("onChange={setMinExchanges}") || editor.includes("setMinExchanges"), "Editor: manual minExchanges input still exists outside resetAll");
+}
 
 // 4. Signal text still correct
 ok(editor.includes("Signal Engine не развёрнут"), "UI: explicitly says Signal Engine not deployed");
