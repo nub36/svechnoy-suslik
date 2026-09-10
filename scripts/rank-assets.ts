@@ -42,18 +42,18 @@ async function main() {
 
   const ranked = assets
     .filter(
-      asset =>
+      (asset: { symbol: string; markets: { quoteVolume24h: number | null }[] }) =>
         !EXCLUDED.has(asset.symbol) &&
         asset.markets.length > 0
     )
-    .map(asset => {
+    .map((asset: { id: number; symbol: string; markets: { quoteVolume24h: number | null }[] }) => {
       const volumes = asset.markets
-        .map(m => m.quoteVolume24h ?? 0)
-        .filter(v => v > 0)
-        .sort((a, b) => b - a);
+        .map((m: { quoteVolume24h: number | null }) => m.quoteVolume24h ?? 0)
+        .filter((v: number) => v > 0)
+        .sort((a: number, b: number) => b - a);
 
       const totalVolume =
-        volumes.reduce((sum, v) => sum + v, 0);
+        volumes.reduce((sum: number, v: number) => sum + v, 0);
 
       const maxVolume = volumes[0] ?? 0;
 
@@ -90,7 +90,7 @@ async function main() {
       };
     })
     .sort(
-      (a, b) =>
+      (a: { liquidityScore: number }, b: { liquidityScore: number }) =>
         b.liquidityScore - a.liquidityScore
     );
 
@@ -134,7 +134,7 @@ async function main() {
   console.log("");
   console.log("Top-20:");
 
-  top500.slice(0, 20).forEach((item, index) => {
+  top500.slice(0, 20).forEach((item: { symbol: string; exchangeCount: number; totalVolume: number }, index: number) => {
     console.log(
       `${String(index + 1).padStart(3)}. ` +
       `${item.symbol.padEnd(10)} ` +
