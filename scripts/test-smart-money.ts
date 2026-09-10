@@ -33,6 +33,10 @@ import {
   loadSmartMoneyCandles,
   mapSmcReasonsToStrategyReasons,
 } from "../lib/strategies/smart-money";
+import {
+  parseSmartMoneyArgs,
+  validateCliArgs,
+} from "./smart-money-readonly";
 import { aggregateAssetGroup } from "../lib/strategies/runtime";
 import { validateTrendSuslikConfig } from "../lib/strategies/config";
 import { runTrendSuslik } from "../lib/strategies/trend-suslik";
@@ -441,6 +445,87 @@ console.log("Smart Money — Phase 3B checks");
   ok(!schema.includes("model SmartMoney"), "no Prisma schema change");
   ok(schema.includes("model Strategy") && schema.includes("model Signal"), "schema still has Strategy/Signal");
   ok(!schema.includes("model Smc"), "no SM model added");
+}
+
+// 23 CLI parser — обе формы, защита от поглощения, валидация (реальные проверки, не txt.includes)
+{
+  const p1 = parseSmartMoneyArgs(["--symbol", "BTC", "--timeframe", "1h"]);
+  ok(
+    p1.args.symbol === "BTC" && p1.args.timeframe === "1h" && p1.errors.length === 0,
+    "parser: --symbol BTC --timeframe 1h"
+  );
+  const p2 = parseSmartMoneyArgs(["--symbol=BTC", "--timeframe=1h"]);
+  ok(
+    p2.args.symbol === "BTC" && p2.args.timeframe === "1h" && p2.errors.length === 0,
+    "parser: --symbol=BTC --timeframe=1h"
+  );
+  const p3 = parseSmartMoneyArgs(["--market-id", "123"]);
+  ok(p3.args.marketId === 123 && p3.errors.length === 0, "parser: --market-id 123");
+  const p4 = parseSmartMoneyArgs(["--market-id=123"]);
+  ok(p4.args.marketId === 123 && p4.errors.length === 0, "parser: --market-id=123");
+  const p4b = parseSmartMoneyArgs(["--marketId", "456"]);
+  ok(p4b.args.marketId === 456 && p4b.errors.length === 0, "parser: --marketId 456 legacy alias spaced");
+  const p4c = parseSmartMoneyArgs(["--marketId=789"]);
+  ok(p4c.args.marketId === 789 && p4c.errors.length === 0, "parser: --marketId=789 legacy alias =");
+}
+
+{
+  const p5 = parseSmartMoneyArgs(["--symbol", "--timeframe", "1h"]);
+  ok(
+    p5.errors.length > 0 && p5.errors[0].includes("--symbol"),
+    "parser: --symbol --timeframe не поглощает флаг"
+  );
+  const p6 = parseSmartMoneyArgs(["--market-id", "--self-test"]);
+  ok(
+    p6.errors.length > 0 && p6.errors[0].includes("--market-id"),
+    "parser: --market-id --self-test не поглощает флаг"
+  );
+}
+
+{
+  const p7 = parseSmartMoneyArgs(["--symbol", "BTC", "--market-id", "123"]);
+  ok(
+    validateCliArgs(p7) !== null &&
+      (validateCliArgs(p7) as string).includes("ровно один"),
+    "parser: оба --symbol и --market-id → ошибка"
+  );
+  const p8 = parseSmartMoneyArgs(["--timeframe", "1h"]);
+  ok(validateCliArgs(p8) !== null, "parser: ни symbol ни market-id → ошибка");
+}
+
+{
+  const p9 = parseSmartMoneyArgs(["--market-id", "abc"]);
+  ok(p9.errors.length > 0, "parser: malformed --market-id abc → ошибка");
+  const p9b = parseSmartMoneyArgs(["--market-id="]);
+  ok(p9b.errors.length > 0, "parser: --market-id= пусто → ошибка");
+  const p9c = parseSmartMoneyArgs(["--market-id", "12.5"]);
+  ok(p9c.errors.length > 0, "parser: --market-id 12.5 не целое → ошибка");
+  const p9d = parseSmartMoneyArgs(["--market-id", "-5"]);
+  ok(p9d.errors.length > 0, "parser: --market-id -5 отрицательное → ошибка");
+}
+
+{
+  const p10 = parseSmartMoneyArgs(["--symbol", "BTC"]);
+  ok(p10.args.timeframe === "1h" && p10.errors.length === 0, "parser: default timeframe остаётся 1h");
+  const p11 = parseSmartMoneyArgs(["--symbol", "BTC", "--timeframe", "4h"]);
+  ok(p11.args.timeframe === "4h", "parser: --timeframe 4h spaced");
+  const p12 = parseSmartMoneyArgs(["--symbol=BTC", "--timeframe", "1h"]);
+  ok(
+    p12.args.symbol === "BTC" && p12.args.timeframe === "1h",
+    "parser: смешанная форма --symbol=BTC + --timeframe 1h"
+  );
+}
+
+{
+  const txt = readFileSync("scripts/smart-money-readonly.ts", "utf-8");
+  ok(
+    txt.includes("--symbol BTC") && txt.includes("--symbol=BTC"),
+    "help показывает обе формы --symbol BTC и --symbol=BTC"
+  );
+  ok(
+    txt.includes("--market-id 123") && txt.includes("--market-id=123"),
+    "help показывает обе формы --market-id"
+  );
 }
 
 console.log(`\nИтог: ${passed}/${total}`);

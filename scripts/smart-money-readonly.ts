@@ -31,13 +31,170 @@ import {
 import { aggregateAssetGroup } from "../lib/strategies/runtime";
 import { validateTrendSuslikConfig } from "../lib/strategies/config";
 
-type Args = {
+export type Args = {
   symbol: string | null;
   marketId: number | null;
   timeframe: string;
   selfTest: boolean;
   help: boolean;
 };
+
+/**
+ * Чистый парсер CLI — без побочек БД, детерминирован, тестируем.
+ * Поддерживает ОБЕ формы:
+ *   --symbol BTC  и  --symbol=BTC
+ *   --market-id 123, --market-id=123, а также legacy --marketId
+ *   --timeframe 1h и --timeframe=1h
+ * Флаги --self-test и --help — boolean.
+ * Не поглощает следующий флаг как значение (требует точного разделения).
+ */
+export function parseSmartMoneyArgs(argv: string[]): {
+  args: Args;
+  errors: string[];
+  symbolProvided: boolean;
+  marketIdProvided: boolean;
+} {
+  let symbol: string | null = null;
+  let marketId: number | null = null;
+  let timeframe = "1h";
+  let selfTest = false;
+  let help = false;
+  const errors: string[] = [];
+  let symbolProvided = false;
+  let marketIdProvided = false;
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+
+    if (arg === "--self-test") {
+      selfTest = true;
+      continue;
+    }
+    if (arg === "--help" || arg === "-h") {
+      help = true;
+      continue;
+    }
+
+    if (arg === "--symbol") {
+      symbolProvided = true;
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith("-")) {
+        errors.push(
+          "--symbol требует значение (например --symbol BTC или --symbol=BTC)"
+        );
+      } else {
+        symbol = next;
+        i++;
+      }
+      continue;
+    }
+    if (arg.startsWith("--symbol=")) {
+      symbolProvided = true;
+      const value = arg.slice("--symbol=".length);
+      if (value === "" || value.startsWith("-")) {
+        errors.push(
+          "--symbol требует значение (например --symbol BTC или --symbol=BTC)"
+        );
+      } else {
+        symbol = value;
+      }
+      continue;
+    }
+
+    if (arg === "--market-id" || arg === "--marketId") {
+      marketIdProvided = true;
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith("-")) {
+        errors.push(
+          "--market-id требует числовое значение (например --market-id 123 или --market-id=123)"
+        );
+      } else {
+        if (!/^\d+$/.test(next)) {
+          errors.push(
+            `--market-id значение "${next}" не является положительным целым числом`
+          );
+        } else {
+          const n = Number(next);
+          if (!Number.isInteger(n) || n <= 0) {
+            errors.push(
+              `--market-id значение "${next}" должно быть положительным целым`
+            );
+          } else {
+            marketId = n;
+          }
+        }
+        i++;
+      }
+      continue;
+    }
+    if (
+      arg.startsWith("--market-id=") ||
+      arg.startsWith("--marketId=")
+    ) {
+      marketIdProvided = true;
+      const value = arg.startsWith("--market-id=")
+        ? arg.slice("--market-id=".length)
+        : arg.slice("--marketId=".length);
+      if (value === "" || value.startsWith("-")) {
+        errors.push(
+          "--market-id требует числовое значение (например --market-id 123 или --market-id=123)"
+        );
+      } else if (!/^\d+$/.test(value)) {
+        errors.push(
+          `--market-id значение "${value}" не является положительным целым числом`
+        );
+      } else {
+        const n = Number(value);
+        if (!Number.isInteger(n) || n <= 0) {
+          errors.push(
+            `--market-id значение "${value}" должно быть положительным целым`
+          );
+        } else {
+          marketId = n;
+        }
+      }
+      continue;
+    }
+
+    if (arg === "--timeframe") {
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith("-")) {
+        errors.push(
+          "--timeframe требует значение (например --timeframe 1h или --timeframe=1h)"
+        );
+      } else {
+        timeframe = next;
+        i++;
+      }
+      continue;
+    }
+    if (arg.startsWith("--timeframe=")) {
+      const value = arg.slice("--timeframe=".length);
+      if (value === "" || value.startsWith("-")) {
+        errors.push(
+          "--timeframe требует значение (например --timeframe 1h или --timeframe=1h)"
+        );
+      } else {
+        timeframe = value;
+      }
+      continue;
+    }
+
+    if (arg.startsWith("--")) {
+      errors.push(`неизвестный флаг ${arg}`);
+      continue;
+    }
+
+    errors.push(`неожиданный аргумент ${arg}`);
+  }
+
+  return {
+    args: { symbol, marketId, timeframe, selfTest, help },
+    errors,
+    symbolProvided,
+    marketIdProvided,
+  };
+}
 
 function getArg(name: string): string | undefined {
   const prefix = `--${name}=`;
@@ -47,16 +204,43 @@ function hasFlag(name: string): boolean {
   return process.argv.slice(2).includes(`--${name}`);
 }
 function parseArgs(): Args {
-  const symbol = getArg("symbol") ?? null;
-  const marketIdRaw = getArg("market-id") ?? getArg("marketId") ?? null;
-  const marketId = marketIdRaw !== null ? Number(marketIdRaw) : null;
-  return {
-    symbol,
-    marketId: marketId !== null && Number.isFinite(marketId) ? marketId : null,
-    timeframe: getArg("timeframe") ?? "1h",
-    selfTest: hasFlag("self-test"),
-    help: hasFlag("help"),
-  };
+  const { args } = parseSmartMoneyArgs(process.argv.slice(2));
+  return args;
+}
+
+/**
+ * Валидация CLI-аргументов без БД.
+ * Возвращает строку ошибки или null если всё корректно.
+ * Используется и в main, и в self-test для детерминированных проверок.
+ */
+export function validateCliArgs(
+  parsed: ReturnType<typeof parseSmartMoneyArgs>
+): string | null {
+  if (parsed.errors.length > 0) {
+    return parsed.errors[0];
+  }
+  const { args } = parsed;
+  if (args.help || args.selfTest) {
+    return null;
+  }
+  // Требуется ровно один из symbol / market-id
+  const hasSymbol = parsed.symbolProvided;
+  const hasMarketId = parsed.marketIdProvided;
+  // Также считаем фактически распарсенные значения (если provided но invalid — уже есть ошибка выше)
+  if (hasSymbol && hasMarketId) {
+    return "укажите ровно один из --symbol или --market-id (оба указаны)";
+  }
+  if (!hasSymbol && !hasMarketId) {
+    return "требуется ровно один из --symbol или --market-id (никакого default Top-100 скана)";
+  }
+  // Если provided но значение не распарсилось (например invalid numeric уже в errors), но на случай отсутствия ошибки:
+  if (hasSymbol && (args.symbol === null || args.symbol.trim() === "")) {
+    return "--symbol требует непустое значение";
+  }
+  if (hasMarketId && args.marketId === null) {
+    return "--market-id требует положительное целое число";
+  }
+  return null;
 }
 
 function printHelp(): void {
@@ -70,9 +254,9 @@ Smart Money — read-only diagnostic CLI (Phase 3B)
   npx tsx scripts/smart-money-readonly.ts --help
 
 Опции:
-  --symbol=BTC           актив (например BTC, без USDT)
-  --market-id=N          конкретный Market.id
-  --timeframe=1h         таймфрейм: 5m, 15m, 1h, 4h, 1d (по умолчанию 1h)
+  --symbol BTC           актив (например BTC, без USDT)  (также --symbol=BTC)
+  --market-id 123        конкретный Market.id            (также --market-id=123, --marketId 123 / --marketId=123)
+  --timeframe 1h         таймфрейм: 5m, 15m, 1h, 4h, 1d (по умолчанию 1h) (также --timeframe=1h)
   --self-test            проверки без БД (pure adapter, инварианты)
   --help                 эта справка
 
@@ -81,6 +265,7 @@ Smart Money — read-only diagnostic CLI (Phase 3B)
   - Только чтение: никаких Signal INSERT/UPDATE.
   - Свечи берутся из PostgreSQL Candle where closed=true, последние 500 DESC → reverse → ASC.
   - Для --symbol агрегация по активу через существующий aggregateAssetGroup.
+  - Принимаются обе формы --flag value и --flag=value; флаг без значения — ошибка (например --symbol --timeframe не поглотит --timeframe).
 `);
 }
 
@@ -505,6 +690,81 @@ async function runSelfTest(): Promise<number> {
     ok(badRt.ok === false, "15b: пустые timeframes — ошибка");
   }
 
+  // 16+. CLI parser — обе формы, защита от поглощения флага, валидация
+  {
+    const p1 = parseSmartMoneyArgs(["--symbol", "BTC", "--timeframe", "1h"]);
+    ok(
+      p1.args.symbol === "BTC" && p1.args.timeframe === "1h" && p1.errors.length === 0,
+      "16a: --symbol BTC --timeframe 1h"
+    );
+    const p2 = parseSmartMoneyArgs(["--symbol=BTC", "--timeframe=1h"]);
+    ok(
+      p2.args.symbol === "BTC" && p2.args.timeframe === "1h" && p2.errors.length === 0,
+      "16b: --symbol=BTC --timeframe=1h"
+    );
+    const p3 = parseSmartMoneyArgs(["--market-id", "123"]);
+    ok(
+      p3.args.marketId === 123 && p3.errors.length === 0,
+      "16c: --market-id 123"
+    );
+    const p4 = parseSmartMoneyArgs(["--market-id=123"]);
+    ok(p4.args.marketId === 123 && p4.errors.length === 0, "16d: --market-id=123");
+    const p4b = parseSmartMoneyArgs(["--marketId", "456"]);
+    ok(p4b.args.marketId === 456 && p4b.errors.length === 0, "16d2: --marketId 456 legacy alias");
+    const p4c = parseSmartMoneyArgs(["--marketId=789"]);
+    ok(p4c.args.marketId === 789 && p4c.errors.length === 0, "16d3: --marketId=789 legacy alias");
+    const p5 = parseSmartMoneyArgs(["--symbol", "--timeframe", "1h"]);
+    ok(
+      p5.errors.length > 0 && p5.errors[0].includes("--symbol"),
+      "16e: --symbol --timeframe не поглощает флаг (ошибка)"
+    );
+    const p6 = parseSmartMoneyArgs(["--market-id", "--self-test"]);
+    ok(
+      p6.errors.length > 0 && p6.errors[0].includes("--market-id"),
+      "16f: --market-id --self-test не поглощает флаг"
+    );
+    const p7 = parseSmartMoneyArgs([
+      "--symbol",
+      "BTC",
+      "--market-id",
+      "123",
+    ]);
+    ok(
+      validateCliArgs(p7) !== null &&
+        (validateCliArgs(p7) as string).includes("ровно один"),
+      "16g: оба --symbol и --market-id → ошибка ровно один"
+    );
+    const p8 = parseSmartMoneyArgs(["--timeframe", "1h"]);
+    ok(
+      validateCliArgs(p8) !== null,
+      "16h: ни symbol ни market-id → ошибка"
+    );
+    const p9 = parseSmartMoneyArgs(["--market-id", "abc"]);
+    ok(p9.errors.length > 0, "16i: malformed --market-id abc → ошибка");
+    const p9b = parseSmartMoneyArgs(["--market-id="]);
+    ok(p9b.errors.length > 0, "16i2: --market-id= (пусто) → ошибка");
+    const p9c = parseSmartMoneyArgs(["--market-id", "12.5"]);
+    ok(p9c.errors.length > 0, "16i3: --market-id 12.5 (не целое) → ошибка");
+    const p10 = parseSmartMoneyArgs(["--symbol", "BTC"]);
+    ok(p10.args.timeframe === "1h", "16j: default timeframe остаётся 1h");
+    const p11 = parseSmartMoneyArgs([
+      "--symbol",
+      "BTC",
+      "--timeframe",
+      "4h",
+    ]);
+    ok(p11.args.timeframe === "4h", "16k: --timeframe 4h spaced");
+    const p12 = parseSmartMoneyArgs([
+      "--symbol=BTC",
+      "--timeframe",
+      "1h",
+    ]);
+    ok(
+      p12.args.symbol === "BTC" && p12.args.timeframe === "1h",
+      "16l: смешанная форма --symbol=BTC + --timeframe 1h"
+    );
+  }
+
   console.log(`\nИтог self-test: ${passed}/${total}`);
   return passed === total ? 0 : 1;
 }
@@ -765,7 +1025,14 @@ async function runMarketMode(marketId: number, timeframe: SmcTimeframe): Promise
 // ---------------------------------------------------------------
 
 async function main(): Promise<number> {
-  const args = parseArgs();
+  const parsed = parseSmartMoneyArgs(process.argv.slice(2));
+  const cliError = validateCliArgs(parsed);
+  if (cliError) {
+    console.error(cliError);
+    printHelp();
+    return 1;
+  }
+  const args = parsed.args;
 
   if (args.help) {
     printHelp();
@@ -784,11 +1051,13 @@ async function main(): Promise<number> {
 
   const tf = args.timeframe as SmcTimeframe;
 
-  const hasSymbol = args.symbol !== null && args.symbol.trim().length > 0;
-  const hasMarketId = args.marketId !== null && Number.isInteger(args.marketId);
+  const hasSymbol = parsed.symbolProvided;
+  const hasMarketId = parsed.marketIdProvided;
 
   if (hasSymbol === hasMarketId) {
-    console.error("Требуется ровно один из --symbol или --market-id (никакого default скана)");
+    console.error(
+      "Требуется ровно один из --symbol или --market-id (никакого default скана)"
+    );
     printHelp();
     return 1;
   }
@@ -810,9 +1079,15 @@ async function main(): Promise<number> {
   }
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  });
+// Only run CLI when executed directly, not when imported for parser tests
+const _isDirectRun =
+  process.argv[1] !== undefined &&
+  process.argv[1].includes("smart-money-readonly");
+if (_isDirectRun) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((e) => {
+      console.error(e);
+      process.exit(1);
+    });
+}
