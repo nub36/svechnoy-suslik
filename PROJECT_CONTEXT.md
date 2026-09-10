@@ -1953,13 +1953,13 @@ VPS browser acceptance 9bf14ce: пункт «Стратегии»
 
 > Этот раздел — интеграция docs/ROADMAP.md (P0–P7) в единый authoritative контекст.
 > После этого commit docs/ROADMAP.md удалён, чтобы не было двух источников правды.
-> База: HEAD 877dc61 Phase 3E alignment fix (не принят на VPS), ветка arena/01a08b68-svechnoy-suslik.
+> База: HEAD 877dc61 Phase 3E alignment fix (принят на VPS 10.09.2026; real BTC diagnostic 5m READY, 15m READY, 1h READY, 4h READY, 1d BLOCKED — BINGX 16:00 UTC vs BINANCE/BYBIT/GATE/KUCOIN 00:00 UTC), ветка arena/01a08b68-svechnoy-suslik.
 > Документация-only — без изменения runtime/Admin/DB.
 
 # Свечной Суслик — Product Roadmap & Backlog
 
 Последнее обновление: 10.09.2026
-HEAD: `877dc61889866888fff2f5f91747405a1f9ae0a9` (Phase 3E alignment fix, **не принят на VPS**)
+HEAD: `877dc61889866888fff2f5f91747405a1f9ae0a9` (Phase 3E alignment fix, **принят на VPS 10.09.2026; 5m/15m/1h/4h READY, 1d BLOCKED**)
 Ветка: `arena/01a08b68-svechnoy-suslik`
 Статус: документация — без изменения runtime/Admin/DB
 
@@ -1987,7 +1987,7 @@ HEAD: `877dc61889866888fff2f5f91747405a1f9ae0a9` (Phase 3E alignment fix, **не
 ## 1. Порядок приоритетов (обязателен)
 
 **P0 — Завершить Smart Money Strategy**
-- Phase 3E multi-timeframe verification (текущий; `877dc61` ожидает VPS-приёмку)
+- Phase 3E multi-timeframe verification (принят на VPS 10.09.2026; real BTC diagnostic 5m READY, 15m READY, 1h READY, 4h READY, 1d BLOCKED — BINGX 16:00 UTC vs остальные 00:00 UTC; unsafe aggregation refused, `aggregateAssetGroup` not called)
 - Phase 3D advanced configurable SMC parameters (Displacement, FVG, Liquidity, Order Blocks и др.)
 - Полная Admin-конфигурируемость (русские описания, диапазоны, зависимости)
 - Финальная приёмка Smart Money (read-only → staged → enabled)
@@ -2249,15 +2249,18 @@ Public: `/articles`, `/articles/[slug]`
 - Top-100 — основной universe (`rank 1..100`); `Asset.top500` / `top500Only` — legacy/история
 - Прибыльность стратегии требует бэктеста / out-of-sample доказательств
 - Все расчёты — CLOSED свечи, детерминизм, cannot-evaluate честно
-- `877dc61` Phase 3E fix ожидает независимой приёмки на VPS — до неё не продолжать имплементацию следующих приоритетов
+- `877dc61` Phase 3E fix **принят на VPS 10.09.2026** (5m/15m/1h/4h READY, 1d BLOCKED — BINGX 16:00 UTC vs 00:00 UTC) — проверено, переход к Phase 3D допустим после разблокировки 8549486
 
 ---
 
-## 17. Что сделано на 877dc61 и что дальше
+## 17. Что сделано на 877dc61 и что дальше (приёмка 10.09.2026)
 
 - Phase 3C: `["1h"]` staged lock, Admin/API, `minExchanges 3`, `DRAFT disabled`
 - Phase 3E diagnostic: `lib/strategies/alignment.ts` (grid + same horizon, `referenceCandleTime`, `offGrid`/`horizonMismatch`, `safe=false` для 0 evaluated), generic `MULTI-EXCHANGE AGGREGATION REFUSED` для всех TF, `docs/phase3e-diagnostic-report.md`
-- **Дальше:** VPS-приёмка `877dc61` → Phase 3D configurable SMC → финальная приёмка Smart Money → P1 SuslikChart → P2 Backtest → затем P3–P7
+- **VPS-приёмка 877dc61 (10.09.2026):** real BTC diagnostic 5m READY (5/5 evaluable, 15:10 UTC same horizon, safe=true), 15m READY (5/5, 15:00 UTC), 1h READY, 4h READY (5/5, 08:00 UTC), 1d BLOCKED (BINGX 16:00 UTC vs BINANCE/BYBIT/GATE/KUCOIN 00:00 UTC, OFF_GRID+HORIZON_MISMATCH, safe=false, `aggregateAssetGroup` not called); Signal 0→0, Strategy id=2 DRAFT disabled ["1h"] сохранён, edf3732 NOT ancestor
+- **8549486 (10.09.2026):** Admin/API разблокированы проверенные 5m/15m/1h/4h, 1d остаётся disabled; код готов, DB строка id=2 пока ["1h"] не обновлялась (решение отдельно)
+- **Дальше:** Phase 3D configurable SMC → финальная приёмка Smart Money → P1 SuslikChart → P2 Backtest → затем P3–P7
+- **Примечание:** timeframe runtime/alignment verified on BTC across 5 exchanges; availability for each asset still depends on stored CLOSED history — не заявлять, что все Top-100 уже имеют multi-TF историю
 
 ---
 
@@ -2270,24 +2273,25 @@ Public: `/articles`, `/articles/[slug]`
 - `lib/universe.ts` — Top-100 константы
 
 ==================================================
-33. CURRENT PRIORITY — ТЕКУЩЕЕ СОСТОЯНИЕ (10.09.2026)
+33. CURRENT PRIORITY — ТЕКУЩЕЕ СОСТОЯНИЕ (10.09.2026, принято VPS)
 ==================================================
 
-- current accepted/review baseline around Phase3E;
-- Smart Money DRAFT id=2 exists in shared PostgreSQL;
-- enabled=false;
-- Signal=0;
-- current DB Strategy timeframes=["1h"];
-- BTC test data now exists for 5m/15m/1h/4h/1d;
-- 5m/15m/4h data quality passed;
-- 1d has BINGX 16:00 UTC boundary vs other four 00:00 UTC;
-- Phase3E alignment guard fix commit 877dc61 awaits independent VPS acceptance;
-- NEXT: independently verify 877dc61, run real READ-ONLY diagnostic for BTC 5m/15m/4h/1d;
-- do NOT unlock Admin TF until diagnostic acceptance.
+- current accepted baseline around Phase3E — **Phase 3E alignment correctness from 877dc61 has been independently accepted on VPS (10.09.2026)**;
+- Real BTC diagnostic (READ-ONLY, CLOSED, 5 exchanges):
+  - 5m READY — 5/5 evaluable, latest CLOSED candleTime all = 2026-09-10T15:10:00Z, canonical grid OK, horizon same, safe=true, aggregation allowed
+  - 15m READY — 5/5 evaluable, latest CLOSED all = 2026-09-10T15:00:00Z, safe=true
+  - 1h READY — previously verified real PostgreSQL/runtime, safe
+  - 4h READY — 5/5 evaluable, latest CLOSED all = 2026-09-10T08:00:00Z, safe=true
+  - 1d BLOCKED — per-exchange evaluation works, BINANCE/BYBIT/GATE/KUCOIN latest CLOSED = UTC 00 boundary, BINGX = UTC 16 boundary, BINGX OFF_GRID + HORIZON_MISMATCH, safe=false, MULTI-EXCHANGE AGGREGATION REFUSED, aggregateAssetGroup was NOT called; Signal before=0 after=0
+- Smart Money DRAFT id=2 exists in shared PostgreSQL; enabled=false; Signal=0; current DB Strategy timeframes=["1h"] — **no DB update has been approved/performed**; row remains DRAFT disabled ["1h"]
+- Admin/API commit 8549486 unlocks verified 5m/15m/1h/4h and keeps 1d disabled — code ready, DB row still ["1h"] until separate decision
+- Signal remains 0 and Signal Engine remains prohibited (edf3732 NOT ancestor)
+- 5m/15m/4h data quality passed; BTC test data now exists for 5m/15m/1h/4h/1d with same-horizon guard
+- 1d has BINGX 16:00 UTC boundary vs other four 00:00 UTC — 1d BLOCKED for multi-exchange, per-exchange remains visible
+- edf3732 NOT ancestor
+- **Do not claim all Top-100 assets have multi-TF history** — timeframe runtime/alignment verified on BTC across 5 exchanges; availability for each asset still depends on stored CLOSED history.
 
 TODO/AUDIT before final Smart Money acceptance — RANGE_POSITION: during real diagnostics observed rangePosition values outside [0,1], e.g. 5m pos ≈ -0.91, 1d pos ≈ 2.24. No math change in this commit. Before final acceptance, verify dealing-range lifecycle/invalidation semantics when price is outside active range — determine whether outside-range position is intended or range should have been invalidated/replaced.
-
-Do NOT claim 877dc61 accepted yet.
 
 ---
 Единый источник правды — этот PROJECT_CONTEXT.md. docs/ROADMAP.md удалён (0b2be00 → этот commit).
