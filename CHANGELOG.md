@@ -870,3 +870,30 @@ Signal Engine (после живого прогона Runtime на VPS).
 - tsc: ошибок в app/lib/components нет; 12 TS7006 в
   scripts/rank-assets.ts — известные, запрещены к
   правке правилом 34, логика не менялась с этапа A.
+
+
+### Фикс типизации Overview-контракта по VPS-ревью 7b2bb09 (10.09.2026)
+- lib/admin/overview.ts: OverviewDb.strategy.findMany
+  объявлял orderBy как ReadonlyArray — реальный Prisma
+  StrategyFindManyArgs требует изменяемый
+  StrategyOrderByWithRelationInput[], readonly-массив
+  не присваиваем (TS2345 на buildOverviewQueries(prisma),
+  app/admin/page.tsx:70, tsc/build exit 2/1 на VPS);
+  контракт исправлен на Array<{slug:"asc"}|
+  {version:"desc"}>; DB-semantics, topUniverseRankFilter
+  gte:1/lte:100, тесты-маппинги — без изменений;
+- проверка без реального клиента (песочница имеет
+  stub): временный типо-пробник воспроизвёл форму
+  делегатов Prisma 6 (generic findMany/count +
+  SelectSubset) — присваиваемость PrismaClientLike →
+  OverviewDb с Array проходит, копия контракта с
+  ReadonlyArray даёт тот же класс ошибки (негативный
+  контроль через @ts-expect-error в пробнике,
+  пробник удалён до коммита);
+- расхождение tsc песочницы и VPS объяснено: 12
+  TS7006 в scripts/rank-assets.ts существуют только
+  на stub-клиенте (без сгенерированных типов колбэки
+  теряют контекстные типы); VPS с prisma generate
+  6.19.3 их не видит — на 7b2bb09 VPS tsc показал
+  ровно одну ошибку (этот контракт); rule 34/46:
+  rank-assets не трогается.

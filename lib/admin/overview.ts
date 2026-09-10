@@ -40,7 +40,15 @@ type RankUniverseFilter = {
 export type OverviewDb = {
   strategy: {
     findMany(args: {
-      orderBy: ReadonlyArray<
+      /**
+       * orderBy — ИЗМЕНЯЕМЫЙ массив: реальный Prisma
+       * StrategyFindManyArgs ждёт
+       * StrategyOrderByWithRelationInput[], и readonly-
+       * массив не присваиваем этому типу (TS2345 на VPS
+       * с настоящим сгенерированным клиентом; stub
+       * клиента в песочнице это не ловит).
+       */
+      orderBy: Array<
         { slug: "asc" } | { version: "desc" }
       >;
     }): Promise<unknown>;
