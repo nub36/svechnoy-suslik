@@ -2295,3 +2295,37 @@ TODO/AUDIT before final Smart Money acceptance — RANGE_POSITION: during real d
 
 ---
 Единый источник правды — этот PROJECT_CONTEXT.md. docs/ROADMAP.md удалён (0b2be00 → этот commit).
+
+==================================================
+34. SMART MONEY PHASE 3D — CONFIGURABILITY + RANGE LIFECYCLE AUDIT (READ-ONLY) 10.09.2026
+==================================================
+
+**Baseline:** `60d243cbfd8cd33afa550c706f547f8c90cdac08` (parent `85494868f6b32ad062afd303309dc553e80a8ac9`), HEAD verified before audit.
+**Scope:** Документационный аудит. Runtime/SMC-math/PostgreSQL/workers/Signal Engine НЕ менялись.
+**Документ:** `docs/phase3d-audit.md` (версия этого раздела — краткое резюме, детали — в документе).
+
+**Итог аудита:**
+
+1. **Hardcoded SMC (A) найдены и верифицированы по файлам (см. §1 docs/phase3d-audit.md):**
+   - `displacement: bodyAtrMin 1.5 / rangeAtrMin 2.0 / bullCloseLocMin 0.60 / bearCloseLocMax 0.40 / atrPeriod 14` (`lib/smc/displacement.ts:62`)
+   - `fvg: minGapAtr 0.10 / maxAgeCandles 500 (override 0 в scoring) / atrPeriod 14` (`lib/smc/fvg.ts:66`)
+   - `liquidity: eqToleranceAtr 0.10 / eqConfirmBars 2 / sweepMinPenetrationAtr 0.05 / maxAgeCandles 750 (override 0) / swing 20` (`lib/smc/liquidity.ts:64`)
+   - `order-blocks: impulseMaxCandles 3 / confirmMaxCandles 10 / maxAge 750 / sweepLookback 5`; под-вызовы `1.5/2.0/0.6/0.4` и `minGap 0.1` захардкожены внутри `findOrderBlocks` (`lib/smc/order-blocks.ts:122,260`)
+   - `range: eqBand 0.02 / swing 20` уже конфигурируем (`lib/smc/range.ts:48`) — не требует раскрытия
+   - `config.ts:deriveSubConfigs` прокидывает только `atrPeriod/swing/eqBand/freshBars/weights` — остальные 14 кандидатов остаются вне `SmcScoringConfig` (B vs A чётко разделены).
+
+2. **Уже конфигурируемо (B) — живой эффект:** `minimumScore 72 / minExchanges 3 / timeframes / swingLeft 20 / swingRight 20 / internal 3 / atrPeriod 14 / freshBars 10/5/20/20 / eqBand 0.02 / 9 weights / filters 0/false-Top-100` (`lib/smc/config.ts:39-84` → `deriveSubConfigs` → `scoring.ts/evaluate.ts/range.ts/liquidity/OB/fsm`). Мёртвых/дублированных ключей нет.
+
+3. **RANGE_POSITION (критично, без clamp):** observed `5m -0.91 / 1d 2.24` — **legit per current spec** (`range.ts:334 position без clamp`, `outsideRange = position<0||>1`, `scoring.ts:340 still DISCOUNT/PREMIUM если вне`). Активный range создаётся только `BOS` (`buildDealingRangeFromBos`), заменяется `BOS`, закрывается `CHOCH`; **выход цены за [low,high] range не инвалидирует** — остаётся active пока не придёт `CHOCH/new BOS`. Лайфсайкл без `maxAge`; Scoring `outsideRange` не гейтит. Тесты не требуют `[0,1]`. Clamp скрыл бы staleness. Решение: **не clamp**, lifecycle-решение (maxAge/«N баров вне → expired» vs оставить breakout-семантику) требует отдельного product-решения + бэктеста.
+
+4. **Safety invariants (не конфигурируемы):** CLOSED-only / no-lookahead / детерминизм / cannot-evaluate / chronology / exact grid+same horizon / NO Signal writes / `edf3732` NOT ancestor + plateau `===`, FSM-phase, FVG/OB state sets, `SMCTIMEFRAME_MS`.
+
+5. **Backward-compat контракт:** `defaultXConfig` — единственный источник (см. таблицу fallback в docs §5). `SmcScoringConfig` расширяется `optional` полями `displacement/fvg/liquidity/orderBlock`; отсутствие → `...defaultXConfig(tf)` (exact current behavior). Валидация в `assertValidSmcScoringConfig` с теми же ranges.
+
+6. **Admin UX (рус., proposal docs §6):** grouped Displacement/FVG/Liquidity/OB, метка/объяснение/влияние ↑/↓/диапазон/дефолт/зависимости/предупреждение — не реализовано, только дизайн аудита.
+
+7. **План внедрения (docs §7):** 3D-A (типы+defaults) → 3D-B (core wiring) → 3D-C (validate) → 3D-D (Admin/API) → 3D-E (regression/alignment/no-Signal) — минимум регрессии, proofs/эквивалентность на каждом этапе.
+
+8. **Тест-план (docs §8):** old-config эквивалентность, канонические дефолты, эффект каждого параметра, malformed/boundary/dependencies, deterministic/no-lookahead/CLOSED/cannot-evaluate/multi-TF+exchange/Trend неизменён/no Signal/no ancestry + RANGE_POSITION 4 кейса.
+
+Файлы аудита изменены в этом коммите: `docs/phase3d-audit.md` (новый) + этот §34.
