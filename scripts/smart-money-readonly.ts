@@ -29,6 +29,7 @@ import {
   type SmartMoneyFilters,
 } from "../lib/strategies/smart-money";
 import { aggregateAssetGroup } from "../lib/strategies/runtime";
+import { checkCandleAlignment, canAggregateSafely } from "../lib/strategies/alignment";
 import { fileURLToPath } from "node:url";
 import { validateTrendSuslikConfig } from "../lib/strategies/config";
 
@@ -40,11 +41,12 @@ import {
 
 function printHelp(): void {
   console.log(`
-Smart Money — read-only diagnostic CLI (Phase 3B)
+Smart Money — read-only diagnostic CLI (Phase 3B + Phase 3E diagnostic)
 
 Использование:
   npx tsx scripts/smart-money-readonly.ts --symbol BTC [--timeframe 1h]
   npx tsx scripts/smart-money-readonly.ts --market-id 123 [--timeframe 1h]
+  npx tsx scripts/smart-money-readonly.ts --symbol BTC --timeframe 15m --diagnostic-canonical-config
   npx tsx scripts/smart-money-readonly.ts --self-test
   npx tsx scripts/smart-money-readonly.ts --help
 
@@ -53,6 +55,7 @@ Smart Money — read-only diagnostic CLI (Phase 3B)
   --market-id 123        конкретный Market.id            (также --market-id=123, --marketId 123 / --marketId=123)
   --timeframe 1h         таймфрейм: 5m, 15m, 1h, 4h, 1d (по умолчанию 1h) (также --timeframe=1h)
   --self-test            проверки без БД (pure adapter, инварианты)
+  --diagnostic-canonical-config  DIAGNOSTIC ONLY: canonical SMC config, bypasses Strategy.timeframes, read-only, shows per-exchange + alignment guard
   --help                 эта справка
 
 Правила:
@@ -60,6 +63,8 @@ Smart Money — read-only diagnostic CLI (Phase 3B)
   - Только чтение: никаких Signal INSERT/UPDATE.
   - Свечи берутся из PostgreSQL Candle where closed=true, последние 500 DESC → reverse → ASC.
   - Для --symbol агрегация по активу через существующий aggregateAssetGroup.
+  - Без --diagnostic-canonical-config: Strategy.timeframes строго проверяется (Phase 3C staged ["1h"]).
+  - С --diagnostic-canonical-config: используется canonical engineering config (minimumSignalScore 72, swing 20/20 etc.), Strategy SMC params игнорируются; фильтры/minExchanges берутся из Strategy если семантически безопасно, иначе default — явно логируется;loud DIAGNOSTIC ONLY баннер.
   - Принимаются обе формы --flag value и --flag=value; флаг без значения — ошибка (например --symbol --timeframe не поглотит --timeframe).
 `);
 }
@@ -584,7 +589,7 @@ async function closeDb(): Promise<void> {
   db = null;
 }
 
-async function runSymbolMode(symbol: string, timeframe: SmcTimeframe): Promise<number> {
+async function runSymbolMode(symbol: string, timeframe: SmcTimeframe, diagnostic = false): Promise<number> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const prisma = (await getDb()) as any;
 
@@ -599,6 +604,14 @@ async function runSymbolMode(symbol: string, timeframe: SmcTimeframe): Promise<n
 
   console.log(`\nАктив: ${asset.symbol} (rank ${asset.rank ?? "—"}, id ${asset.id})`);
   console.log(`Таймфрейм: ${timeframe}`);
+  if (diagnostic) {
+    console.log(`
+╔══════════════════════════════════════════════════════════════╗`);
+    console.log(`║  DIAGNOSTIC ONLY — CANONICAL CONFIG — READ-ONLY            ║`);
+    console.log(`║  Strategy SMC params IGNORED, canonical engineering config ║`);
+    console.log(`║  No Signal writes, no workers, CLOSED candles only        ║`);
+    console.log(`╚══════════════════════════════════════════════════════════════╝`);
+  }
 
   // Попытка загрузить Strategy конфиг для smart-money, fallback к default
   let smcConfig: SmcScoringConfig;
@@ -611,7 +624,43 @@ async function runSymbolMode(symbol: string, timeframe: SmcTimeframe): Promise<n
       where: { slug: SMART_MONEY_SLUG },
       orderBy: { version: "desc" as never },
     });
-    if (strat) {
+    if (diagnostic) {
+      // DIAGNOSTIC: canonical SMC config regardless of Strategy.timeframes
+      smcConfig = defaultSmcScoringConfig(timeframe);
+      if (strat) {
+        const rt = validateSmartMoneyRuntime({
+          config: strat.config,
+          timeframes: strat.timeframes,
+          minExchanges: strat.minExchanges,
+        });
+        if (rt.ok) {
+          // Use real Strategy operator filters/minExchanges if semantically safe (they are independent of TF)
+          filters = rt.filters;
+          minExchanges = rt.minExchanges;
+          strategyVersion = strat.version;
+          console.log(
+            `DIAGNOSTIC: Стратегия ${strat.slug} v${strat.version} найдена — Strategy SMC params IGNORED, canonical config for ${timeframe} (minimumScore=${smcConfig.minimumScore}) используется.`,
+          );
+          console.log(
+            `DIAGNOSTIC filters/minExchanges: using Strategy DB values (minExchanges=${minExchanges}, filters=${JSON.stringify(filters)}) — явно логируется, canonical SMC params only`,
+          );
+        } else {
+          console.log(
+            `DIAGNOSTIC: Стратегия ${SMART_MONEY_SLUG} в БД невалидна (${rt.errors.join("; ")}) — используется canonical config + DEFAULT filters/minExchanges (2)`,
+          );
+          filters = DEFAULT_SMART_MONEY_FILTERS;
+          minExchanges = 2;
+          strategyVersion = strat.version;
+        }
+      } else {
+        console.log(
+          `DIAGNOSTIC: Стратегия ${SMART_MONEY_SLUG} не найдена — используется canonical defaultSmcScoringConfig(${timeframe}) с minimumScore=72 + DEFAULT filters/minExchanges`,
+        );
+        filters = DEFAULT_SMART_MONEY_FILTERS;
+        minExchanges = 2;
+      }
+      console.log(`DIAGNOSTIC ONLY: no Strategy mutation, no Signal writes, CLOSED candles only, workers not started`);
+    } else if (strat) {
       const rt = validateSmartMoneyRuntime({
         config: strat.config,
         timeframes: strat.timeframes,
@@ -709,7 +758,23 @@ async function runSymbolMode(symbol: string, timeframe: SmcTimeframe): Promise<n
     }
   }
 
-  // Aggregation
+  // Phase 3E: cross-exchange candle-window alignment guard before aggregation
+  const alignment = checkCandleAlignment(results, timeframe);
+  console.log(`\n=== Выравнивание окон (alignment) ${timeframe} ===`);
+  for (const d of alignment.details) {
+    console.log(`  ${d.exchange}: candleTime=${d.candleTime.toISOString()} UTC hour=${d.utcHour} offset=${d.offsetMs}ms ${d.aligned ? "ALIGNED" : "MISALIGNED"}`);
+  }
+  if (!alignment.aligned) {
+    console.log(`  ⚠ MISALIGNED — cannot-aggregate for multi-exchange ${timeframe}: ${alignment.reason}`);
+    console.log(`  Пояснение: для ${timeframe} окна должны быть выровнены к canonical UTC границе (openTime % ${"SMCTIMEFRAME_MS[timeframe]"} ===0). BINGX 1d в 16 UTC не совпадает с остальными 00 UTC — это разные daily периоды, агрегация запрещена.`);
+    if (timeframe === "1d") {
+      console.log(`  Вывод 1d: оценивается per-exchange независимо, но multi-exchange агрегация REFUSED. Для разблокировки 1d требуется нормализация BINGX daily к UTC 00 или исключение BINGX из 1d universe.`);
+    }
+  } else {
+    console.log(`  ✓ ALIGNED ${alignment.alignedCount}/${alignment.totalEvaluated} — можно агрегировать`);
+  }
+
+  // Aggregation (if misaligned for 1d, we still compute but mark as not aggregatable)
   const agg = aggregateAssetGroup(
     asset.symbol,
     timeframe,
@@ -719,18 +784,27 @@ async function runSymbolMode(symbol: string, timeframe: SmcTimeframe): Promise<n
     minExchanges
   );
 
-  console.log(`\n=== Агрегация ${asset.symbol} ${timeframe} ${SMART_MONEY_SLUG} v${strategyVersion} ===`);
-  console.log(`  direction: ${agg.direction} ${agg.conflict ? "(КОНФЛИКТ)" : ""}`);
-  console.log(`  votes: LONG ${agg.longVotes} SHORT ${agg.shortVotes} NEUTRAL ${agg.neutralVotes} evaluated ${agg.evaluated} skipped ${agg.skipped}`);
-  console.log(`  confirmation: ${agg.confirmation} (порог ${agg.minExchanges})`);
-  console.log(`  explanation: ${agg.explanation}`);
+  if (!canAggregateSafely(alignment) && timeframe === "1d") {
+    console.log(`\n=== Агрегация ${asset.symbol} ${timeframe} ${SMART_MONEY_SLUG} v${strategyVersion} — REFUSED (misaligned) ===`);
+    console.log(`  direction: ${agg.direction} ${agg.conflict ? "(КОНФЛИКТ)" : ""} — НЕДОСТОВЕРНО для 1d из-за misalignment`);
+    console.log(`  votes: LONG ${agg.longVotes} SHORT ${agg.shortVotes} NEUTRAL ${agg.neutralVotes} evaluated ${agg.evaluated} skipped ${agg.skipped}`);
+    console.log(`  confirmation: ${agg.confirmation} (порог ${agg.minExchanges})`);
+    console.log(`  explanation: ${agg.explanation} — ОТКЛОНЕНО: cross-exchange daily windows не выровнены (BINGX 16 UTC vs 00 UTC)`);
+    console.log(`  Действие: per-exchange результаты выше валидны, но multi-exchange сигнал для 1d НЕ формируется.`);
+  } else {
+    console.log(`\n=== Агрегация ${asset.symbol} ${timeframe} ${SMART_MONEY_SLUG} v${strategyVersion} ===`);
+    console.log(`  direction: ${agg.direction} ${agg.conflict ? "(КОНФЛИКТ)" : ""}`);
+    console.log(`  votes: LONG ${agg.longVotes} SHORT ${agg.shortVotes} NEUTRAL ${agg.neutralVotes} evaluated ${agg.evaluated} skipped ${agg.skipped}`);
+    console.log(`  confirmation: ${agg.confirmation} (порог ${agg.minExchanges})`);
+    console.log(`  explanation: ${agg.explanation}`);
+  }
 
   const discBefore = await prisma.signal.count().catch(() => 0);
   console.log(`\nSignal в БД (только чтение): ${discBefore} (записей не создано)`);
   return 0;
 }
 
-async function runMarketMode(marketId: number, timeframe: SmcTimeframe): Promise<number> {
+async function runMarketMode(marketId: number, timeframe: SmcTimeframe, diagnostic = false): Promise<number> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const prisma = (await getDb()) as any;
 
@@ -746,6 +820,12 @@ async function runMarketMode(marketId: number, timeframe: SmcTimeframe): Promise
   console.log(`\nMarket: ${market.exchange} ${market.exchangeSymbol} (id ${market.id})`);
   console.log(`Asset: ${market.asset.symbol} rank ${market.asset.rank ?? "—"}`);
   console.log(`Таймфрейм: ${timeframe}`);
+  if (diagnostic) {
+    console.log(`
+╔══════════════════════════════════════════════════════════════╗`);
+    console.log(`║  DIAGNOSTIC ONLY — CANONICAL CONFIG — READ-ONLY            ║`);
+    console.log(`╚══════════════════════════════════════════════════════════════╝`);
+  }
 
   let smcConfig: SmcScoringConfig;
   let filters: SmartMoneyFilters = DEFAULT_SMART_MONEY_FILTERS;
@@ -754,7 +834,27 @@ async function runMarketMode(marketId: number, timeframe: SmcTimeframe): Promise
       where: { slug: SMART_MONEY_SLUG },
       orderBy: { version: "desc" as never },
     });
-    if (strat) {
+    if (diagnostic) {
+      smcConfig = defaultSmcScoringConfig(timeframe);
+      if (strat) {
+        const rt = validateSmartMoneyRuntime({
+          config: strat.config,
+          timeframes: strat.timeframes,
+          minExchanges: strat.minExchanges,
+        });
+        if (rt.ok) {
+          filters = rt.filters;
+          console.log(`DIAGNOSTIC: Стратегия ${strat.slug} v${strat.version} — canonical config for ${timeframe} (minimumScore=${smcConfig.minimumScore}), filters from DB ${JSON.stringify(filters)}`);
+        } else {
+          console.log(`DIAGNOSTIC: Стратегия невалидна — canonical config + DEFAULT filters`);
+          filters = DEFAULT_SMART_MONEY_FILTERS;
+        }
+      } else {
+        console.log(`DIAGNOSTIC: Стратегия ${SMART_MONEY_SLUG} не найдена — canonical defaultSmcScoringConfig(${timeframe})`);
+        filters = DEFAULT_SMART_MONEY_FILTERS;
+      }
+      console.log(`DIAGNOSTIC ONLY: no mutation, CLOSED only`);
+    } else if (strat) {
       const rt = validateSmartMoneyRuntime({
         config: strat.config,
         timeframes: strat.timeframes,
@@ -858,12 +958,13 @@ async function main(): Promise<number> {
   }
 
   try {
+    const diag = !!args.diagnosticCanonicalConfig;
     if (hasSymbol) {
-      const code = await runSymbolMode(args.symbol as string, tf);
+      const code = await runSymbolMode(args.symbol as string, tf, diag);
       await closeDb();
       return code;
     } else {
-      const code = await runMarketMode(args.marketId as number, tf);
+      const code = await runMarketMode(args.marketId as number, tf, diag);
       await closeDb();
       return code;
     }

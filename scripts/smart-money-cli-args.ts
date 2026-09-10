@@ -10,6 +10,7 @@ export type Args = {
   timeframe: string;
   selfTest: boolean;
   help: boolean;
+  diagnosticCanonicalConfig: boolean;
 };
 
 /**
@@ -32,6 +33,7 @@ export function parseSmartMoneyArgs(argv: string[]): {
   let timeframe = "1h";
   let selfTest = false;
   let help = false;
+  let diagnosticCanonicalConfig = false;
   const errors: string[] = [];
   let symbolProvided = false;
   let marketIdProvided = false;
@@ -45,6 +47,10 @@ export function parseSmartMoneyArgs(argv: string[]): {
     }
     if (arg === "--help" || arg === "-h") {
       help = true;
+      continue;
+    }
+    if (arg === "--diagnostic-canonical-config") {
+      diagnosticCanonicalConfig = true;
       continue;
     }
 
@@ -162,7 +168,7 @@ export function parseSmartMoneyArgs(argv: string[]): {
   }
 
   return {
-    args: { symbol, marketId, timeframe, selfTest, help },
+    args: { symbol, marketId, timeframe, selfTest, help, diagnosticCanonicalConfig },
     errors,
     symbolProvided,
     marketIdProvided,
