@@ -158,9 +158,9 @@ export async function PUT(
       );
     }
 
-    // Phase 3E verified: only 5m/15m/1h/4h allowed, 1d rejected. Non-empty required. Rejects before prisma.strategy.update.
+    // Rollout: any non-empty subset of ["5m","15m","1h","4h","1d"] — 5m/15m/1h/4h verified on BTC across 5 exchanges, 1d verified on BTC with Smart Money eligibility policy (BINGX excluded ONLY for 1d aggregation, 4 eligible BINANCE/BYBIT/GATE/KUCOIN, canonical UTC horizon). Rejects empty/unknown before prisma.strategy.update.
     const verifiedTF = runtimeValidation.timeframes;
-    const allowedVerified = new Set(["5m", "15m", "1h", "4h"]);
+    const allowedVerified = new Set(["5m", "15m", "1h", "4h", "1d"]);
     if (verifiedTF.length === 0) {
       return NextResponse.json(
         { error: "Выберите хотя бы один таймфрейм" },
@@ -171,8 +171,7 @@ export async function PUT(
     if (hasDisallowed) {
       return NextResponse.json(
         {
-          error:
-            "1d временно недоступен: на реальных данных BTC обнаружено несовпадение дневной границы BingX (16:00 UTC) с четырьмя другими биржами (00:00 UTC). Multi-exchange aggregation запрещена до отдельного решения.",
+          error: "timeframes: недопустимые значения: " + verifiedTF.filter((tf) => !allowedVerified.has(tf as string)).join(", "),
         },
         { status: 400 }
       );

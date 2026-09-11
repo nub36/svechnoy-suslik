@@ -373,8 +373,8 @@ function canonicalSmallBase(): Record<string, unknown> {
   }
   // 1d can remain canonical-valid at pure validator level
   const rt1d = validateSmartMoneyRuntime({ config: base, timeframes: ["1d"], minExchanges: 3 });
-  ok(rt1d.ok === true, "MT5: 1d still canonical-valid at runtime validator level (Admin/API guard separate)");
-  console.log("NOTE: MT5 — 1d runtime valid but Admin/API Phase3E still blocks 1d (alignment guard, not weakened)");
+  ok(rt1d.ok === true, "MT5: 1d canonical-valid at runtime validator level (rollout)");
+  console.log("NOTE: MT5 — 1d runtime valid and Admin/API rollout now allows 1d (eligibility 4 eligible, alignment guard not weakened)");
 }
 
 console.log(`Itog: ${passed}/${total}`);

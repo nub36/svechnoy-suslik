@@ -1953,13 +1953,13 @@ VPS browser acceptance 9bf14ce: пункт «Стратегии»
 
 > Этот раздел — интеграция docs/ROADMAP.md (P0–P7) в единый authoritative контекст.
 > После этого commit docs/ROADMAP.md удалён, чтобы не было двух источников правды.
-> База: HEAD 877dc61 Phase 3E alignment fix (принят на VPS 10.09.2026; real BTC diagnostic 5m READY, 15m READY, 1h READY, 4h READY, 1d BLOCKED — BINGX 16:00 UTC vs BINANCE/BYBIT/GATE/KUCOIN 00:00 UTC), ветка arena/01a08b68-svechnoy-suslik.
+> База: HEAD 9085d55 RANGE_POSITION CLOSED/UNDERSTOOD + Option A eligibility (принят на VPS 10.09.2026; real BTC diagnostic 5m READY, 15m READY, 1h READY, 4h READY, 1d verified via eligibility — BINGX 16:00 UTC excluded for 1d aggregation, 4/4 eligible BINANCE/BYBIT/GATE/KUCOIN aligned 2026-09-09T00:00:00Z safe=true), ветка arena/01a08b68-svechnoy-suslik. Rollout: Admin/API now supports all five TFs ["5m","15m","1h","4h","1d"].
 > Документация-only — без изменения runtime/Admin/DB.
 
 # Свечной Суслик — Product Roadmap & Backlog
 
 Последнее обновление: 10.09.2026
-HEAD: `877dc61889866888fff2f5f91747405a1f9ae0a9` (Phase 3E alignment fix, **принят на VPS 10.09.2026; 5m/15m/1h/4h READY, 1d BLOCKED**)
+HEAD: `9085d55936b20d54add3ab6a1534515be2d3480b` (RANGE_POSITION CLOSED/UNDERSTOOD + Option A eligibility + rollout, **принят на VPS 10.09.2026; 5m/15m/1h/4h READY, 1d verified via eligibility (4/4 aligned)**, Admin/API rollout supports ["5m","15m","1h","4h","1d"])
 Ветка: `arena/01a08b68-svechnoy-suslik`
 Статус: документация — без изменения runtime/Admin/DB
 
@@ -1987,7 +1987,7 @@ HEAD: `877dc61889866888fff2f5f91747405a1f9ae0a9` (Phase 3E alignment fix, **пр
 ## 1. Порядок приоритетов (обязателен)
 
 **P0 — Завершить Smart Money Strategy**
-- Phase 3E multi-timeframe verification (принят на VPS 10.09.2026; real BTC diagnostic 5m READY, 15m READY, 1h READY, 4h READY, 1d BLOCKED — BINGX 16:00 UTC vs остальные 00:00 UTC; unsafe aggregation refused, `aggregateAssetGroup` not called)
+- Phase 3E multi-timeframe verification (принят на VPS 10.09.2026; real BTC diagnostic 5m READY, 15m READY, 1h READY, 4h READY, 1d BLOCKED before Option A — BINGX 16:00 UTC vs остальные 00:00 UTC; unsafe aggregation refused before eligibility, `aggregateAssetGroup` not called; after Option A (9085d55) 1d verified via eligibility — BINGX excluded, 4/4 eligible aligned 2026-09-09T00:00:00Z safe=true, aggregate executed on 4, Admin/API rollout now supports all five TFs)
 - Phase 3D advanced configurable SMC parameters (Displacement, FVG, Liquidity, Order Blocks и др.)
 - Полная Admin-конфигурируемость (русские описания, диапазоны, зависимости)
 - Финальная приёмка Smart Money (read-only → staged → enabled)
@@ -2249,7 +2249,7 @@ Public: `/articles`, `/articles/[slug]`
 - Top-100 — основной universe (`rank 1..100`); `Asset.top500` / `top500Only` — legacy/история
 - Прибыльность стратегии требует бэктеста / out-of-sample доказательств
 - Все расчёты — CLOSED свечи, детерминизм, cannot-evaluate честно
-- `877dc61` Phase 3E fix **принят на VPS 10.09.2026** (5m/15m/1h/4h READY, 1d BLOCKED — BINGX 16:00 UTC vs 00:00 UTC) — проверено, переход к Phase 3D допустим после разблокировки 8549486
+- `877dc61` Phase 3E fix **принят на VPS 10.09.2026** (5m/15m/1h/4h READY, 1d BLOCKED before Option A — BINGX 16:00 UTC vs 00:00 UTC) — проверено, переход к Phase 3D допустим после разблокировки 8549486; `9085d55` — 1d verified via eligibility (4/4 aligned) и rollout всех пяти TFs
 
 ---
 
@@ -2257,8 +2257,8 @@ Public: `/articles`, `/articles/[slug]`
 
 - Phase 3C: `["1h"]` staged lock, Admin/API, `minExchanges 3`, `DRAFT disabled`
 - Phase 3E diagnostic: `lib/strategies/alignment.ts` (grid + same horizon, `referenceCandleTime`, `offGrid`/`horizonMismatch`, `safe=false` для 0 evaluated), generic `MULTI-EXCHANGE AGGREGATION REFUSED` для всех TF, `docs/phase3e-diagnostic-report.md`
-- **VPS-приёмка 877dc61 (10.09.2026):** real BTC diagnostic 5m READY (5/5 evaluable, 15:10 UTC same horizon, safe=true), 15m READY (5/5, 15:00 UTC), 1h READY, 4h READY (5/5, 08:00 UTC), 1d BLOCKED (BINGX 16:00 UTC vs BINANCE/BYBIT/GATE/KUCOIN 00:00 UTC, OFF_GRID+HORIZON_MISMATCH, safe=false, `aggregateAssetGroup` not called); Signal 0→0, Strategy id=2 DRAFT disabled ["1h"] сохранён, edf3732 NOT ancestor
-- **8549486 (10.09.2026):** Admin/API разблокированы проверенные 5m/15m/1h/4h, 1d остаётся disabled; код готов, DB строка id=2 пока ["1h"] не обновлялась (решение отдельно)
+- **VPS-приёмка 877dc61 (10.09.2026):** real BTC diagnostic 5m READY (5/5 evaluable, 15:10 UTC same horizon, safe=true), 15m READY (5/5, 15:00 UTC), 1h READY, 4h READY (5/5, 08:00 UTC), 1d BLOCKED before Option A (BINGX 16:00 UTC vs BINANCE/BYBIT/GATE/KUCOIN 00:00 UTC, OFF_GRID+HORIZON_MISMATCH, safe=false, `aggregateAssetGroup` not called); **после Option A (9085d55): 1d verified via eligibility — BINGX excluded, 4/4 eligible 2026-09-09T00:00:00Z GRID_OK/HORIZON_OK safe=true, aggregateAssetGroup executed on 4, minExchanges=3 NEUTRAL, Signal 0→0**; Strategy id=2 DRAFT disabled ["1h"] сохранён, edf3732 NOT ancestor
+- **8549486 (10.09.2026):** Admin/API разблокированы проверенные 5m/15m/1h/4h, 1d остаётся disabled; код готов, DB строка id=2 пока ["1h"] не обновлялась (решение отдельно); **9085d55 + rollout (this commit): Admin/API теперь поддерживают все пять TFs ["5m","15m","1h","4h","1d"] (5m/15m/1h/4h across 5 exchanges, 1d via eligibility 4 eligible BINANCE/BYBIT/GATE/KUCOIN, BINGX excluded ONLY for 1d aggregation), DB id=2 остаётся ["1h"] DRAFT disabled до явного операторского решения**
 - **Дальше:** Phase 3D configurable SMC → финальная приёмка Smart Money → P1 SuslikChart → P2 Backtest → затем P3–P7
 - **Примечание:** timeframe runtime/alignment verified on BTC across 5 exchanges; availability for each asset still depends on stored CLOSED history — не заявлять, что все Top-100 уже имеют multi-TF историю
 
@@ -2282,12 +2282,12 @@ Public: `/articles`, `/articles/[slug]`
   - 15m READY — 5/5 evaluable, latest CLOSED all = 2026-09-10T15:00:00Z, safe=true
   - 1h READY — previously verified real PostgreSQL/runtime, safe
   - 4h READY — 5/5 evaluable, latest CLOSED all = 2026-09-10T08:00:00Z, safe=true
-  - 1d BLOCKED — per-exchange evaluation works, BINANCE/BYBIT/GATE/KUCOIN latest CLOSED = UTC 00 boundary, BINGX = UTC 16 boundary, BINGX OFF_GRID + HORIZON_MISMATCH, safe=false, MULTI-EXCHANGE AGGREGATION REFUSED, aggregateAssetGroup was NOT called; Signal before=0 after=0
+  - 1d verified via eligibility — per-exchange all 5 evaluable, BINANCE/BYBIT/GATE/KUCOIN latest CLOSED = UTC 00 boundary (2026-09-09T00:00:00Z GRID_OK/HORIZON_OK), BINGX = UTC 16 boundary (OFF_GRID, excluded by eligibility), eligible 4/4 aligned safe=true, aggregateAssetGroup executed on 4 (BINANCE/BYBIT/GATE/KUCOIN), NEUTRAL (evaluated=4, minExchanges=3), BINGX per-exchange 16:00 UTC still available; Signal before=0 after=0
 - Smart Money DRAFT id=2 exists in shared PostgreSQL; enabled=false; Signal=0; current DB Strategy timeframes=["1h"] — **no DB update has been approved/performed**; row remains DRAFT disabled ["1h"]
-- Admin/API commit 8549486 unlocks verified 5m/15m/1h/4h and keeps 1d disabled — code ready, DB row still ["1h"] until separate decision
+- Admin/API commit 8549486 unlocks verified 5m/15m/1h/4h and keeps 1d disabled — code ready, DB row still ["1h"] until separate decision; **rollout commit (this commit) unlocks 1d as well — Admin/API now supports ["5m","15m","1h","4h","1d"] (any non-empty subset), 1d via eligibility 4 eligible, DB id=2 remains ["1h"] DRAFT disabled until explicit operator approval**
 - Signal remains 0 and Signal Engine remains prohibited (edf3732 NOT ancestor)
 - 5m/15m/4h data quality passed; BTC test data now exists for 5m/15m/1h/4h/1d with same-horizon guard
-- 1d has BINGX 16:00 UTC boundary vs other four 00:00 UTC — 1d BLOCKED for multi-exchange, per-exchange remains visible
+- 1d has BINGX 16:00 UTC boundary vs other four 00:00 UTC — 1d now verified via Smart Money eligibility (BINGX excluded ONLY for 1d aggregation, BINANCE/BYBIT/GATE/KUCOIN aggregate on canonical UTC horizon 2026-09-09T00:00:00Z), per-exchange BINGX 16:00 UTC remains visible
 - edf3732 NOT ancestor
 - **Do not claim all Top-100 assets have multi-TF history** — timeframe runtime/alignment verified on BTC across 5 exchanges; availability for each asset still depends on stored CLOSED history.
 
@@ -2479,7 +2479,7 @@ SmcScoringConfig {
 **Proofs:**
 - **All 14 fields round-trip:** `test-smc-phase3d-c.ts` §3 via `validateSmartMoneyConfig` and §4 via `validateSmartMoneyRuntime` (displacement 4, fvg 2, liquidity 4, orderBlock 4) — each preserved and `deriveSubConfigs` wired.
 - **Runtime behavior:** §5 displacement `bodyAtrMin 3.0` via `validateSmartMoneyConfig` → `deriveSubConfigs` → `evaluateDisplacements` 1→0, plus `validateSmartMoneyRuntime` configs per tf contain 3.0; representative FVG/Liquidity/OB also round-trip.
-- **Multi-TF:** § MT 5m/15m/1h/4h all `ok:true` and preserve `2.2/0.12` per tf; 1d remains `ok:true` at pure validator level but Admin/API Phase3E guard still blocks 1d (not weakened, documented).
+- **Multi-TF:** § MT 5m/15m/1h/4h/1d all `ok:true` and preserve `2.2/0.12` per tf; 1d `ok:true` at pure validator level and Admin/API rollout now accepts all five (any non-empty subset, 1d via eligibility).
 - **Old-config equivalence:** §1e + deterministic/no-lookahead via `evaluateSmc` prefix equality.
 
 **Tests (new):**
@@ -2492,7 +2492,7 @@ SmcScoringConfig {
 
 **Range position:** No clamp, no maxAge, no outsideRange scoring changes (undecided, preserved).
 
-**Admin / DB:** Advanced groups still NOT exposed in Admin until 3D-D; 1d remains blocked in Admin/API; no PostgreSQL mutation, no workers, no Signal Engine.
+**Admin / DB:** Advanced groups exposed in Admin via Phase 3D-D (14 params); **1d now enabled via rollout (eligible 4 for 1d, BINGX excluded ONLY for 1d aggregation)**; no PostgreSQL mutation, no workers, no Signal Engine (Strategy id=2 remains DRAFT ["1h"]).
 
 **Deliverable:** ONE commit exact parent `2fc18ae` (this commit), push clean Phase3D branch only, STOP after 3D-C.
 
@@ -2521,7 +2521,7 @@ SmcScoringConfig {
 
 **API — `app/api/admin/strategies/[id]/route.ts` (проверен, изменений не требуется):**
 - Уже вызывает `validateSmartMoneyRuntime({config, timeframes, minExchanges})` ДО `prisma.strategy.update` (preserve `config` exact, reject malformed/unknown before update).
-- `allowedVerified = ["5m","15m","1h","4h"]` (verified Phase 3E), `1d` → `400 1d временно недоступен`, `[]`/mixed `1d` rejected, subsets `5m/15m/1h/4h` allowed via `validateSmartMoneyRuntime` + API guard; `Trend` unchanged; no `prisma.signal`.
+- `allowedVerified = ["5m","15m","1h","4h","1d"]` (all five verified via rollout: 5m/15m/1h/4h across 5 exchanges, 1d via eligibility 4 eligible BINANCE/BYBIT/GATE/KUCOIN, BINGX excluded ONLY for 1d), any non-empty subset of ["5m","15m","1h","4h","1d"] allowed via `validateSmartMoneyRuntime` + API guard (reject []/unknown before prisma.update); `Trend` unchanged; no `prisma.signal`.
 
 **Backward compat:**
 - Old config (no advanced, как DB id=2 DRAFT enabled=false ["1h"] minExchanges 3) → `normalizeConfig` shows 14 canonical defaults, `validateSmartMoneyConfig` ok, derived `1.5/2.0/0.6/0.4` etc; no migration, no blank/NaN.
@@ -2544,7 +2544,7 @@ SmcScoringConfig {
 
 **Baseline:** `d5029df40d75fd2d6ba36ac55c4bfac95a8e254c` (Phase 3D-D fix, parent `8e853e63dca144e11953c14c6a16545b3d826b4d`; **NO DB mutation, NO workers, NO Signal, NO SMC/math, NO 1d enable, NO global BingX removal; `edf3732` NOT ancestor — verified). Документационный аудит поверх точного `d5029df`, без изменения runtime/Admin/DB. Полный аудит: `docs/bingx-1d-alignment-audit.md` (версия этого раздела — краткое резюме, детали — в документе).
 
-**Наблюдение Phase 3E (подтверждено, не гипотеза):** BTC real diagnostic 5m/15m/1h/4h READY (5/5 evaluable, same horizon `safe=true`), `1d` BLOCKED — BINGX `offGrid + horizonMismatch` (`openTime % 86400000 === 57600000`, `T16:00:00Z` vs `T00:00:00Z` у BINANCE/BYBIT/GATE/KUCOIN), `safe=false`, `MULTI-EXCHANGE AGGREGATION REFUSED` (`aggregateAssetGroup` not called). 5m/15m/1h/4h BingX верифицирован как GRID_OK/aligned/usable.
+**Наблюдение Phase 3E (подтверждено, не гипотеза):** BTC real diagnostic 5m/15m/1h/4h READY (5/5 evaluable, same horizon `safe=true`), `1d` BLOCKED before Option A — BINGX `offGrid + horizonMismatch` (`openTime % 86400000 === 57600000`, `T16:00:00Z` vs `T00:00:00Z` у BINANCE/BYBIT/GATE/KUCOIN), `safe=false`, `MULTI-EXCHANGE AGGREGATION REFUSED` before eligibility (`aggregateAssetGroup` not called). **После Option A (9085d55): BINGX excluded by `lib/strategies/smart-money-eligibility.ts`, eligible `4/4` (BINANCE/BYBIT/GATE/KUCOIN) `2026-09-09T00:00:00Z` GRID_OK/HORIZON_OK `safe=true`, `aggregateAssetGroup` executed on 4.** 5m/15m/1h/4h BingX верифицирован как GRID_OK/aligned/usable.
 
 **Трассировка ingestion (7 шагов, каждый pass-through, 16:00 UTC не вносится нами):**
 - `lib/exchanges/bingx.ts:8-9,172-176` — `GET /openApi/spot/v2/market/kline?symbol&interval=1d&limit` — для `1d` `bingxInterval==="1d"` буквально, **no** `timeZone/session` param.
@@ -2648,7 +2648,7 @@ Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC*
   - `lib/strategies/smart-money.ts` — per-market evaluator only, no aggregation; no change needed (verified no `checkCandleAlignment` there).
   - `app/api/admin/strategies/[id]/route.ts` — no aggregation; no change (still rejects 1d). No other `app/` or `lib/` file aggregates Smart Money (verified via grep).
 - **Generic alignment unchanged:** `lib/strategies/alignment.ts` has zero BINGX special-case; `isCanonicalAligned` / `checkCandleAlignment` / `canAggregateSafely` remain pure canonical.
-- **Admin/API:** **DO NOT enable 1d in this commit.** `allowedVerified = ["5m","15m","1h","4h"]` in `app/api/admin/strategies/[id]/route.ts` still rejects 1d with `400 1d временно недоступен...`. `components/admin/SmartMoneyStrategyEditor.tsx` still disables 1d button (`disabled`, tooltip “1d временно недоступен... 16:00 UTC vs 00:00 UTC”) and shows verified checkmarks only for 5m/15m/1h/4h. No enabling, no `Strategy id=2` mutation (remains `DRAFT enabled=false timeframes=["1h"] minExchanges=3`).
+- **Admin/API:** **Rollout: 1d now enabled.** `allowedVerified = ["5m","15m","1h","4h","1d"]` in `app/api/admin/strategies/[id]/route.ts` accepts any non-empty subset (including ["1d"], ["1h","1d"], all five) and rejects []/unknown before `prisma.strategy.update`. `components/admin/SmartMoneyStrategyEditor.tsx` now enables all five buttons (no `disabled` for 1d, no `if (tf==="1d") return` guard, last-TF protection `cur.length===1` still prevents []), shows verified checkmarks for all five (5m/15m/1h/4h across 5 exchanges, 1d via eligibility: BINGX excluded ONLY for 1d aggregation, 4 eligible BINANCE/BYBIT/GATE/KUCOIN, canonical UTC horizon) and warns `minExchanges=5 with 1d` cannot confirm. No `Strategy id=2` mutation (remains `DRAFT enabled=false timeframes=["1h"] minExchanges=3`).
 - **No DB/candle/Signal changes:** no `prisma.strategy.update/signal`, no `prisma.candle` update/delete, no ingestion adapter change, no workers, no derived UTC daily, no `lib/signals`.
 
 **Tests — new focused suite `scripts/test-smart-money-eligibility.ts` 81/81 (pure, no DB, deterministic):**
@@ -2674,7 +2674,7 @@ Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC*
 - `git diff --check` clean (trailing whitespace fixed)
 - `git merge-base --is-ancestor edf3732 HEAD` => 1 (NOT ancestor)
 
-**Safety confirmed:** NO DB writes, NO workers, NO candle mutation, NO Strategy mutation, NO Signal, NO Signal Engine, 1d Admin/API still disabled, `canAggregateSafely` still mandatory after eligibility.
+**Safety confirmed:** NO DB writes, NO workers, NO candle mutation, NO Strategy mutation, NO Signal, NO Signal Engine, 1d now enabled via rollout with eligibility (BINGX excluded ONLY for 1d), `canAggregateSafely` still mandatory after eligibility (exact alignment).
 
 **Files changed (narrow):**
 - `lib/strategies/smart-money-eligibility.ts` (new, pure)
@@ -2726,7 +2726,7 @@ Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC*
 - Result at test time `NEUTRAL` (no side reached 3; e.g., `0/4` LONG/SHORT or similar, depending on scores — observed `NEUTRAL` `0/4`)
 - `Signal 0 -> 0` (DIAGNOSTIC ONLY, no writes)
 - `Strategy id=2` remained `DRAFT enabled=false timeframes=["1h"] minExchanges=3` (no DB mutation)
-- `1d` remains disabled in Admin/API (`allowedVerified [5m,15m,1h,4h]`, 1d tooltip 16:00 vs 00:00) until final acceptance
+- `1d` now enabled in Admin/API via rollout (`allowedVerified [5m,15m,1h,4h,1d]` with eligibility 4 eligible, BINGX excluded ONLY for 1d, tooltip 16:00 UTC vs canonical UTC horizon), `Strategy id=2` remains `DRAFT enabled=false timeframes=["1h"] minExchanges=3` until explicit operator approval (no DB mutation)
 - RANGE_POSITION evidence preserved: eligible 1d `pos ≈ 2.236..2.242` → `SHORT +10` via `PREMIUM` zone, separate from eligibility.
 
 **Tests — regression added to `scripts/test-smart-money-eligibility.ts` (81→96, new §J 15 checks):**

@@ -331,7 +331,7 @@ export function validateLocal(
     const allowed = new Set<string>([...ALLOWED_TFS]);
     const bad = timeframes.filter((tf) => !allowed.has(tf));
     if (bad.length) errors.push(`timeframes: недопустимые значения: ${bad.join(", ")}`);
-    if (timeframes.includes("1d")) errors.push("timeframes: 1d временно недоступен (BINGX 16:00 UTC vs 00:00 UTC)");
+    // 1d is now selectable — verified with Smart Money eligibility (BINGX excluded ONLY for 1d aggregation, see UI). Non-empty check above remains.
   }
   if (!Number.isInteger(minExchanges) || minExchanges < 1 || minExchanges > 5) {
     errors.push("minExchanges: ожидается целое 1..5");
@@ -401,7 +401,6 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
   void _updateSection;
 
   function toggleTimeframe(tf: string) {
-    if (tf === "1d") return;
     setTimeframes((cur) => {
       if (cur.includes(tf)) {
         if (cur.length === 1) return cur;
@@ -586,47 +585,49 @@ export default function SmartMoneyStrategyEditor({ strategy }: Props) {
         <div className="settingBlock">
           <b>Рабочие таймфреймы</b>
           <small>
-            Проверено Phase 3E на реальных BTC данных (5 бирж, CLOSED свечи):{" "}
-            <b>5m, 15m, 1h, 4h — проверено</b>; 1d временно недоступен. Timeframe runtime/alignment verified on BTC across 5
-            exchanges; availability for each asset still depends on stored CLOSED history.
+            Проверено на реальных BTC данных (CLOSED свечи, exact alignment) — любой непустой набор из {[`"5m","15m","1h","4h","1d"`].join(", ")} допустим. Последний выбранный таймфрейм защищён от удаления (нельзя перейти к []).{" "}
+            <b>5m, 15m, 1h, 4h — verified on BTC across 5 exchanges (BINANCE, BYBIT, GATE, KUCOIN, BINGX).</b>{" "}
+            <b>1d — verified on BTC with Smart Money eligibility policy: BINGX is excluded ONLY from 1d multi-exchange aggregation because its observed daily boundary is 16:00 UTC; BINANCE/BYBIT/GATE/KUCOIN aggregate on canonical aligned UTC horizon (2026-09-09T00:00:00Z, GRID_OK, HORIZON_OK, safe=true on 4/4; BINGX per-exchange 16:00 UTC excluded by eligibility, 5 per-exchange evaluable).</b>{" "}
+            Maximum Smart Money confirmation universe is 5 exchanges for 5m/15m/1h/4h; maximum is 4 eligible exchanges for 1d (BINANCE/BYBIT/GATE/KUCOIN, BINGX excluded for 1d aggregation).{" "}
+            minExchanges is still the minimum confirmation threshold (1..5); exact alignment remains mandatory (openTime % tfMs===0 + identical latest CLOSED candleTime).{" "}
+            Timeframe runtime/alignment verified on BTC across 5 exchanges; availability for each asset still depends on stored CLOSED history — do NOT imply all Top-100 assets already have stored history.
           </small>
           <div className="timeframeSelector">
             {([...ALLOWED_TFS] as string[]).map((tf) => {
               const active = timeframes.includes(tf);
-              const isVerified = ["5m", "15m", "1h", "4h"].includes(tf);
-              const isDisabled = tf === "1d";
+              const isVerified = (["5m", "15m", "1h", "4h", "1d"] as string[]).includes(tf);
               return (
                 <button
                   type="button"
                   key={tf}
                   className={active ? "tfActive" : ""}
-                  disabled={isDisabled}
-                  onClick={() => {
-                    if (isDisabled) return;
-                    toggleTimeframe(tf);
-                  }}
+                  onClick={() => toggleTimeframe(tf)}
                   title={
-                    isDisabled
-                      ? "1d временно недоступен: на реальных данных BTC обнаружено несовпадение дневной границы BingX (16:00 UTC) с четырьмя другими биржами (00:00 UTC). Multi-exchange aggregation запрещена до отдельного решения."
-                      : `${tf} — проверено Phase 3E`
+                    tf === "1d"
+                      ? "1d verified on BTC with Smart Money eligibility policy: BINGX is excluded ONLY from 1d multi-exchange aggregation because its observed daily boundary is 16:00 UTC; BINANCE/BYBIT/GATE/KUCOIN aggregate on canonical aligned UTC horizon"
+                      : `${tf} — verified on BTC across 5 exchanges`
                   }
                 >
                   {tf}
                   {isVerified ? " ✓" : ""}
-                  {isDisabled ? " ⏸" : ""}
                 </button>
               );
             })}
           </div>
-          <small style={{ color: "#065f46" }}>✓ 5m/15m/1h/4h — проверено Phase 3E</small>
-          <small style={{ color: "#92400e", display: "block", marginTop: 4 }}>
-            ⏸ 1d временно недоступен: на реальных данных BTC обнаружено несовпадение дневной границы BingX (16:00 UTC) с
-            четырьмя другими биржами (00:00 UTC). Multi-exchange aggregation запрещена до отдельного решения.
-          </small>
+          <small style={{ color: "#065f46" }}>✓ 5m/15m/1h/4h — verified on BTC across 5 exchanges; ✓ 1d — verified on BTC with Smart Money eligibility policy (BINGX excluded ONLY for 1d aggregation, 4 eligible: BINANCE/BYBIT/GATE/KUCOIN)</small>
           <small style={{ color: "#6b7280", display: "block", marginTop: 4 }}>
-            Timeframe runtime/alignment verified on BTC across 5 exchanges; availability for each asset still depends on
-            stored CLOSED history.
+            Maximum universe: 5 exchanges for 5m/15m/1h/4h; 4 eligible exchanges for 1d. minExchanges is still the minimum confirmation threshold; exact alignment remains mandatory; availability for each asset still depends on stored CLOSED history.
           </small>
+          {timeframes.includes("1d") && minExchanges === 5 && (
+            <small style={{ color: "#92400e", display: "block", marginTop: 8, fontWeight: 600 }}>
+              ⚠ minExchanges=5 with 1d: 1d has only 4 eligible exchanges (BINGX excluded), therefore 1d can never reach 5 confirmations and will remain NEUTRAL/cannot confirm while BINGX is excluded. Consider minExchanges ≤4 for 1d coverage.
+            </small>
+          )}
+          {timeframes.includes("1d") && minExchanges > 4 && minExchanges !== 5 && (
+            <small style={{ color: "#065f46", display: "block", marginTop: 4 }}>
+              Note: 1d maximum eligible is 4 (BINGX excluded); minExchanges={minExchanges} means 1d needs {minExchanges} confirmations but only 4 eligible exist.
+            </small>
+          )}
         </div>
       </section>
 

@@ -125,7 +125,7 @@ function validateLocal(config: SmartMoneyConfig, timeframes: string[], minExchan
   if (!Number.isFinite(config.filters.minimumQuoteVolume24h) || config.filters.minimumQuoteVolume24h < 0) errors.push("filters.minimumQuoteVolume24h: ожидается число ≥0");
   if (typeof config.filters.top500Only !== "boolean") errors.push("filters.top500Only: ожидается boolean");
   if (!Array.isArray(timeframes) || timeframes.length === 0) errors.push("timeframes: нужен непустой список таймфреймов");
-  else { const allowed = new Set<string>([...ALLOWED_TFS]); const bad = timeframes.filter((tf) => !allowed.has(tf)); if (bad.length) errors.push(`timeframes: недопустимые значения: ${bad.join(", ")}`); if (timeframes.includes("1d")) errors.push("timeframes: 1d временно недоступен"); }
+  else { const allowed = new Set<string>([...ALLOWED_TFS]); const bad = timeframes.filter((tf) => !allowed.has(tf)); if (bad.length) errors.push(`timeframes: недопустимые значения: ${bad.join(", ")}`); } // 1d now selectable — rollout verified via eligibility
   if (!Number.isInteger(minExchanges) || minExchanges < 1 || minExchanges > 5) errors.push("minExchanges: ожидается целое 1..5");
   const d = config.displacement ?? DEFAULT_DISPLACEMENT;
   if (!Number.isFinite(d.bodyAtrMin) || d.bodyAtrMin < 0 || d.bodyAtrMin > 10) errors.push("displacement.bodyAtrMin: ожидается число 0..10");
@@ -398,15 +398,17 @@ function cloneConfig(base: SmartMoneyConfig): SmartMoneyConfig {
   ok(!apiSrc.includes("prisma.signal"), "7f: API no Signal");
 }
 
-/* ---------- 8. [] / 1d / mixed rejected, 5m/15m/1h/4h accepted ---------- */
+/* ---------- 8. Rollout: any non-empty subset of ["5m","15m","1h","4h","1d"] accepted, []/unknown rejected ---------- */
 {
   const base = canonicalOld();
   ok(validateSmartMoneyRuntime({ config: base, timeframes: [], minExchanges: 3 }).ok === false, "8a: [] rejected");
-  ok(validateSmartMoneyRuntime({ config: base, timeframes: ["1d"], minExchanges: 3 }).ok === false || apiSrc.includes("1d временно недоступен"), "8b: 1d rejected via API/runtime");
-  ok(apiSrc.includes('allowedVerified') && apiSrc.includes('"1d"'), "8c: API 1d guard present");
-  ok(validateSmartMoneyRuntime({ config: base, timeframes: ["1h", "1d"], minExchanges: 3 }).ok === false || apiSrc.includes("hasDisallowed"), "8d: mixed 1d rejected");
+  ok(validateSmartMoneyRuntime({ config: base, timeframes: ["1d"], minExchanges: 3 }).ok === true, "8b: 1d accepted (rollout)");
+  ok(apiSrc.includes('allowedVerified') && apiSrc.includes('"1d"') && apiSrc.includes('["5m", "15m", "1h", "4h", "1d"]') && !apiSrc.includes("1d временно недоступен"), "8c: API allowedVerified includes 1d, no stale blocked text");
+  ok(validateSmartMoneyRuntime({ config: base, timeframes: ["1h", "1d"], minExchanges: 3 }).ok === true, "8d: mixed 1h+1d accepted (rollout)");
   ok(validateSmartMoneyRuntime({ config: base, timeframes: ["5m", "15m", "1h", "4h"], minExchanges: 3 }).ok === true, "8e: 5m/15m/1h/4h accepted");
   ok(validateSmartMoneyRuntime({ config: base, timeframes: ["5m"], minExchanges: 3 }).ok === true, "8f: single 5m accepted");
+  ok(validateSmartMoneyRuntime({ config: base, timeframes: ["5m", "15m", "1h", "4h", "1d"], minExchanges: 3 }).ok === true, "8g: all five accepted");
+  ok(validateSmartMoneyRuntime({ config: base, timeframes: ["unknown"], minExchanges: 3 }).ok === false, "8h: unknown rejected");
 }
 
 /* ---------- 9. Trend unchanged ---------- */
