@@ -1,6 +1,6 @@
 # СВЕЧНОЙ СУСЛИК — КОНТЕКСТ ПРОЕКТА
 
-Последнее обновление: 09.09.2026
+Последнее обновление: 11.09.2026
 
 ВАЖНО ДЛЯ AI:
 Это уже существующий рабочий проект на VPS.
@@ -1946,6 +1946,59 @@ VPS browser acceptance 9bf14ce: пункт «Стратегии»
 на /admin и /admin/strategies; create-API отсутствует
 (проверяется тестом). test-admin-consistency 84/84.
 
+---
+
+## §31h. P1-A — Smart Money overlays для графика (11.09.2026)
+
+Подготовка P1 (SuslikChart): Smart Money overlays на графике.
+
+АРХИТЕКТУРА P1-A:
+- lib/chart/smc-contract.ts — чистый DTO-контракт: только типы
+  (домены-литералы type-only из lib/smc/*, чтобы DTO не разошёлся
+  с движком) + чистейшие helper'ы: msToChartTime (domain ms →
+  lightweight-chart seconds). Все domain timestamps в миллисекундах.
+- lib/chart/smc-projection.ts — чистая проекция БЕЗ Prisma/DB/
+  fetch/React/DOM/Date.now/Signal. Композиция ТОЛЬКО существующих
+  функций в порядке production-пайплайна: exchange eligibility
+  (Option A, BINGX 1d исключён) → Strategy filters → common CLOSED
+  horizon (evaluateMarketsAtCommonHorizon) → evaluateSmc на свечах,
+  усечённых до H → decideAggregationAtCommonHorizon →
+  aggregateAssetGroup. ВТОРОГО SMC-АЛГОРИТМА НЕТ.
+- Per-exchange overlays и aggregate summary СТРОГО разделены:
+  общих FVG/BOS/OB для пяти бирж не существует; aggregate — только
+  per-exchange сводки + направление/голоса/confirmation.
+- no-lookahead: проекция при H не видит свечи > H; факты с
+  confirmedAt > engineAsOf не показываются; evaluation с asOf ≠
+  engineAsOf отклоняется (SmcProjectionError).
+- WHY→factIds: только exact existing key mapping (значения OB/FVG
+  reasons — deterministic ключи движка; confluence — ровно те же
+  выбранные факты). Exact mapping нет → [].
+- Range position НЕ clamp: position может быть <0/>1, outsideRange
+  сохраняется.
+- Deterministic SMC-идентификаторы (SMC1|…) проходят в DTO без
+  изменений; собственных ID проекция не генерирует.
+- Тесты: scripts/test-smc-projection.ts — реально evaluable fixture
+  (LONG 75/10), равенство проекции с существующей Strategy-оценкой
+  на том же H, 5-market common horizon summary, no-lookahead,
+  deterministic/stable IDs, ms→seconds, lifecycle states,
+  swing/internal слои, cannot-evaluate ≠ NEUTRAL, aggregate без
+  overlays, чистота модулей.
+
+ГРАНИЦЫ:
+- API /api/chart/smc, CandleChart/UI, fancy-canvas, package changes —
+  НЕ создаются в P1-A (только чистая подготовка DTO/проекции).
+- Будущая кнопка на графике «Смарт Мани Вкл/Выкл» управляет ТОЛЬКО
+  UI-оверлеями; она НЕ трогает global Strategy.enabled и не пишет в БД.
+- ПРОДУКТОВЫЙ UNIVERSE = TOP-100 (НЕ 500). Legacy
+  Strategy.config.filters.top500Only=true фактически означает
+  «только основной ranked universe» = Top-100 (lib/universe.ts);
+  имя поля сохранено ради production JSON-конфигов.
+- После полного Strategy cycle следующий Admin-приоритет —
+  «Пользователи»: роли USER/ADMIN, назначение ADMIN, block/unblock,
+  sessions, audit. СЕЙЧАС НЕ РЕАЛИЗОВЫВАТЬ.
+- Signal Engine остаётся будущим P5 (только после приёмки стратегии
+  и бэктеста).
+
 
 ==================================================
 32. PRODUCT ROADMAP / ДАЛЬНЕЙШЕЕ РАЗВИТИЕ (10.09.2026)
@@ -1993,6 +2046,11 @@ HEAD: `9085d55936b20d54add3ab6a1534515be2d3480b` (RANGE_POSITION CLOSED/UNDERSTO
 - Финальная приёмка Smart Money (read-only → staged → enabled)
 
 **P1 — SuslikChart / визуализация стратегии**
+- P1-A (11.09.2026): чистая подготовка Smart Money overlays —
+  lib/chart/smc-contract.ts + lib/chart/smc-projection.ts +
+  scripts/test-smc-projection.ts; per-exchange overlays и aggregate
+  summary строго разделены; кнопка «Смарт Мани Вкл/Выкл» — только
+  UI overlays, НЕ global Strategy.enabled
 - Собственный график на PostgreSQL-свечах, оверлеи SMC, объяснение `WHY` сигнала
 
 **P2 — Backtest Engine / тестер стратегий**
