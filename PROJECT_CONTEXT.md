@@ -2956,3 +2956,81 @@ Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC*
 **Files changed (один коммит):** `lib/strategies/common-horizon.ts` (переписан), `lib/strategies/smart-money.ts` (`evaluateMarketsAtCommonHorizon` + partition + anchor), `scripts/smart-money-readonly.ts`, `scripts/smart-money-diagnostic.ts` (единый gate + честная диагностика + возврат explainability), `scripts/test-common-horizon.ts` (переписан, 227 проверок), `PROJECT_CONTEXT.md` (этот §42).
 
 **Deliverable:** ОДИН reviewable FIX-коммит ровно поверх `ec73320723327f68a64be435b87aff0e5701f110` (не amend), push только в `arena/01a09002-svechnoy-suslik`. DB/Strategy/PM2/worker/Signal Engine — не тронуты. После коммита и отчёта — STOP.
+==================================================
+43. P1 SUSLIKCHART + SMART MONEY OVERLAYS — АРХИТЕКТУРА И P1-A CONTRACT (11.09.2026)
+==================================================
+
+**Baseline:** `7ab7724dc4e657502cb7e98ad8b0bed034fa7c61` (он же `origin/main`, production). Этот коммит — ровно `7ab7724 + 1` (P1-A), amend/rewrite нет, push только в `arena/01a09002-svechnoy-suslik`.
+
+**Замечание по среде (важно для приёмки):** песочница после сбоя была восстановлена с HEAD/индексом на `c1af70e` при содержимом файлов = `7ab7724` (shallow-клон, `.git/shallow` = `7ab7724` + `c1af70e`), из-за чего `git status` показывал ложно-грязное дерево. Состояние приведено безопасным `git reset` (**--mixed**, worktree не трогается) с доказательством: 150/150 файлов побайтово совпали до и после (`git hash-object` vs baseline blob'ы), 0 потерянных и 0 посторонних файлов. `node_modules`/`.next` снапшотом не персистятся → зависимости восстановлены `npm ci` (package-lock НЕ менялся), что сделало возможными `tsc`/тесты.
+
+## 1. Текущий продукт-универсум: Top-100 (authoritative)
+
+- Основной universe проекта — **Top-100** (`Asset.rank 1..100`, `lib/universe.ts`: `TOP_UNIVERSE_SIZE=100`, `TOP_UNIVERSE_LABEL="Top-100"`, `isInTopUniverse`).
+- Legacy-ключ Strategy config `filters.top500Only` **не переименовывается** (никакой DB/schema/config migration): его текущая семантика при `true` — «ограничить основным ranked universe проекта», то есть **Top-100**, а НЕ Top-500. Исторические разделы (§30 и др.) остаются снимками своего времени — переписывать их задним числом не нужно; эта строка и есть актуальная политика.
+- **В новом коде/доках/UI пользователю писать «Top-500» нельзя** — только «Top-100». В DTO это зафиксировано явно: `market.filters.universe: "TOP_100" | "OFF"` (+ `top500Only` сохраняется только как отладочное имя поля конфига).
+- Ingestion/scanner **не расширяются** до 500. Начальный scope будущего Scanner (P3) — Top-100.
+- Числа не путать: `SMC_PROJECTION_WINDOW = 500` — это размер **окна анализа** (правило runtime `loadSmartMoneyCandles`: DESC take 500 → ASC), а не размер вселенной активов.
+
+## 2. Утверждённые архитектурные решения P1
+
+1. **Отдельный read-only endpoint `GET /api/chart/smc` (вариант B).** `/api/chart/candles` НЕ расширяется: сырые свечи и аналитические оверлеи — разные контракты, разные лимиты и кэш-политики.
+2. **Окно проекции = ровно семантика runtime:** до 500 CLOSED свечей, `openTime <= windowEnd`, ASC для `evaluateSmc`. Другое окно ⇒ другой индексный freshness ⇒ другие баллы; это запрещено (INV-1).
+3. **Исторический якорь — `windowEnd`** (openTime последней ВКЛЮЧЁННОЙ закрытой свечи), а `engineAsOf = windowEnd + D` (равно `effectiveCloseTime` этого бара). Тождество `openTime <= windowEnd ⟺ effectiveCloseTime <= windowEnd + D ⟺ truncateCandlesToHorizon(candles, windowEnd)` — основание no-lookahead и совпадения с оценкой стратегии; покрыто тестами 10a–10h и 2a–2n.
+4. **Отказ общего горизонта:** будущий API отвечает **HTTP 200** со структурированными `status`/`reason` и `aggregate: null`; никаких выдуманных агрегатов и никаких 4xx для рыночных отказов.
+5. **Режим по умолчанию — `strategy` (общий CLOSED горизонт)**, `exchange` — отдельная опция. Оверлеи режима `strategy` строятся ровно на `H`, чтобы график объяснял ТЕКУЩИЙ результат стратегии; raw-график при этом может показывать более новые свечи (маркер «Strategy evaluated through HH:MM» + приглушение хвоста — P1-E).
+6. **Chart API остаётся публичным read-only**, как существующие `/api/chart/*` (та же строгая валидация `lib/chart/params.ts`, 400 по-русски, 503 без stack-трейса). Авторизация не вводится.
+7. **Signal Engine — по-прежнему только P5.** `lib/signals`, `signal-worker`, `test-signal-engine`, Signal schema/writes не затрагиваются; `edf3732` не переносится.
+8. **HTTP-кэш `immutable` (1 год) НЕ утверждён.** Причина: конфиг Стратегии может измениться при том же `Strategy.version`, поэтому «неизменяемый по windowEnd» ответ на самом деле не гарантированно неизменен. Identity URL и инвалидацию кэша проектировать отдельно на P1-B (в P1-A — только чистые DTO/проекция).
+9. **`fancy-canvas` (и любые новые зависимости) не добавлялись.** P1-A ничего не рисует; перед P1-C проверить публичный API/типы `lightweight-charts` 5.2.1 и не опираться на транзитивную зависимость как на production-контракт.
+10. **Unrelated Arena-ветки не мержить** (в т.ч. «параллельная SuslikChart-цепочка», §32/§35).
+
+## 3. P1-A: контракт оверлеев и чистая проекция (реализовано этим коммитом)
+
+**Файлы:** `lib/chart/smc-contract.ts` (DTO + время-хелперы), `lib/chart/smc-projection.ts` (проекция), `scripts/test-smc-projection.ts` (тесты). Ничего больше не изменено: API, CandleChart, DB, Strategy, worker — не тронуты.
+
+- `SMC_OVERLAY_CONTRACT_VERSION = 1`, `SMC_ENGINE_VERSION = "SMC1"` (тег существующих ключей движка).
+- **Single source of truth:** факты — только из `evaluateSmc` (`lib/smc/evaluate.ts`); вердикт рынка — только из `evaluateSmartMoneyWithCandles`; общий горизонт/гейт/агрегат — только из `evaluateMarketsAtCommonHorizon` + `decideAggregationAtCommonHorizon` + `aggregateAssetGroup`. Вторых детекторов (pivot/BOS/FVG/OB/liquidity/range) и своего scoring в проекции нет — это проверено сканом исходников (20s/20t) и эквивалентностью (2a–2n).
+- **Никаких часов внутри расчёта:** `now`/`windowEnd` передаются явно; `Date.now()`/`new Date()` запрещены (20d/20e, мутация M5 ловится).
+- **Именование времени/окна:** поле ввода размера окна анализа — `windowSize` (НЕ `window`), локальные переменные — `analysisWindow`; в обоих pure-модулях идентификатор `window` отсутствует вообще (тест 20g2), чтобы запрет «не знать о DOM/window» выполнялся буквально, а не только по смыслу.
+- **Время:** все поля DTO — `number` (epoch ms), `Date` в DTO нет (20x); единственный конвертер в секунды lightweight-charts — `toChartTime(ms)` с fail-closed на нецелых/не кратных 1000/отрицательных значениях + `fromChartTime` для round-trip (9a–9w; обещание «нет off-by-1000» проверяется на 300+ временах проекта).
+- **Идентичности:** `id` = существующий ключ движка (`SMC1|P|…`, `SMC1|E|…`, `SMC1|FVG|…`, `SMC1|OB|…`, `SMC1|LQ|…`, `SMC1|RANGE|…`, `SMC1|D|…`); frontend-only/рандом id не генерируются, id не зависят от размера окна (8a–8j).
+- **WHY → факты:** `why[].factIds` заполняется ТОЛЬКО когда `SmcScoreReason.value` — точный ключ среди спроецированных фактов (то есть OB swing/internal и FVG). В остальных случаях (`TREND_UP`, `BOS:up`, `SELL_SIDE @…`, `pos=…`, `null`) — `[]`. Угадывание по направлению/цене/близости времени запрещено и проверяется (12a–12n; мутация M4 «эвристика BOS» падает).
+- **Range без clamp:** `position = (price-low)/(high-low)` перекладывается дословно (<0 и >1 сохраняются, observed 5m ≈ -0.91 / 1d ≈ 2.24), `outsideRange` — отдельный флаг, `zone`/`eqBand`/`historyVersions` прокинуты (13a–13p; мутация M3 с `Math.min/max` падает).
+- **Lifecycle дословно:** состояния и времена FVG (`OPEN/TOUCHED/CE_MITIGATED/FILLED_BY_EXCURSION/EXPIRED/INVALIDATED`), OB (`OPEN/MITIGATED/INVALIDATED/EXPIRED`), liquidity (`OPEN/SWEPT/BROKEN/EXPIRED`, `side`, `origin STRUCTURAL|EQH_EQL`, `resolvedAt`), структурных уровней (`AVAILABLE/CONSUMED` + `consumedByEventId`) и `protectedAnchor` событий сохраняются как есть; новых состояний не вводилось (14a–14m).
+- **Слои:** `swing` и `internal` различаются на каждом факте и не смешиваются; внутренний порядок движка (highs→lows, внутри — по `confirmedAt`) сохранён (15a–15k2).
+- **cannot-evaluate ≠ NEUTRAL:** `market.direction = "CANNOT_EVALUATE"` с `longScore/shortScore = null` (баллы не выдумываются), `filtered` — «вердикта нет» (`direction = null`), статусы ровно существующие `evaluated | filtered | cannot-evaluate | no-snapshot` (16a–16w; мутация M8 «cannot-evaluate → NEUTRAL» падает).
+- **Per-exchange vs aggregate структурно разделены:** факты живут только в `markets[i].overlays` (с `marketId/exchange/exchangeSymbol/assetSymbol/timeframe`); `aggregate` содержит ровно `direction, conflict, votes, confirmation, minExchanges, explanation, participants, gate, perMarket` — ни одного ключа фактов (проверяется списком ключей и сканом сериализации: «общего FVG пяти бирж» на уровне типов быть не может, 17a–17k).
+- **Диагностика множеств:** `participants.marketCount` (до eligibility), `exchangeEligibleCount`, `participantCount`, `filteredCount`, `exchangeExcluded` (BINGX на 1d), плюс `horizon.marketsWithoutData` — оператор видит, откуда взялся denominator (19a–19m, 4a–4i).
+- **Metadata окна честная:** `candlesInWindow`, `windowRule`, `windowStart`, `windowTruncated`, `droppedBeyondWindowEnd`, `droppedUnclosed`, `warmupRequired = minimumSwingHistoryCandles(config)` (8 для окон 1/1, 84 для дефолтных 20/20) (18a–18j).
+- **Чистота модулей:** нет Prisma/`$executeRaw`/сети/React/Next/DOM/localStorage/`lightweight-charts`/`Math.random`/таймеров/`process.env`; импорты — только `../smc/*`, `../strategies/*` и собственный контракт (20a–20ad).
+- **Сериализуемость:** DTO переживает JSON round-trip без потерь; `Date` в публичных типах нет (17j/17k, 20x).
+
+## 4. Зафиксированный будущий UX-контракт: локальный тумблер «Смарт Мани»
+
+- У графика/Strategy summary будет пользовательский тумблер **«Смарт Мани: Вкл / Выкл»**.
+- **Вкл:** UI запрашивает `GET /api/chart/smc` и показывает оверлеи + Strategy summary.
+- **Выкл:** оверлеи скрыты; UI может не делать SMC-запрос вовсе (экономия БД/CPU).
+- Это **локальная настройка отображения/аналитики конкретного пользователя**. Это НЕ `prisma.strategy.update` и НЕ глобальный `Strategy.enabled`: обычный пользователь не может выключить production-стратегию для всех. Глобальный `Strategy.enabled` остаётся исключительно Admin-контролем (роль проверяется на сервере).
+- На P1-A кнопка НЕ реализована — здесь фиксируется только контракт. Где хранить состояние (URL vs локальный UI-предпочтение) — решается на UI-этапе (P1-C/P1-E); URL-подход уже есть для `exchange`/`timeframe` (`lib/chart/url-state.ts`).
+
+## 5. Roadmap: Admin → «Пользователи» (после полного цикла Smart Money/Strategy)
+
+После завершения визуализации (P1), Backtest (P2), Scanner/Market dashboard (P3), аналитики (P4) и Signal Engine + alerts (P5) — отдельный этап «Admin → Пользователи». Минимальный будущий scope:
+
+- список пользователей; поиск/фильтры; карточка пользователя;
+- роли `USER` / `ADMIN`, назначение `ADMIN`;
+- защита от снятия последнего `ADMIN`; защита от случайного self-demotion;
+- block/unblock аккаунта; управление сессиями / logout-all;
+- audit trail действий администраторов; статистика регистраций/активности;
+- подписки/планы — позже и только если понадобятся.
+
+Жёсткие ограничения этапа: никаких отображений паролей/secrets/hashes; авторизация по ролям — **обязательно сервером**, а не только скрытием кнопки. Сейчас это НЕ реализуется — только план.
+
+## 6. План P1 дальше (после утверждения)
+
+`P1-B` — read-only `GET /api/chart/smc` + дизайн identity/инвалидации кэша (без `immutable`-предположений) + тесты. `P1-C` — примитивы/маркеры и группа Structure. `P1-D` — FVG / Liquidity / Order Blocks + `why`-подсветка. `P1-E` — Range + Summary + маркер общего горизонта + разделение per-exchange/aggregate в подписях. `P1-F` — пере-якорение оверлеев при скролле, LRU, лимиты payload, производительность. Каждый коммит — независимо ревьюабелен и разворачиваем; `lib/smc/*`, `alignment.ts`, `common-horizon.ts`, schema, Strategy config, адаптеры, worker/PM2, Signal Engine — не затрагиваются.
+
+**Verification (P1-A, песочница, `npm ci`, без БД/воркеров):** `scripts/test-smc-projection.ts` **371/371** (20 групп, включая 8 мутационных проверок непустоты: без ограничения окна, с выключенным guard'ом, с clamp range, с эвристикой BOS, с `new Date()`, с обнулённой диагностикой отбрасывания, с off-by-one-bar `engineAsOf`, с подменой `CANNOT_EVALUATE → NEUTRAL`); `npx tsc --noEmit` — 0 ошибок; регрессии §42/§30/§29 — см. отчёт коммита; `git diff --check` — чисто; `prisma/schema.prisma`, `lib/smc/**`, `lib/strategies/**`, `package.json`/`package-lock.json` — 0 изменений.
+
+**Deliverable (P1-A):** один коммит ровно поверх `7ab7724d…`, push только `arena/01a09002-svechnoy-suslik`, STOP после отчёта (БД/Strategy/PM2/worker/Signal Engine не тронуты, оверлеи в UI ещё не рисуются).
