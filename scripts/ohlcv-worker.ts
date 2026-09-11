@@ -12,6 +12,11 @@ import {
   formatPlanReport,
   preflightTitle
 } from "../lib/ohlcv/plan";
+import {
+  OHLCV_ADVISORY_LOCK_KEY,
+  releaseOhlcvLock,
+  tryAcquireOhlcvLock
+} from "../lib/ohlcv/lock";
 
 /**
  * OHLCV Worker — управляемый вручную запуск с бирж.
@@ -73,8 +78,7 @@ async function waitInterruptible(
 
 async function printVerification(
   prisma: PrismaClient,
-  top: number,
-  timeframes: string[]
+  options: { top: number; symbol?: string; timeframes: string[] }
 ) {
   const total = await prisma.candle.count();
   const closed = await prisma.candle.count({ where: { closed: true } });
@@ -92,10 +96,14 @@ async function printVerification(
   console.log(`Candle всего: ${total}`);
   console.log(`Candle закрытых: ${closed}`);
   console.log(`Дубликаты (market+tf+openTime): ${duplicates[0]?.dupes ?? 0}`);
-  console.log(`Top запрошен: ${top}`);
+  if (options.symbol) {
+    console.log(`Symbol запрошен: ${options.symbol}`);
+  } else {
+    console.log(`Top запрошен: ${options.top}`);
+  }
   console.log("");
 
-  for (const timeframe of timeframes) {
+  for (const timeframe of options.timeframes) {
     const byExchange = await prisma.$queryRaw<
       {
         exchange: string;
@@ -167,13 +175,38 @@ async function main() {
   );
 
   const prisma = new PrismaClient();
+  let lockAcquired = false;
 
   try {
+    // Single-instance guard for continuous/once run (not for --plan)
+    if (invocation.kind === "run") {
+      try {
+        lockAcquired = await tryAcquireOhlcvLock(prisma);
+      } catch (e) {
+        console.error(`Single-instance guard error acquiring advisory lock ${OHLCV_ADVISORY_LOCK_KEY}:`, e instanceof Error ? e.message : String(e));
+        process.exitCode = 1;
+        return;
+      }
+      if (!lockAcquired) {
+        console.error(`Single-instance guard: OHLCV worker already running (advisory lock ${OHLCV_ADVISORY_LOCK_KEY} held). Another instance is active — refusing to start overlapping.`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`Single-instance lock acquired (advisory lock ${OHLCV_ADVISORY_LOCK_KEY}).`);
+    }
+
     // Читаем масштаб прогона (read-only SELECT).
     const stats = await collectPlanStats(
       prisma,
       options
     );
+
+    // Symbol fail-closed: если запрошен --symbol, но актив не найден/disabled — ошибка
+    if (options.symbol && stats.assets === 0) {
+      console.error(`Ошибка: актив с символом "${options.symbol}" не найден или disabled (enabled=true требуется). Проверьте Asset.symbol в БД.`);
+      process.exitCode = 1;
+      return;
+    }
 
     // семантика заголовка: «Режим PLAN» — только при
     // явном --plan; обычный запуск — «Предварительная
@@ -224,10 +257,17 @@ async function main() {
     );
 
     console.log("🐿️ OHLCV Worker");
-    console.log(
-      `top=${options.top} timeframes=${options.timeframes.join(",")} ` +
-        `limit=${options.limit} delay=${options.requestDelayMs}ms once=${options.once}`
-    );
+    if (options.symbol) {
+      console.log(
+        `symbol=${options.symbol} timeframes=${options.timeframes.join(",")} ` +
+          `limit=${options.limit} delay=${options.requestDelayMs}ms interval=${options.intervalMs}ms once=${options.once}`
+      );
+    } else {
+      console.log(
+        `top=${options.top} timeframes=${options.timeframes.join(",")} ` +
+          `limit=${options.limit} delay=${options.requestDelayMs}ms interval=${options.intervalMs}ms once=${options.once}`
+      );
+    }
 
     do {
       const started = Date.now();
@@ -255,7 +295,7 @@ async function main() {
         );
       }
 
-      await printVerification(prisma, options.top, options.timeframes);
+      await printVerification(prisma, options);
 
       console.log(`проход ${Date.now() - started}ms`);
 
@@ -271,6 +311,12 @@ async function main() {
       console.log("Остановлено пользователем.");
     }
   } finally {
+    if (lockAcquired) {
+      try {
+        await releaseOhlcvLock(prisma);
+        console.log(`Single-instance lock released (advisory lock ${OHLCV_ADVISORY_LOCK_KEY}).`);
+      } catch {}
+    }
     await prisma.$disconnect();
   }
 }

@@ -24,18 +24,30 @@ export async function collectPlanStats(
   prisma: PrismaClient,
   options: OhlcvWorkerOptions
 ): Promise<PlanStats> {
-  const assets = await prisma.asset.findMany({
-    where: {
-      enabled: true,
-      rank: {
-        lte: options.top,
-        not: null
-      }
-    },
-    orderBy: { rank: "asc" },
-    take: options.top,
-    select: { id: true }
-  });
+  let assets: Array<{ id: number }>;
+  if (options.symbol) {
+    const single = await prisma.asset.findFirst({
+      where: {
+        symbol: options.symbol,
+        enabled: true
+      },
+      select: { id: true }
+    });
+    assets = single ? [single] : [];
+  } else {
+    assets = await prisma.asset.findMany({
+      where: {
+        enabled: true,
+        rank: {
+          lte: options.top,
+          not: null
+        }
+      },
+      orderBy: { rank: "asc" },
+      take: options.top,
+      select: { id: true }
+    });
+  }
 
   const assetIds = assets.map((a: { id: number }) => a.id);
 
@@ -135,15 +147,22 @@ export function formatPlanReport(
   options: Pick<
     OhlcvWorkerOptions,
     "top" | "timeframes" | "limit" | "requestDelayMs"
-  >,
+  > & { symbol?: string; intervalMs?: number },
   stats: PlanStats
 ): string[] {
   const lines: string[] = [];
 
-  lines.push(`Top-N: ${options.top}`);
+  if (options.symbol) {
+    lines.push(`Symbol: ${options.symbol}`);
+  } else {
+    lines.push(`Top-N: ${options.top}`);
+  }
   lines.push(`Таймфреймы: ${options.timeframes.join(", ")}`);
   lines.push(`Свечей истории за запрос (limit): ${options.limit}`);
   lines.push(`Пауза между запросами (delay): ${options.requestDelayMs}мс`);
+  if (options.intervalMs !== undefined) {
+    lines.push(`Интервал continuous (interval): ${options.intervalMs}мс`);
+  }
   lines.push(`Активов выбрано: ${stats.assets}`);
   lines.push(`Рынков (активные SPOT USDT): ${stats.markets}`);
   lines.push(`Задач (рынок × таймфрейм): ${stats.tasks}`);
@@ -178,15 +197,24 @@ export function buildConfirmCommand(options: {
   limit: number;
   requestDelayMs: number;
   once: boolean;
+  symbol?: string;
+  intervalMs?: number;
 }): string {
   const parts = [
     "npx tsx scripts/ohlcv-worker.ts",
-    `--top=${options.top}`,
     `--timeframes=${options.timeframes.join(",")}`,
     `--limit=${options.limit}`,
     `--delay=${options.requestDelayMs}`,
     "--confirm-large-run"
   ];
+  if (options.symbol) {
+    parts.splice(1, 0, `--symbol=${options.symbol}`);
+  } else {
+    parts.splice(1, 0, `--top=${options.top}`);
+  }
+  if (options.intervalMs !== undefined) {
+    parts.push(`--interval=${options.intervalMs}`);
+  }
 
   if (options.once) {
     parts.push("--once");

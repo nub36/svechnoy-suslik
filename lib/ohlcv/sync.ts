@@ -8,13 +8,15 @@ export type OhlcvWorkerOptions = {
   timeframes: Timeframe[];
   limit: number;
   requestDelayMs: number;
+  symbol?: string;
 };
 
 export const DEFAULT_OHLCV_OPTIONS: OhlcvWorkerOptions = {
   top: 10,
   timeframes: ["1h"],
   limit: 300,
-  requestDelayMs: 250
+  requestDelayMs: 250,
+  symbol: undefined
 };
 
 function isValidCandle(candle: CandleData): boolean {
@@ -125,27 +127,53 @@ export async function runOhlcvSync(
     exchanges.map((exchange) => [exchange.name, exchange])
   );
 
-  const assets = await prisma.asset.findMany({
-    where: {
-      enabled: true,
-      rank: {
-        lte: options.top,
-        not: null
-      }
-    },
-    orderBy: { rank: "asc" },
-    take: options.top,
-    include: {
-      markets: {
-        where: {
-          enabled: true,
-          status: "ACTIVE",
-          quote: "USDT",
-          marketType: "SPOT"
+  let assets: Array<{
+    id: number;
+    rank: number | null;
+    symbol: string;
+    markets: Array<{ id: number; exchange: string; exchangeSymbol: string }>;
+  }>;
+  if (options.symbol) {
+    const single = await prisma.asset.findFirst({
+      where: {
+        symbol: options.symbol,
+        enabled: true
+      },
+      include: {
+        markets: {
+          where: {
+            enabled: true,
+            status: "ACTIVE",
+            quote: "USDT",
+            marketType: "SPOT"
+          }
         }
       }
-    }
-  });
+    });
+    assets = single ? [single as any] : [];
+  } else {
+    assets = await prisma.asset.findMany({
+      where: {
+        enabled: true,
+        rank: {
+          lte: options.top,
+          not: null
+        }
+      },
+      orderBy: { rank: "asc" },
+      take: options.top,
+      include: {
+        markets: {
+          where: {
+            enabled: true,
+            status: "ACTIVE",
+            quote: "USDT",
+            marketType: "SPOT"
+          }
+        }
+      }
+    });
+  }
 
   const stats: SyncStats = {
     assets: assets.length,

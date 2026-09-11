@@ -2747,3 +2747,132 @@ Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC*
 - `PROJECT_CONTEXT.md` (this §40.1)
 
 **Deliverable:** ONE commit exact parent `3c329893e186060914d8032cc415ec83ed0d96f2`, push only `arena/01a08b68-svechnoy-suslik`, STOP after one commit.
+
+==================================================
+41. OHLCV CONTINUOUS INGESTION — PRODUCTION OPERATIONAL GAP CLOSURE (BTC PILOT) 11.09.2026
+==================================================
+
+**Baseline exact:** `a4d8de184c790a0bd172a09c1ff9d43ee39ab2fd` (origin/arena/01a08b68-svechnoy-suslik, branch `arena/01a08b68-svechnoy-suslik`), working tree clean before gap closure.
+
+**Task:** Закрыть operational gap для continuous OHLCV ingestion до включения Smart Money Strategy. VPS — только Next.js в PM2, OHLCV worker есть (`scripts/ohlcv-worker.ts` concurrency=1, retry/backoff, idempotent upsert market+timeframe+openTime, --plan/--once/--top/--timeframes, large-run guard, SIGINT/SIGTERM graceful), interval только env `OHLCV_INTERVAL_MS` default 60m — недостаточно для 5m, pilot `--top=1 --timeframes=5m,15m,1h,4h,1d --limit=300 --once` дал BTC rank1 5 рынков 25 задач 0 ошибок, Smart Money CLOSED-only 5/5 5m/15m/1h/4h и 4/4 1d после BINGX exclusion, Strategy id=2 DRAFT/enabled=false Signal 0. Требуется: CLI --interval, cadence safety, BTC pilot --symbol, single-instance PM2, без Signal/schema/Strategy enable.
+
+**Scope (9 требований):**
+
+1) **CLI --interval=N ms** — strict integer bounded, CLI precedence > env, fail-closed unknown, --help документы, --plan показывает effective interval read-only, env backward compat сохранён.
+2) **Cadence safety pure guard** — continuous с 5m и interval=60m не production-safe (fail-closed), --once bypass, conservative ≤5m (300000ms) с учётом runtime + CLOSED semantics, no candle timestamp/resample change.
+3) **BTC pilot --symbol=BTC** — exact enabled Asset symbol + market filters (enabled/STATUS ACTIVE/quote USDT/SPOT), preserve --top без symbol, forbid/define ambiguous --symbol+--top, --plan показывает symbol/assets/markets/tasks, no hardcode DB id, не полагаться на silent --top=1=BTC.
+4) **Single-instance** — advisory lock без Redis/schema migration, PostgreSQL `pg_try_advisory_lock(727923)` careful+tested, no migrations only for lock.
+5) **PM2 artifact** version-controlled `ecosystem.config.js` для BTC pilot: BTC only, 5m,15m,1h,4h,1d, limit300, sequential 250ms, continuous, cadence suitable for 5m (120000 2m), process name `svechnoy-suslik-ohlcv-btc`, env inheritance no secrets, no hardcode DATABASE_URL.
+6) **Failure behavior** — stats/log visible, no Signal, no Strategy enable, graceful shutdown, no destructive DB.
+7) **Tests extend** — interval, help, unknown, plan, symbol BTC plan, missing/unknown/disabled fail-closed, ambiguity, cadence guard unsafe+once bypass, single-instance guard, PM2 exact BTC scope, no Signal imports.
+8) **PROJECT_CONTEXT update** — operational model, exact BTC pilot command, cadence, PM2 name, start/stop/restart/status/log, rollback, emphasize worker start ≠ enable Smart Money.
+9) **Don'ts** — не менять package majors, npm audit fix --force, db push/reset, schema, Smart Money algorithm, Strategy row, Signal, real worker в Arena, enable PM2.
+
+**Implementation:**
+
+- `lib/ohlcv/cli.ts`:
+  - `KNOWN_OHLCV_FLAGS` + `"symbol","interval"`, `validateKnownFlags` hint обновлён.
+  - `MAX_INTERVAL_FOR_5M_MS = 300000`, `validateCadence(options)` pure/testable: если `!once && timeframes includes 5m && intervalMs > 300000` → error string с conservative recommendation 120000/60000 и CLOSED semantics.
+  - `resolveOhlcvInvocation` — `--help` priority, unknown → error, `parseOhlcvArgs` → cadence guard (only for run, не для --plan, once exempt) → plan/run. Env `OHLCV_INTERVAL_MS` fallback 3600000, CLI `--interval` имеет приоритет (`get("interval") ?? env...`), валидация `parseCliNumber` min1000 max86400000 integer, unknown fail-closed.
+  - `parseOhlcvArgs` — `--symbol` парсит `trim().toUpperCase()`, regex `^[A-Z0-9]{1,20}$`, nonempty, если `get("top")` одновременно → throw `несовместимы`, CLI `intervalRaw = get("interval") ?? env.OHLCV_INTERVAL_MS`.
+  - `buildOhlcvHelp` — документирует --symbol/--interval/--once, примеры BTC pilot, cadence note `interval ≤5m (300000) иначе fail closed; --once exempt; BTC pilot 120000/60000`, BTC pilot note `exact Asset symbol, без hardcode DB id; --plan показывает symbol/assets/markets/tasks`.
+
+- `lib/ohlcv/sync.ts`:
+  - `OhlcvWorkerOptions { symbol?: string }`, `DEFAULT_OHLCV_OPTIONS.symbol=undefined`.
+  - `runOhlcvSync` — если `options.symbol` → `prisma.asset.findFirst({where:{symbol: options.symbol, enabled:true}, include:{markets:{where:{enabled:true,status:"ACTIVE",quote:"USDT",marketType:"SPOT"}}}})` → `assets = single?[single]:[]`, иначе старый Top-N `rank lte top`. Типы asset сохранены, where market filters идентичны.
+
+- `lib/ohlcv/plan.ts`:
+  - `collectPlanStats` — если `options.symbol` → `findFirst` symbol enabled, else `findMany` rank. `assetIds` → `market.findMany({assetId:{in:assetIds}, enabled:true,status:"ACTIVE",quote:"USDT",marketType:"SPOT"})`, tasks = markets×timeframes.
+  - `formatPlanReport(options: Pick<OhlcvWorkerOptions,...>&{symbol?,intervalMs?})` — если `options.symbol` → `Symbol: BTC`, else `Top-N: N`; `Таймфреймы`, `limit`, `delay`, если `intervalMs!==undefined` → `Интервал continuous (interval): ${intervalMs}мс`; далее assets/markets/tasks/maxCandles/apiRequests/byExchange.
+  - `buildConfirmCommand(options:{top,timeframes,limit,requestDelayMs,once,symbol?,intervalMs?})` — если `symbol` → `--symbol=BTC` splice at 1, else `--top=`, если `intervalMs` → ` --interval=...`, then `--once`.
+
+- `lib/ohlcv/lock.ts` (new, no migration):
+  - `OHLCV_ADVISORY_LOCK_KEY = 727923`, `tryAcquireOhlcvLock(prisma):Promise<boolean>` → `SELECT pg_try_advisory_lock(727923) as acquired`, `releaseOhlcvLock` → `SELECT pg_advisory_unlock(727923)`. Fail-closed без Redis/new infra, PostgreSQL only.
+
+- `scripts/ohlcv-worker.ts`:
+  - Импорт `OHLCV_ADVISORY_LOCK_KEY, tryAcquireOhlcvLock, releaseOhlcvLock`.
+  - `printVerification(prisma, options:{top,symbol?,timeframes})` — логирует `Symbol запрошен: BTC` или `Top запрошен`, loop `for (timeframe of options.timeframes)`.
+  - `main` — после `new PrismaClient()` `let lockAcquired=false`; если `invocation.kind==="run"` → `lockAcquired=await tryAcquireOhlcvLock`, иначе error+exit 1, log `Single-instance lock acquired (...)`. Затем `collectPlanStats`, если `options.symbol && stats.assets===0` → error `актив с символом "..." не найден или disabled` exit1. `preflightTitle`, `formatPlanReport(options,stats)`, `evaluateRunScale` guard ДО `import("../lib/ohlcv/sync")` (regresion сохранена). Логи `🐿️ OHLCV Worker` теперь `symbol=BTC ... interval=...` или `top=... interval=...`. Loop `runOhlcvSync`, итог прохода `stats`, `formatTimeframeSummary`, `byExchange`, `await printVerification(prisma,options)`, `waitInterruptible(options.intervalMs)`. `finally` если `lockAcquired` → `await releaseOhlcvLock` + log, `await prisma.$disconnect()`. SIGINT/SIGTERM `interrupted` + waitInterruptible сохранены.
+
+- `ecosystem.config.js` (new, version-controlled):
+  ```js
+  apps: [
+    { name:"svechnoy-suslik", script:"npm", args:"start", ... },
+    { name:"svechnoy-suslik-ohlcv-btc",
+      script:"npx",
+      args:"tsx scripts/ohlcv-worker.ts --symbol=BTC --timeframes=5m,15m,1h,4h,1d --limit=300 --interval=120000",
+      cwd:"./", interpreter:"none", instances:1, exec_mode:"fork",
+      autorestart:true, watch:false, restart_delay:5000, max_memory_restart:"300M",
+      env:{NODE_ENV:"production"} // inherits DATABASE_URL via pm2 --update-env, no hardcode
+    }
+  ]
+  ```
+  Документирован header: BTC-only pilot scope 5×5=25 tasks, sequential 250ms, interval 120000 conservative ≤5m with ~10-20s runtime, advisory lock 727923, worker start ≠ enable Smart Money (id=2 DRAFT), no secrets, rollback `pm2 stop/delete`, verification `--plan/--once`.
+
+**Operational model (VPS):**
+
+- **Exact BTC pilot command (continuous):**
+  `npx tsx scripts/ohlcv-worker.ts --symbol=BTC --timeframes=5m,15m,1h,4h,1d --limit=300 --interval=120000`
+- **One-shot verification (bypass cadence guard):**
+  `npx tsx scripts/ohlcv-worker.ts --symbol=BTC --timeframes=5m,15m,1h,4h,1d --limit=300 --interval=120000 --once`
+- **Read-only plan (no exchange API, no DB write):**
+  `npx tsx scripts/ohlcv-worker.ts --symbol=BTC --timeframes=5m,15m,1h,4h,1d --limit=300 --interval=120000 --plan`
+  Expected plan: `Symbol: BTC`, `Активов выбрано: 1`, `Рынков (активные SPOT USDT): 5`, `Задач: 25`, `Интервал continuous (interval): 120000мс`, `Максимум свечей: 7 500`, `API-запросов ≈25`, `По биржам: BINANCE 1 ...`.
+
+- **Cadence:** `interval 120000ms = 2m` (conservative, ≤5m bound 300000, accounts for sequential pass runtime ~10-20s: 25 tasks × 250ms delay + API retry ~5-10s, ensures CLOSED 5m candle not missed). Default `60m (3600000)` is NOT production-safe for 5m continuous → guard `Cadence unsafe: interval 3600000ms > 300000ms ... Use --interval <=300000 or --once` fail-closed. `validateCadence` pure: `!once && includes 5m && interval>300000` → error, `--once` exempt, `--plan` exempt.
+
+- **PM2 process name:** `svechnoy-suslik-ohlcv-btc` (fork, single-instance).
+
+- **PM2 lifecycle (VPS, manual, NOT in Arena):**
+  ```bash
+  cd ~/svechnoy-suslik
+  pm2 start ecosystem.config.js --only svechnoy-suslik-ohlcv-btc --update-env
+  pm2 status
+  pm2 logs svechnoy-suslik-ohlcv-btc
+  pm2 restart svechnoy-suslik-ohlcv-btc --update-env
+  pm2 stop svechnoy-suslik-ohlcv-btc
+  pm2 delete svechnoy-suslik-ohlcv-btc
+  pm2 status # only svechnoy-suslik remains
+  ```
+
+- **Rollback:** `pm2 stop/delete svechnoy-suslik-ohlcv-btc`; DB rollback not needed — worker idempotent `upsert` (`marketId+timeframe+openTime`), no `deleteMany`, no `prisma.candle.delete`, no Signal writes, no Strategy mutation. Verify `pm2 status` shows only Next.js, `psql` candle count unchanged after stop, `project` рабочая.
+
+- **Worker start ≠ enable Smart Money:** Запуск `svechnoy-suslik-ohlcv-btc` только пополняет свечи; Strategy `id=2` остаётся `DRAFT enabled=false status DRAFT timeframes=["1h"] minExchanges=3` (см. `prisma.strategy.findUnique where id:2`), `Signal 0`. Включение Strategy — отдельный ручной шаг после pilot verification (см. §36-40) и `/admin` approval, не происходит автоматически.
+
+**Safety decisions:**
+
+- `--symbol=BTC` over `--top=1` / hardcode DB id: explicit enabled Asset symbol selection, combined with market filters, fail-closed if missing/disabled, tested `collectPlanStats` BTC 1/5/25 vs Top-1 ambiguity.
+- `interval 120000` over default 3600000: conservative 2m within 5m bound, documented runtime-aware, guard fail-closed for 5m+60m continuous, pure/testable, --once bypass for one-shot.
+- Advisory lock `727923` over Redis/new infra: minimal fail-closed, no schema migration, careful `pg_try_advisory_lock` + `pg_advisory_unlock` in `finally`, tested no Redis/CREATE TABLE.
+- `ecosystem.config.js` over ad-hoc `pm2 start npx ...`: version-controlled artifact exact BTC scope, inherits env, no secrets, no hardcode DATABASE_URL, documents rollback and verification.
+
+**Failure behavior:**
+
+- Exchange/API error → `stats.errors++` per timeframe/exchange, `byTimeframe` `ошибок=`, `byExchange` `ошибок=`, console.error `✗ exchange symbol timeframe: message`, process does NOT create Signal, does NOT enable Strategy, continues next market/timeframe, graceful `sleep(delay)`, `waitInterruptible(interval)` respects SIGINT/SIGTERM.
+- Lock held → `Single-instance guard: OHLCV worker already running (advisory lock 727923 held) ... refusing to start overlapping` exit 1.
+- Symbol not found/disabled → `Ошибка: актив с символом "BTC" не найден или disabled ...` exit 1 before `runOhlcvSync` (tested via `collectPlanStats` 0 assets).
+- Large run guard still `<500` tasks: BTC pilot 25 tasks allowed, Top-500×5 2357 requires `--confirm-large-run`.
+- No destructive DB: `upsertCandles` chunk 50 `prisma.$transaction` upsert, `market.lastSyncAt` only update, no deletes.
+
+**Tests:**
+
+- `scripts/test-ohlcv-pilot.ts` **127/127** (new, pure + mock Prisma):
+  - interval default/env/CLI precedence/bounds/non-integer, help contains interval/symbol, unknown flags fail-closed, plan shows effective interval, cadence guard unsafe 5m+60m rejected + --once bypass + 5m 120000 ok + plan bypass + 1h ok, symbol BTC run case-insensitive symbol+top ambiguity forbidden empty/invalid symbol, collectPlanStats BTC 1/5/25 + plan report Symbol/interval, missing/unknown/disabled 0 assets fail-closed, Top-1 ambiguity, single-instance lock key 727923 pg_try_advisory_lock/unlock no Redis/migration worker lock order finally, PM2 artifact exact BTC scope interval ≤5m 120000 no hardcode DB no 60m, no Signal imports, stats/log, graceful, no deleteMany, upsert key, buildConfirmCommand symbol, schema unchanged, worker plan title before sync import.
+- `scripts/test-ohlcv-cli.ts` **105/105** (existing + new interval/cadence): defaults, env, CLI precedence, timeframe list, limits, unknown flags, --plan, large-run guard, worker source guard order, preflightTitle.
+- `npx tsc --noEmit --skipLibCheck` 0 new errors (baseline JSX implicit-any unchanged).
+- `npm run build` compiles (sandbox baseline next build ok).
+
+**Verification (Arena, read-only, no PM2 start, no Strategy enable):**
+- `npx tsx scripts/test-ohlcv-cli.ts` 105/105, `npx tsx scripts/test-ohlcv-pilot.ts` 127/127, `grep -R "prisma.signal" lib/ohlcv scripts/ohlcv-worker.ts` 0, `grep -R "DATABASE_URL" ecosystem.config.js` 0, `cat prisma/schema.prisma | grep -E "model (Asset|Market|Candle|Signal|Strategy)"` unchanged, `git diff --name-only` 6 files (`lib/ohlcv/cli.ts`, `lib/ohlcv/plan.ts`, `lib/ohlcv/sync.ts`, `lib/ohlcv/lock.ts`, `scripts/ohlcv-worker.ts`, `ecosystem.config.js`, `scripts/test-ohlcv-pilot.ts`, `PROJECT_CONTEXT.md`), build ok, `git diff --check` clean.
+
+**Files changed (gap closure):**
+- `lib/ohlcv/cli.ts` (interval+symbol+cadence)
+- `lib/ohlcv/plan.ts` (symbol+interval)
+- `lib/ohlcv/sync.ts` (symbol)
+- `lib/ohlcv/lock.ts` (new, advisory lock)
+- `scripts/ohlcv-worker.ts` (interval display, symbol, lock, missing-symbol fail-closed, graceful)
+- `ecosystem.config.js` (new, PM2 BTC pilot)
+- `scripts/test-ohlcv-pilot.ts` (new, 127 tests)
+- `PROJECT_CONTEXT.md` (this §41)
+
+**Deliverable:** ONE commit exact parent `a4d8de184c790a0bd172a09c1ff9d43ee39ab2fd`, push only `arena/01a08b68-svechnoy-suslik`, STOP after gap closure (PM2 not auto-started, Strategy id=2 remains DRAFT, Signal Engine not implemented).
