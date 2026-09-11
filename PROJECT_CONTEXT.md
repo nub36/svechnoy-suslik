@@ -2676,3 +2676,65 @@ Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC*
 - `PROJECT_CONTEXT.md` (this §40; also audit wording remains hypothesis not proven)
 
 **Deliverable:** ONE commit exact parent `4a62758`, push only `arena/01a08b68-svechnoy-suslik`, STOP after ONE implementation commit.
+
+==================================================
+40.1 BINGX 1D DIAGNOSTIC SUMMARY — FACTUAL FIX (OBSERVABILITY ONLY) 11.09.2026
+==================================================
+
+**Baseline exact:** `3c329893e186060914d8032cc415ec83ed0d96f2` (Option A eligibility, parent `4a62758`). This fix is **observability/test only** — NO eligibility/alignment/scoring/runtime/DB/Signal/math changes.
+
+**Problem observed on real VPS BTC 1d after Option A:**
+- Per-exchange (PostgreSQL CLOSED):
+  - BINANCE  2026-09-09T00:00:00Z evaluable
+  - BINGX    2026-09-08T16:00:00Z evaluable, OFF_GRID (BINGX 16:00 UTC vs canonical 00:00)
+  - BYBIT    2026-09-09T00:00:00Z evaluable
+  - GATE     2026-09-09T00:00:00Z evaluable
+  - KUCOIN   2026-09-09T00:00:00Z evaluable
+- Policy correctly printed: `eligibility: excluded BINGX for 1d ... 4/5 eligible`
+- Filtered alignment correctly printed: `reference 2026-09-09T00:00:00Z`, BINANCE/BYBIT/GATE/KUCOIN GRID_OK HORIZON_OK, `ALIGNED 4/4 safe`
+- Aggregation correctly executed on 4: `NEUTRAL`, `evaluated 4`, `minExchanges 3`, `Signal 0 -> 0`
+- **BUT final summary incorrectly printed:** `Вывод Phase3E 1d: safe — all 5 at same UTC midnight.` — factually false after Option A (BINGX NOT at UTC midnight and was intentionally excluded; only 4 eligible aligned).
+
+**Fix:**
+- `scripts/smart-money-diagnostic.ts` final 1d summary now derives from runtime state, never claims all 5:
+  - `if (alignment.safe)`: `Вывод Phase3E 1d: safe после eligibility-фильтра — ${alignedCount}/${totalEvaluated} eligible рынков aligned на одном canonical UTC horizon ${referenceCandleTime}; BINGX исключён из Smart Money 1d aggregation policy (${eligible}/${total} eligible, excluded: BINGX).`
+  - `else`: `misaligned после eligibility-фильтра — ${alignedCount}/${totalEvaluated} eligible aligned (offGrid ${}, horizonMismatch ${}); BINGX исключён из Smart Money 1d aggregation policy (${eligible}/${total} eligible). 1d пока НЕЛЬЗЯ разблокировать ...`
+  - Uses `eligibleResults`, `alignment.totalEvaluated / alignedCount / referenceCandleTime`, `excluded` list — no hardcoded `4/4`, no `all 5`.
+  - `5m/15m/1h/4h` generic summary unchanged (`safe (grid OK + same horizon, badStep 0)` / `MISALIGNED ...`).
+- `scripts/smart-money-readonly.ts` audited: no stale `all 5 at same UTC midnight` phrase found; generic `ALIGNED ${alignedCount}/${totalEvaluated} safe — можно агрегировать` remains correct and already derived; no change needed (audit confirmed).
+
+**Preserved:**
+- `lib/strategies/smart-money-eligibility.ts` policy unchanged (BINGX 1d ineligible only)
+- `lib/strategies/alignment.ts` unchanged (generic canonical grid + horizon)
+- `aggregateAssetGroup` / `lib/smc/*` / scoring / RANGE_POSITION math unchanged — observed RANGE_POSITION on four eligible 1d markets `pos ≈ 2.236..2.242` still awards `SHORT +10` (outsideRange true, scored via zone, no clamp — lifecycle remains audit-open, see §34/35-40).
+
+**Real VPS BTC 1d Option A verification (factual, minimal):**
+- 5 per-exchange evaluable (as above, BINGX OFF_GRID)
+- BINGX excluded for aggregation per policy
+- Remaining 4/4 exact 00:00 UTC aligned (`reference 2026-09-09T00:00:00Z`, `GRID_OK HORIZON_OK`, `safe=true`)
+- Aggregation allowed on 4 (`evaluated 4`, `skipped 0`, `canAggregateSafely true`)
+- `minExchanges=3` respected
+- Result at test time `NEUTRAL` (no side reached 3; e.g., `0/4` LONG/SHORT or similar, depending on scores — observed `NEUTRAL` `0/4`)
+- `Signal 0 -> 0` (DIAGNOSTIC ONLY, no writes)
+- `Strategy id=2` remained `DRAFT enabled=false timeframes=["1h"] minExchanges=3` (no DB mutation)
+- `1d` remains disabled in Admin/API (`allowedVerified [5m,15m,1h,4h]`, 1d tooltip 16:00 vs 00:00) until final acceptance
+- RANGE_POSITION evidence preserved: eligible 1d `pos ≈ 2.236..2.242` → `SHORT +10` via `PREMIUM` zone, separate from eligibility.
+
+**Tests — regression added to `scripts/test-smart-money-eligibility.ts` (81→96, new §J 15 checks):**
+- J1 safe mentions `после eligibility-фильтра` + `eligible рынков aligned`
+- J2/J3 must NOT contain `all 5 at same UTC midnight` / `safe — all 5`
+- J4/J5 BINGX exclusion explicit (`BINGX исключён`, `Smart Money 1d aggregation policy`)
+- J6 derives counts (`alignment.alignedCount`, `alignment.totalEvaluated`, `eligibleResults.length`)
+- J7/J8 misaligned after eligibility shows `offGrid`/`horizonMismatch` + BINGX policy, not all 5
+- J9/J10 5m/15m/4h wording unchanged
+- J11/J12 generic `MULTI-EXCHANGE AGGREGATION REFUSED` / `cannot-aggregate` still present
+- J13-J15 readonly audited: no stale all-5, generic ALIGNED still present
+
+**Verification:** `test-smart-money-eligibility.ts` 96/96, `test-smart-money-diagnostic.ts` 95/95, `test-smart-money.ts` 62/62, `tsc --noEmit` no new errors, `git diff --check` clean, `git merge-base --is-ancestor edf3732 HEAD` → 1 (NOT ancestor), NO runtime math/eligibility/alignment/DB/Signal changes.
+
+**Files changed (observability only):**
+- `scripts/smart-money-diagnostic.ts` (final 1d summary wording)
+- `scripts/test-smart-money-eligibility.ts` (added §J 15 checks, 81→96)
+- `PROJECT_CONTEXT.md` (this §40.1)
+
+**Deliverable:** ONE commit exact parent `3c329893e186060914d8032cc415ec83ed0d96f2`, push only `arena/01a08b68-svechnoy-suslik`, STOP after one commit.

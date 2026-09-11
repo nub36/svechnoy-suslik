@@ -310,5 +310,33 @@ function mkSkipped(ex: string, status: "cannot-evaluate" | "filtered"): MarketSt
   ok(res.status === "cannot-evaluate", "I4 CLOSED-only still enforced (closed=false => cannot-evaluate)");
 }
 
+// J. diagnostic 1d summary factual after Option A — must reflect filtered eligibility, not all 5
+{
+  console.log("\nJ. diagnostic 1d summary wording (Option A factual)");
+  const diag = readFileSync("scripts/smart-money-diagnostic.ts", "utf8");
+  const readonlySrc = readFileSync("scripts/smart-money-readonly.ts", "utf8");
+  // Safe summary must mention eligible/filtered and BINGX exclusion, not all 5
+  ok(diag.includes("после eligibility-фильтра") && diag.includes("eligible рынков aligned"), "J1 diagnostic 1d safe mentions eligible/filtered (после eligibility-фильтра + eligible рынков aligned)");
+  ok(!diag.includes("all 5 at same UTC midnight"), "J2 diagnostic must NOT claim all 5 at same UTC midnight");
+  ok(!diag.includes("safe — all 5"), "J3 diagnostic must NOT contain stale 'all 5' safe phrase");
+  ok(diag.includes("BINGX") && (diag.includes("исключён") || diag.includes("excluded") || diag.includes("BINGX ineligible for 1d")), "J4 diagnostic mentions BINGX exclusion explicit");
+  ok(diag.includes("Smart Money 1d aggregation policy") || diag.includes("BINGX ineligible for 1d"), "J5 diagnostic mentions aggregation policy (Smart Money 1d aggregation policy)");
+  // Derived counts, not hardcoded 4/4 only
+  ok(diag.includes("alignment.alignedCount") && diag.includes("alignment.totalEvaluated") && diag.includes("eligibleResults.length"), "J6 diagnostic 1d safe derives counts from alignment/eligibleResults (not hardcoded)");
+  // Misaligned after eligibility still factual
+  ok(diag.includes("misaligned после eligibility-фильтра"), "J7 diagnostic 1d misaligned after eligibility-фильтра");
+  ok(diag.includes("offGrid") && diag.includes("horizonMismatch") && diag.includes("BINGX исключён"), "J8 diagnostic misaligned still shows offGrid/horizonMismatch + BINGX policy");
+  // 5m/15m/1h/4h wording unchanged
+  ok(diag.includes("Вывод Phase3E: ${timeframe} — safe (grid OK + same horizon"), "J9 diagnostic 5m/15m/4h safe wording unchanged");
+  ok(diag.includes("Вывод Phase3E: ${timeframe} — MISALIGNED"), "J10 diagnostic 5m/15m/4h misaligned wording unchanged");
+  // Generic unsafe still behaves
+  ok(diag.includes("MULTI-EXCHANGE AGGREGATION REFUSED"), "J11 diagnostic generic REFUSED still present");
+  ok(diag.includes("cannot-aggregate for multi-exchange"), "J12 diagnostic cannot-aggregate guard still present");
+  // Readonly audit — no stale claim
+  ok(!readonlySrc.includes("all 5 at same UTC midnight"), "J13 readonly must NOT contain stale all 5 phrase");
+  ok(!readonlySrc.includes("safe — all 5"), "J14 readonly no stale safe all 5");
+  ok(readonlySrc.includes("ALIGNED") && readonlySrc.includes("safe — можно агрегировать"), "J15 readonly generic ALIGNED still present (audited)");
+}
+
 console.log(`\nEligibility tests: ${passed}/${total}`);
 process.exit(passed === total ? 0 : 1);

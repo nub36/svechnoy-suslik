@@ -430,9 +430,15 @@ async function runSymbolDiagnostic(symbol: string, timeframe: SmcTimeframe): Pro
   }
   if (timeframe === "1d") {
     if (alignment.safe) {
-      console.log(`\nВывод Phase3E 1d: safe — all 5 at same UTC midnight.`);
+      const excluded = results.filter((r) => !isSmartMoneyExchangeEligible(r.exchange, timeframe));
+      const excludedList = excluded.map((e) => e.exchange).join(", ") || "—";
+      console.log(
+        `\nВывод Phase3E 1d: safe после eligibility-фильтра — ${alignment.alignedCount}/${alignment.totalEvaluated} eligible рынков aligned на одном canonical UTC horizon${alignment.referenceCandleTime ? ` ${alignment.referenceCandleTime.toISOString()}` : ""}; BINGX исключён из Smart Money 1d aggregation policy (${eligibleResults.length}/${results.length} eligible, excluded: ${excludedList}).`
+      );
     } else {
-      console.log(`\nВывод Phase3E 1d: misaligned (observed BINGX 16:00 UTC vs others 00:00 UTC) — 1d пока НЕЛЬЗЯ разблокировать. Нужно: нормализация или исключение BINGX из 1d, без фабрикации OHLC.`);
+      console.log(
+        `\nВывод Phase3E 1d: misaligned после eligibility-фильтра — ${alignment.alignedCount}/${alignment.totalEvaluated} eligible aligned (offGrid ${alignment.offGrid.length}, horizonMismatch ${alignment.horizonMismatch.length}); BINGX исключён из Smart Money 1d aggregation policy (${eligibleResults.length}/${results.length} eligible). 1d пока НЕЛЬЗЯ разблокировать без доп. нормализации, без фабрикации OHLC.`
+      );
     }
   }
 
