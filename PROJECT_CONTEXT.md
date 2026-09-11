@@ -2528,3 +2528,81 @@ SmcScoringConfig {
 **Status:** 3D-D implemented, **not final-ready** (Phase 3D-E regression/alignment/no-Signal still pending before final acceptance). Only `components/admin/SmartMoneyStrategyEditor.tsx`, `scripts/test-smc-phase3d-d.ts`, `PROJECT_CONTEXT.md` changed; `prisma/schema`, `Signal`, `alignment`, chart/range math не тронуты.
 
 **Deliverable:** ONE commit exact parent `980b408`, push only `arena/01a08b68-svechnoy-suslik-phase3d-clean`, STOP after 3D-D.
+
+==================================================
+39. BINGX 1D ALIGNMENT ROOT-CAUSE AUDIT — READ-ONLY (11.09.2026)
+==================================================
+
+**Baseline:** `d5029df40d75fd2d6ba36ac55c4bfac95a8e254c` (Phase 3D-D fix, parent `8e853e63dca144e11953c14c6a16545b3d826b4d`; **NO DB mutation, NO workers, NO Signal, NO SMC/math, NO 1d enable, NO global BingX removal; `edf3732` NOT ancestor — verified). Документационный аудит поверх точного `d5029df`, без изменения runtime/Admin/DB. Полный аудит: `docs/bingx-1d-alignment-audit.md` (версия этого раздела — краткое резюме, детали — в документе).
+
+**Наблюдение Phase 3E (подтверждено, не гипотеза):** BTC real diagnostic 5m/15m/1h/4h READY (5/5 evaluable, same horizon `safe=true`), `1d` BLOCKED — BINGX `offGrid + horizonMismatch` (`openTime % 86400000 === 57600000`, `T16:00:00Z` vs `T00:00:00Z` у BINANCE/BYBIT/GATE/KUCOIN), `safe=false`, `MULTI-EXCHANGE AGGREGATION REFUSED` (`aggregateAssetGroup` not called). 5m/15m/1h/4h BingX верифицирован как GRID_OK/aligned/usable.
+
+**Трассировка ingestion (7 шагов, каждый pass-through, 16:00 UTC не вносится нами):**
+- `lib/exchanges/bingx.ts:8-9,172-176` — `GET /openApi/spot/v2/market/kline?symbol&interval=1d&limit` — для `1d` `bingxInterval==="1d"` буквально, **no** `timeZone/session` param.
+- `bingxInterval` + `timeframeMs` (`1d:86400000`) — `duration` только для `closeTime = openTime + 86400000 -1`, не сдвигает `openTime`.
+- `210-251` — `openTime = Number(row[0])` (или `row.time`) verbatim → `new Date(openTime)` — **no** `+8h`, `toLocaleString`, `Intl`, timezone arithmetic. Если API отдал 00:00, мы бы сохранили 00:00.
+- `closed = closeTime < now` — wall-clock, не session.
+- `lib/ohlcv/sync.ts` — `runOhlcvSync → upsertCandles` по `marketId+timeframe+openTime` exact, `isValidCandle` не трогает `openTime % tfMs`, `incoming = filter(c.openTime >= last.openTime)` — no resampling/normalization.
+- `prisma/schema.prisma` `Candle @@unique([marketId,timeframe,openTime])` — 16:00 и 00:00 разные ключи, no dedup.
+- **Вывод:** pipeline прозрачен, UTC-агностичен — **16:00 приходит с провода BingX**.
+
+**API семантика (evidence vs hypothesis — чётко разделено):**
+- **Evidence:** адаптер не передаёт `timeZone`; тот же pipeline даёт `00:00Z` для 4 бирж и `16:00Z` только для BingX `1d`, а `5m/15m/1h/4h` BingX — `GRID_OK` (тот же `row[0]`-путь). Variance per-exchange/per-API доказывает внешний источник.
+- **Strong hypothesis (не утверждается без `curl` + docs цитаты):** `16:00 UTC = 00:00 CST (UTC+8)` (`57600000 = 8h`). BingX `1d` определён как Asia session `00:00-24:00 CST`, а 4 другие — как UTC day (Binance docs UTC, Bybit `D` UTC и т.д.). Intraday `1h` и т.д. у всех — duration-anchored от Unix epoch, а daily — session-anchored, поэтому расхождение изолировано к `1d`.
+- **Wire-доказательство (рекомендованное VPS `curl` до remediation):** `curl .../kline?symbol=BTC-USDT&interval=1d&limit=5` → `openTime T16:00:00.000Z`, тогда как `binance /api/v3/klines?interval=1d` → `T00:00:00.000Z` на те же UTC даты.
+
+**Сравнение 5 бирж (почему другие 00:00):**
+- BINANCE `interval=1d` UTC, BYBIT `D` UTC, GATE `1d` UTC, KUCOIN `1day` UTC — каждый адаптер хранит `openTime` verbatim, `close = open+duration-1`. Разница — определение `1d` на бирже, не наш код.
+
+**Stored BTC BINGX 1d rows — READ-ONLY (no DB mutation, no bulk fetch):**
+- **Proven Phase 3E:** latest CLOSED BTC BINGX `1d` `openTime T16:00:00Z` vs 4× `T00:00:00Z`, `offGrid true (57600000)`, `horizonMismatch true`, `safe false` → REFUSED.
+- **To be re-verified on VPS READ-ONLY (exact SQL в `docs/bingx-1d-alignment-audit.md` §5.2):** `GROUP BY hour_utc` → `100% 16` для BINGX `1d`, `100% 0` для остальных; `lag(openTime)=86400000` continuous; `count==distinct`, no dups; `close = open+86400000-1`. Логика pipeline гарантирует стабильность `16:00` для всех 299 `1d` (API session stable), но полный scan — честная VPS-проверка без bulk fetch/workers.
+
+**Критичное различение A vs B (доказано):**
+- **A) Real 24h 16:00→16:00 UTC (00:00→00:00 CST)** — OHLC агрегирован биржей за это окно, `openTime` корректно его метит.
+- **B) Canonical UTC [00:00,24:00) mis-encoded (+16h bug)** — OHLC был за UTC день, но label сдвинут.
+- **Доказано A, B опровергнуто:** `openTime` verbatim без сдвига; no shift code; `1d` изолировано (timestamp bug задел бы все TF); OHLC divergence (будет на VPS): `BINGX 16:00` OHLC ≠ `BINANCE 00:00` того же календарного UTC дня, а равна price action `16:00→15:59Z`. **Следствие: `UPDATE openTime -16h` — фальсификация** (пометит 16:00-окно как UTC день, open/high/low/volume из неправильного окна).
+
+**Сравнение remediation (без реализации, см. таблицу §7 audit):**
+- **A) Exclude BINGX only for `1d` aggregation** — keep BingX globally (5m/15m/1h/4h), refuse BingX only when `timeframe==='1d'` via `isEligible(ex,tf)` / `ELIGIBLE_EXCHANGES_BY_TF["1d"]=4` (BINANCE/BYBIT/GATE/KUCOIN). No DELETE/UPDATE, rows stay but ignored for `1d` `aggregateAssetGroup`; per-exchange `1d` display may remain. Zero OHLC risk.
+- **B) Request UTC-aligned `1d` if API supports** — send `?timeZone=UTC`/`session` etc., exchange returns `00:00Z`. **Не найдено** — в `bingx.ts` такого param нет, docs не цитированы; **not actionable today** — research spike с `curl` + docs quote required, иначе silent failure (param ignored, still `16:00`).
+- **C) Construct canonical UTC daily from CLOSED `1h`** — compute `1d` `[00:00,24:00) UTC` from 24 CLOSED `1h` BingX (UTC-aligned): `open=first.open@00:00, high=max, low=min, close=last.close@23:00, volume=sum`, only after UTC day fully closed (`23:00 closeTime < now`), gap → `cannot-evaluate`, no lookahead. Mathematically safe if complete. Future, после A.
+- **D) Remove BingX globally** — `DELETE Market WHERE exchange='BINGX'` — collateral damage: loses proven `5m/15m/1h/4h` 5/5 → 4/4 for no reason; **contraindicated** (task says do not).
+
+**Other symbols/TF analogous off-grid (READ-ONLY, no bulk):**
+- Code per-exchange/per-TF identical; symbol-independent. `5m/15m/1h/4h` `badStep=0` `GRID_OK` for all 5 on BTC, so no analogous off-grid beyond BingX `1d` expected. Future VPS spot-check: 1-2 symbols `GROUP BY symbol,hour_utc` (`ETH`, `SOL`) — `hour=16` for all BINGX `1d`, не bulk Top-500.
+
+**Consequences of A (30/4-safe):**
+- `1d` eligible = 4 (`BINANCE/BYBIT/GATE/KUCOIN`) canonical `00:00Z` → `minExchanges=3` remains safe (`3/4` or `4/4` confirmation). `5m/15m/1h/4h` remain `5/5`. Generic guard already refuses `5/5` with `16:00`, explicit eligibility makes `4/4 safe=true` intentional. Do NOT enable `1d` yet — eligibility must be live + §11 tests green.
+
+**Root cause (concise, evidence-labeled):**
+- **Proven:** BingX Spot `1d` `openTime` from API is `16:00 UTC`, not `00:00 UTC`; we store verbatim (`Number(row[0])`); pipeline cannot synthesize offset; exchange-side session definition causes divergence.
+- **Evidence:** `bingx.ts` no timezone, worker pass-through, latest CLOSED `16:00` vs `00:00`, intraday control `GRID_OK`.
+- **Hypothesis (to be quoted):** `16:00 UTC = 00:00+08:00` Asia session — arithmetic `16*3600000` + pattern, pending BingX docs phrase.
+
+**Recommendation (safest):**
+- **Immediate (next commit): Option A** — per-timeframe eligibility (BINGX excluded only for `1d`), `1d` aggregates 4 aligned, `minExchanges=3` safe, no data rewrite.
+- **Future if 5/5 desired:** Option C (derive UTC `1d` from `1h`), after B spike shows no `timeZone` param. Option D not recommended.
+
+**Exact future implementation plan (not in this audit, §12 audit):**
+- Commit 1 — `lib/strategies/eligibility.ts` `ELIGIBLE_EXCHANGES_BY_TF` + `isEligible`, filter before `checkCandleAlignment` in diagnostic/aggregation, `TS validated by `scripts/test-eligibility.ts`; diagnostic BTC `1d` 4/4 `safe=true`.
+- Commit 2 — B spike `curl` with candidate `timeZone` param + docs capture.
+- Commit 3 — `lib/ohlcv/derive-daily.ts` `deriveUtcDailyCandles` pure 24×`1h`→`1d`, no lookahead, `CLOSED` only.
+- What NOT to do: `UPDATE -16h`, `DELETE` without preview, `force-reset`, `TRUNCATE`, change SMC/alignment/1d enable/Signal.
+
+**Migration implications:**
+- **A:** None — old `16:00` rows stay, distinct key from future `00:00`, ignored for `1d` aggregation at read path.
+- **B/C:** New `00:00` rows inserted as distinct keys; old `16:00` remain until explicit retention decision (keep both vs archive after `GROUP BY` + `24h` continuity proof). No `UPDATE` in place.
+
+**Tests before enabling `1d` (must be green on VPS PostgreSQL, §14 audit):**
+- Existing: `test-smc-phase3d-c 91/91`, `phase3d-config 70/70`, `phase3d-b 55/55`, `smart-money 62/62`, `diagnostic 95/95`, `admin-consistency 84/84`, `tsc 0`, `diff --check 0`, `edf3732` NOT ancestor, **NO DB mutation**.
+- New for A: `isEligible(BINGX,1d)=false`, `4×T00:00Z→safe true`, `5×with T16→safe false`, BTC diagnostic `1d` filtered `4/4` ALIGNED `aggregateAssetGroup` called.
+- New for C: `deriveUtcDaily` 24×CLOSED, 23→null, closed=false→null, high/low/volume, no lookahead.
+- VPS READ-ONLY: `hour_utc` distribution BTC+ETH, continuity, duplicates, `smart-money-diagnostic --timeframe=1d` filtered `4/4 safe` and derived equality divergence.
+- Must NOT: `UPDATE -16h`, `DELETE` BINGX `1d` without preview, `Strategy id=2 timeframes includes 1d` before tests.
+
+**Files changed in this audit commit:** `docs/bingx-1d-alignment-audit.md` (new, 9 sections, evidence/hypothesis separated), `PROJECT_CONTEXT.md` (this §39 only). **No** `components/admin`, `app/api`, `lib/smc`, `lib/strategies`, `lib/exchanges`, `lib/ohlcv`, `prisma`, `Signal`, `alignment`, `chart`. Verification: `git diff --check` clean, `tsc --noEmit` if TS touched (no TS changes → 0), `git merge-base --is-ancestor edf3732 HEAD` → exit `1` (NOT ancestor), `NO DB mutation` (no `prisma.strategy.update/signal`/`DELETE/UPDATE`).
+
+**Reference (§17 audit):** `lib/exchanges/bingx.ts`, `binance.ts/bybit.ts/gate.ts/kucoin.ts`, `lib/ohlcv/sync.ts`, `lib/strategies/alignment.ts`, `docs/phase3e-diagnostic-report.md`, `scripts/smart-money-diagnostic.ts`, `app/api/admin/strategies/[id]/route.ts`.
+
+**Deliverable:** Documentation-only audit on exact `d5029df`, STOP after audit (next commit is Option A implementation after review).
