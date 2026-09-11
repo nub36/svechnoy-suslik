@@ -2884,133 +2884,75 @@ Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC*
 
 **Deliverable (FIX):** ONE additional commit atop `d0fd5725d4e752e58b1cac73b8ea8fb025c559e5` (not amend), push only `arena/01a08b68-svechnoy-suslik`, STOP after FIX (PM2 not auto-started, Strategy id=2 remains `DRAFT enabled=false timeframes=["5m","15m","1h","4h","1d"]` `Signal 0`, Signal Engine not implemented, no DB mutation).
 
-
 ==================================================
-42. SMART MONEY READ — TRANSIENT INGESTION RACE FIX (COMMON CLOSED HORIZON, B) 11.09.2026
+42. SMART MONEY READ — TRANSIENT INGESTION RACE FIX (COMMON CLOSED HORIZON) + REVIEW FIX 11.09.2026
 ==================================================
 
-**Baseline exact:** `83613d0d7393fc3e0934113e77a79c73c4424463` (one reviewable commit atop `d20addfbced6267ba382ea726c75116df9c63dbb`, branch `arena/01a08b68-svechnoy-suslik`), working tree clean before FIX.
+**Хронология и точные baseline (проверено `git merge-base --is-ancestor`/compare, не «на глаз»):**
+- `83613d0d7393fc3e0934113e77a79c73c4424463` — `main` = production на 11.09.2026 10:22 UTC.
+- `ec73320723327f68a64be435b87aff0e5701f110` — КАНДИДАТ FIX (read-side latest COMMON CLOSED horizon) = ровно `main + 1` (compare: ahead 0 / behind 1).
+- Родитель ЭТОГО коммит — ровно `ec7332072…`: один reviewable FIX поверх кандидата, без amend и без ребейза/rewrite. Ветка `arena/01a09002-svechnoy-suslik`, push только в неё; `main` не тронут.
+- `edf3732da81…` (Signal Engine dry-run) по-прежнему НЕ является предком `main` — это roadmap P5, в Phase 3 не входит и в этот коммит не входит.
 
-**Observed production race (factual, not mocked):**
-- BTC continuous worker `svechnoy-suslik-ohlcv-btc` sequential ingestion 25 tasks/pass ~15-16s (5m/15m/1h/4h/1d interval 120000, 25 tasks).
-- Concurrent Smart Money read (Strategy id=2 `PUBLISHED enabled true timeframes all 5 minExchanges 3`) during pass caused transient 5m `MISALIGNED`:
-  - `BINANCE 09:45` vs 4 others `09:50` (UTC, canonical 5m grid, CLOSED) → `checkCandleAlignment` horizonMismatch → `cannot-aggregate`.
-  - 35s later (after pass completed) same BTC 5m `ALIGNED 5/5` at `09:50` (all 5 have 09:50).
-- This is visibility race (sequential writes + concurrent read), not exchange boundary bug. Without fix, transient cannot-evaluate window = pass duration (~15s) every 5m, minimized but not eliminated by 120000 interval.
+**Production-наблюдение (факт, не mock):** BTC-ворк `svechnoy-suslik-ohlcv-btc`, последовательная ingest 25 задач/проход ≈ 15–16 s (5m/15m/1h/4h/1d, interval 120000). Параллельное Smart Money-чтение внутри прохода ловило транзиентный 5m `MISALIGNED`: `BINANCE 09:45` против четырёх `09:50` (UTC, canonical grid, CLOSED) → `checkCandleAlignment.horizonMismatch` → `cannot-aggregate`; через ~35 s (проход завершён) те же BTC 5m давали `ALIGNED 5/5` на `09:50`. Это гонка видимости (последовательная запись + конкурентное чтение), а не баг границ биржи.
 
-**Requirements (FIX, minimal):**
-1) Minimize transient cannot-evaluate windows between sequential ingestion and Smart Money read while preserving `CLOSED-only, no-lookahead, strict identical-horizon`.
-2) NOT weaken `lib/strategies/alignment.ts` (no aggregation of different horizons).
-3) No "newest per exchange despite mismatch".
-4) No long DB transaction around exchange API.
-5) No candle timestamp/resampling change, `BINGX 1d Option A` (BINGX excluded for 1d eligibility, 4 others exact UTC grid) excluded before selection.
-6) No Signal Engine (`lib/signals`, `signal-worker`, `Signal` schema/writes untouched).
-7) Prefer no Prisma schema change — if needed STOP.
+**Ревью кандидата → вердикт NEEDS FIX (выводы по коду и провесам, не по тексту коммита):**
+- **HIGH-1 (устранено этим FIX):** кандидат исключал из «участников» общего горизонта ЛЮБОЙ рынок, не давший оценки, — и отфильтрованный Strategy-фильтром, и рынок без CLOSED-данных, и рынок без общего бара. Следствия: «4 здоровых + 1 вне вселенной» превращалось в `usable=false` (вето там, где фильтр не должен влиять), а «4 здоровых + 1 без данных» не имело различимого исхода. Провес: old `evaluated 4, safe=true` vs кандидат `usable=false`.
+- **HIGH-2 (устранено этим FIX):** не было абсолютной привязки к wall-clock: `lagBars = newestHorizon − commonHorizon` считался по самим участникам ⇒ если все участники устарели ОДИНАКОВО, лаг = 0 и агрегат «светился здоровым» на данных 3-суточной давности (провес V5: `lagBars=0, usable=true`); для 1d связка «3 бара» означала 3 суток (провес V6).
+- **Гигиена (устранено):** `git diff --check` был грязный (пустые строки на EOF двух файлов); `scripts/test-common-horizon.ts` содержал ветку `if (evaluated.length > 0) { real } else { mock }`, `ok(true, placeholder…)` и «vacuous»-проверки, которые проходили и при пустом reads-результате; §42 описывал «9 mandatory cases, 46/46», что код не доказывал.
 
-**Architecture choice (B, read-side latest COMMON CLOSED horizon):**
-- Alternative A (write-side lock TX): would require long DB transaction around exchange API (holds lock for 15s, blocks ingestion, violates requirement 4) — rejected.
-- Alternative C (per-exchange latest with eventual consistency): would aggregate mixed horizons (violates 2,3) — rejected.
-- **Chosen B (read-side):** Smart Money read selects `latest COMMON CLOSED horizon` present at ALL eligible markets (exact timestamp intersection, CLOSED, canonical UTC grid, deterministic, no-lookahead). Per-exchange evaluation uses *truncated* candles up to EXACT common horizon (no future candles), min history preserved via `evaluateSmc` (insufficient truncated history → cannot-evaluate). If no common or stale beyond freshness bound → cannot-evaluate (no silent fallback). For 1d, BINGX excluded BEFORE common selection (common among 4 eligible only). Keeps `lib/strategies/alignment.ts` strict (same horizon), adds `lib/strategies/common-horizon.ts` pure helper, modifies read runtime only.
+**ТРИ МНОЖЕСТВА — контракт участия (ключевое семантическое решение FIX):**
+- (A) **exchange eligibility** — `isSmartMoneyExchangeEligible(exchange, tf)` (Option A без изменений: 5m/15m/1h/4h = 5 бирж, 1d = 4; BINGX исключён для 1d).
+- (B) **Strategy filters** — `applySmartMoneyFilters` (вселенная Top-100 / минимальный quoteVolume24h). Логика НЕ дублируется в слое горизонта — она переиспользуется, отсюда и `filtered`-строки в результатах.
+- (C) **data availability** — есть ли у рынка canonical CLOSED-свеча вообще и конкретный общий бар в частности (+ достаточно истории после усечения).
+- `participants (множество, по которому выбирается H) = A ∧ ¬B`.
+- Рынок из B (отфильтрованный) НЕ двигает и НЕ блокирует H, но сохраняется в `results` со статусом `filtered` и остаётся видимым в отчётности.
+- Участник из `A ∧ ¬B` без CLOSED-данных / без общего бара / с историей < `minimumSwingHistoryCandles=84` / устаревший за bound НЕ «выбрасывается молча, чтобы добрать `minExchanges`»: вместо этого явный отказ asset×TF с различимой причиной.
+- **Denominator семантика `aggregateAssetGroup` сохранена как в pre-common-horizon runtime:** `evaluated` = число реальных оценок, `skipped` = `filtered` + `cannot-evaluate`; `confirmation` = `votes/evaluated`. То есть исправление не «улучшает» и не портит статистику покрытия — оно меняет только ТОЧКУ СБОРА данных.
 
-**Why B is minimal:**
-- No schema migration, no DB transaction, no worker change, no new infra.
-- Keeps `alignment.ts` strict (`to keep`).
-- Deterministic, pure, testable, CLOSED-only, no-lookahead (truncation excludes future candles after common).
-- Freshness bound prevents silent fallback too far back (common 1h behind newest due to missing data → stale → cannot-evaluate).
+**Формула ожидаемого latest CLOSED (анти-HIGH-2):**
+- `expectedLatestClosedOpenTime(now, tf) = floor(now / D) * D − D`, `D = SMCTIMEFRAME_MS[tf]`, каноническая UTC-сетка (5m/15m/1h/4h/1d), `now` — ЯВНЫЙ параметр (в чистом SMC-слое `Date.now()` нет вообще; скрипт читает wall clock ОДИН раз на прогон: `const runNow = new Date()`).
+- Граница обоснована семантикой ingestion: свеча, открытая в `k*D`, закрыта в `(k+1)*D`, адаптеры ставят `closed = closeTime < now` при `closeTime = openTime + D − 1`, т.е. ровно `openTime + D <= now`. Значит в момент `now = k*D` бар `(k−1)*D` УЖЕ закрыт (граница относится к закрывшемуся бару), а бар `k*D` ещё открыт → ожидаем `floor(now/D)*D − D`. Специально НЕ основано на nullable `closeTime` биржи.
+- `absoluteLagBars = (expectedLatestClosed − commonHorizon) / D` — целое, т.к. оба значения на сетке.
+- **Политика (консервативная, в коде, НЕ в Strategy Admin и не торговый параметр):** `COMMON_HORIZON_ABSOLUTE_MAX_LAG_BARS = {5m:1, 15m:1, 1h:1, 4h:1, 1d:1}` — максимум ОДИН закрытый бар позади ожидаемого для всех TF. Относительная защита от перекоса между биржами сохранена без ослабления: `COMMON_HORIZON_RELATIVE_MAX_LAG_BARS = 3` (`newestHorizon − commonHorizon`, граница включительна).
+- Порядок проверок после вычисления `H = max(пересечение)`: `relative_lag_stale` → `future_horizon` (`H` новее ожидаемого latest CLOSED — признак недобросовестных CLOSED-флагов) → `absolute_stale`.
 
-**Implementation (pure, no DB):**
+**Статусы (все различимы оператором; `usable === (status === "ok")`):**
+`ok` · `no_participants` (после A и B никого не осталось) · `data_unavailable` (участник A∧¬B без единой canonical CLOSED свечи — проверяется ДО пересечения, чтобы отсутствующие данные не маскировались) · `no_common_horizon` (пересечение пусто) · `relative_lag_stale` · `future_horizon` · `absolute_stale`.
+Отбракованный горизонт ПРИ ЭТОМ сохраняется в `selection.commonHorizon` (и в `perMarketLatest[].hasCommon`), чтобы отчёт показывал «какой бар отбракован», а не «горизонта нет».
 
-- **`lib/strategies/common-horizon.ts` (NEW, pure):**
-  - `SMCTIMEFRAME_MS`, `isCanonicalAligned` (canonical UTC grid), `COMMON_HORIZON_MAX_LAG_BARS=3`.
-  - `selectCommonClosedHorizon(markets, timeframe, {freshnessBars})` → `CommonHorizonSelection { commonHorizon, newestHorizon, lagMs, lagBars, reason, perMarketLatest, eligibleCount }`:
-    - Per market: filter `closed=true` + `isCanonicalAligned` (defensive), collect times Set, latest.
-    - Intersection = max timestamp present in ALL markets' sets (exact `openTime.getTime()` equality, not rounded).
-    - `commonHorizon = max(intersection)` or `null` if empty (`no common CLOSED horizon`).
-    - Freshness: `lagMs = newestMs - commonMs`, `lagBars = round(lagMs/tfMs)`, if `> freshnessBars (3)` → `commonHorizon=null` + `reason: stale ... lag X bars > bound`.
-    - Deterministic, no DB, no Signal.
-  - `truncateCandlesToHorizon(candles, commonHorizon)` → `candles.filter(openTime <= commonHorizon)` (ASC, deterministic, no-lookahead).
-  - `commonHorizonDiagnostics(markets, timeframe, selection)` → `string[]` for logging (common, newest, lag, per-market has-common).
+**Реализация (чисто, без БД/сети в слое горизонта):**
+- **`lib/strategies/common-horizon.ts` (pure):** `expectedLatestClosedOpenTime`, `selectCommonClosedHorizon(markets, tf, {now, relativeMaxLagBars?, absoluteMaxLagBars?})` (реальное пересечение множеств CLOSED+canonical timestamps, НЕ `min(latest)`), `truncateCandlesToHorizon` (только `closed === true` и `openTime <= H`; бар на самой границе с `closed=false` отсекается), `assertEvaluatedAtHorizon`, `decideAggregationAtCommonHorizon`, `formatCommonHorizonReport`. Никаких `prisma`/`fetch`/`Date.now()`.
+- **`lib/strategies/smart-money.ts`:** `evaluateMarketsAtCommonHorizon(markets, tf, smcConfig, filters, now) → { selection, results, usable, status, participantCount, filteredCount }`. Partition: переиспользует `applySmartMoneyFilters`; `results` возвращаются В ПОРЯДКЕ ВХОДА (позиционный `slot[]`), поэтому сопоставление с рынком и `skipped`-статистика не зависят от порядка. При `!usable` → `results = []` (строже дофиксного поведения на purpose «нет данных», задокументировано ниже). При `usable` каждый участник оценивается на `truncateCandlesToHorizon(candles, H)`; нехватка истории остаётся `cannot-evaluate` (агрегация на остальных продолжается — как в существующем runtime). Плюс per-market anchor-страховка: если `evaluated.candleTime !== H`, результат понижается до `cannot-evaluate` с текстом `invariant: candleTime … ≠ общий горизонт …`.
+- **Единые runtime-ворота `decideAggregationAtCommonHorizon`:** разрешает агрегацию только при `selection.status === "ok"` ∧ `assertEvaluatedAtHorizon` без аномалий ∧ `canAggregateSafely(checkCandleAlignment(results, tf))`. `lib/strategies/alignment.ts` НЕ изменён: строгие ворота (canonical grid + один и тот же candleTime) обязательны и после перехода на общий горизонт, а не заменены им. Якорная проверка не дублирует alignment: при ОДНОМ evaluated рынке `checkCandleAlignment` тривиально `safe` (одно множество горизонтов) и только якорь ловит чужой `candleTime` — закреплено тестом.
+- **`scripts/smart-money-readonly.ts` / `scripts/smart-money-diagnostic.ts`:** один `runNow = new Date()` на прогон → pure-слой; A (eligibility) → горизонт только по участникам; печать `formatCommonHorizonReport`; `alignment = gate.alignment`, `!gate.allowed` → `MULTI-EXCHANGE AGGREGATION REFUSED` с полным списком `refusalReasons` и `aggregateAssetGroup` НЕ вызывается; в нормальном символьном режиме возвращена по-рыночная объяснимость (`причины (N)` + `[LONG/SHORT/—] w=… label value`); сводки 1d больше не врут про «0/5 eligible», когда eligible = 4, а H непригоден; BINGX показан как исключение eligibility-политикой, а не как «нет данных».
+- **`formatCommonHorizonReport`** печатает: `обменное eligibility: X/Y eligible, исключено eligibility-политикой: …`; `Strategy filters: filtered N — не влияет на выбор горизонта`; `участники common horizon: N[, без CLOSED данных: …]`; `ожидаемый latest CLOSED (wall clock …): …`; на каждого участника `latest CLOSED=… has-common|MISSING-COMMON`; затем `✓ common horizon … (relative lag a/A бар, absolute lag b/B бар …)` либо `✗ common horizon недоступен [STATUS] (вычисленный общий бар … отбракован): <точная причина>`.
 
-- **`lib/strategies/smart-money.ts` (modified, import + helper, no scoring change):**
-  - Added import `selectCommonClosedHorizon`, `truncateCandlesToHorizon`, `COMMON_HORIZON_MAX_LAG_BARS`.
-  - Added `evaluateMarketsAtCommonHorizon(markets, timeframe, smcConfig, filters)` → `{ selection, resultsAtCommon, usable }`:
-    - Calls `selectCommonClosedHorizon` on eligible markets' candles.
-    - If `commonHorizon === null` or `selection.commonHorizon === null` → `usable=false, resultsAtCommon=[]` (cannot-evaluate, no silent fallback).
-    - Else per market: `truncated = truncateCandlesToHorizon(candles, commonHorizon)`, `evaluateSmartMoneyWithCandles(meta, truncated, smcConfig, filters)` (min history preserved, insufficient → cannot-evaluate).
-    - Returns `resultsAtCommon` all with `candleTime === commonHorizon` if evaluated (strict identical-horizon).
-  - Added `formatCommonHorizonDiagnostics(selection, timeframe)` → `string[]` (common, newest, lag, stale note).
+**Детерминированные тестовые якоря (вехи, обязательные по ревью):**
+- 1d, `now = 2026-09-11T10:00:00Z` ⇒ ожидаемый latest CLOSED `2026-09-10T00:00Z`; `H=09-10` → `ok` (лаг 0); `H=09-09` → `ok` (лаг 1 == bound); `H=09-08` → `absolute_stale` (лаг 2). Строки BINGX с границей 16:00 в этих проверках не участвуют (исключаются eligibility ДО выбора H), а контрольный прогон «без фильтра» даёт `data_unavailable`, что и доказывает необходимость порядка множеств.
+- 5m, `now = 09:55:00.000Z` ⇒ ожидаем `09:50`; `now = 09:54:59.999Z` ⇒ ожидаем `09:45` (граница отдана закрывшемуся бару). Аналогичные проверки на 15m/1h/4h.
+- Гонка: `1×09:45 + 4×09:50` ⇒ `H = 09:45`, все пять участников реально `evaluated` (fixtures проходят `evaluateSmc`, а не mock), `candleTime === H` у всех, каждый вход оценки заканчивается ровно на `H`, `checkCandleAlignment.safe = true`, агрегация разрешена через `decideAggregationAtCommonHorizon`; после догона отстающего `H` переезжает на `09:50`.
+- Пересечение, а не `min(latest)`: ряд A..D = {09:35, 09:45, 09:50}, E = {09:35, 09:40} ⇒ `H = 09:35`; мутация «H = min(latest)» этот тест ломает.
+- No-lookahead: `evaluate(trunc@H)` deep-equal `evaluate(физический префикс ≤ H)` по scores/direction/всем 9 reasons, `price === close(H)`; порча баров после H не меняет ни одну оценку и не сдвигает H.
+- Порядок: reverse/rotation дают тот же H, те же лаги и freshness-решение, идентичные нормализованные оценки и идентичный aggregate outcome.
+- Три «вредных» мутации проверялись явно и ЛОВЯТСЯ тестами: `min(latest)`; отключение absolute bound; молчаливое выбрасывание участника без данных; отключение усечения (lookahead); превращение `filtered` в участников; удаление anchor-проверки из gate.
 
-- **`scripts/smart-money-readonly.ts` (modified, loop replacement):**
-  - Added imports `selectCommonClosedHorizon`, `COMMON_HORIZON_MAX_LAG_BARS` and `evaluateMarketsAtCommonHorizon`, `formatCommonHorizonDiagnostics`.
-  - Replaced `for (m of markets) { results.push(evaluateAtLatest) }` + `eligibleResults = filter(...)` + `checkCandleAlignment(eligibleResults)` with:
-    - Collect `marketsData: { meta, candles, resultAtLatest }` (per-market latest for diagnostics, `canoncial` ASC check).
-    - `resultsAtLatestAll = marketsData.map(d => d.resultAtLatest)` for eligibility display.
-    - `eligibleMarketsData = marketsData.filter(d => isSmartMoneyExchangeEligible(d.meta.exchange, timeframe))` (BINGX 1d excluded BEFORE common).
-    - `commonEval = evaluateMarketsAtCommonHorizon(eligibleMarketsData.map(d => ({meta, candles})), timeframe as SmcTimeframe, smcConfig, filters)` (common selection + truncated evaluation).
-    - Log `formatCommonHorizonDiagnostics`, per-market `evaluated at common` or `cannot-evaluate at common`.
-    - `eligibleResults = commonEval.usable ? commonEval.resultsAtCommon : []` (if not usable, empty → alignment safe=false).
-    - `alignment = checkCandleAlignment(eligibleResults, timeframe)` at COMMON horizon (strict identical-horizon preserved).
-  - Aggregation `aggregateAssetGroup` now on `eligibleResults` (at common), not mixed horizons.
+**Verification (Arena-песочница, только чтение, worker/PM2 не запускались):**
+- `npx tsx scripts/test-common-horizon.ts` — **227/227** (переписан полностью: без mock-веток, без `ok(true, …)`, статические чтения исходников идут от корня репозитория через `import.meta.url` и ПАДАЮТ при ошибке чтения; семантических проверок больше, чем grep-проверок).
+- Существующие наборы, которые не должно было задеть: `test-smart-money 62/62`, `test-smart-money-eligibility 96/96`, `test-smart-money-diagnostic 95/95`, `test-smart-money-phase3c-fix 59/59`, `smart-money-readonly --self-test 43/43`.
+- SMC-ядро: `scoring 75`, `range 50`, `evaluate 31`, `lookahead 13`, `order-blocks 63`, `liquidity 48`, `fvg 37`, `displacement 23`, `fsm 62`, `pivots 24`, `phase3d-config 70`, `phase3d-b 55`, `phase3d-c 91`, `phase3d-d 128` — все зелёные.
+- Прочее: `admin-consistency 84`, `freshness 52`, `seed-smart-money 86`, `ohlcv-cli 105`, `ohlcv-pilot 131`, `ohlcv-lock pure 56` (integration-часть `SKIPPED: no DATABASE_URL` — честно, не имитировалась).
+- `SKIPPED/BLOCKED`: `test-strategy-runtime` требует PostgreSQL (`DATABASE_URL` в песочнице нет) — прогон нужно повторить на VPS.
+- `npx tsc --noEmit` локальным typescript из `node_modules` — 0 ошибок на всём репозитории. `npm run build` — `✓ Compiled successfully in 3.9s`, далее сборка падает на сборке page-data для `/api/register`: `@prisma/client did not initialize yet` (в песочнице нет сгенерированного клиента/БД). Тот же сбой воспроизведён КОНТРОЛЬНЫМ прогоном на чистом дереве `ec7332072` (правки были убраны через `git stash`) — значит это ограничение песочницы, а не следствие FIX'а: ни одна страница/API не менялась. `git diff --check` — чисто (обе EOF-пустые строки кандидата убраны).
+- `prisma/schema.prisma` — 0 изменений; `lib/strategies/alignment.ts` — 0 изменений; `lib/strategies/smart-money-eligibility.ts` (Option A) — 0 изменений; `lib/smc/*`, адаптеры, `lib/ohlcv/*`, worker, PM2, Admin/API — не тронуты. Signal Engine отсутствует: `lib/signals`, `signal-worker`, `test-signal-engine` в диффе нет, записей в `Signal` нет (в скриптах остались только чтения `prisma.signal.count()` как инвариант «ничего не записано»).
 
-- **`scripts/smart-money-diagnostic.ts` (modified similarly):**
-  - Added same imports and common-horizon block (collect `marketsData`, `eligibleMarketsData`, `commonEval`, `eligibleResults`, alignment at common).
-  - 1d summary now correctly uses `resultsAtLatestAll` and `eligibleResults.length / resultsAtLatestAll.length` (not stale `all 5`).
+**Факт production БД на момент FIX (данные владельца; ревьюер БД не трогал и `DATABASE_URL` в песочнице не имеет):** `Strategy id=2`, slug `smart-money-suslik`, version 1, status `PUBLISHED`, `enabled=true`, `timeframes=["5m","15m","1h","4h","1d"]`, `minExchanges=3`, `Signal` — 0 записей. §41 описывал состояние на момент своего коммита (`DRAFT enabled=false`) и остаётся корректным как исторический снимок; актуальным является абзац выше. Документация — никаких `prisma`-записей, seed/migration не выполнялись.
 
-- **`lib/strategies/alignment.ts` (unchanged, strict):**
-  - `isCanonicalAligned`, `checkCandleAlignment` (referenceCandleTime, horizonMismatch, offGrid, safe) remains strict identical-horizon, CLOSED, canonical grid, no aggregation of different horizons.
+**Операционный эффект:**
+- До: транзиентное `cannot-aggregate` ~15 s каждые 5 m во время прохода ingest.
+- После: чтение в `09:50:15` (середина прохода) берёт общий `H=09:45`, все пять участников оцениваются на `09:45` (один и тот же горизонт → `ALIGNED`), агрегат строится; относительный лаг 1 бар и абсолютный лаг 1 бар — в пределах политик. Чтение в `09:50:35` (проход закончен) → `H=09:50`, лаги 0/0.
+- Цена решения: во время прохода горизонт может быть на 1 бар старее самого свежего — это осознанный компромисс «не смешивать горизонты» вместо «агрегировать что удалось собрать». Если отставание больше policy (relative > 3 бара или абсолютное > 1 бара от ожидаемого) — явный отказ с `[STATUS]`, никакого тихого успеха на части рынков и никакого тихого успеха на древних данных.
 
-**Diagnostics (explicit, no silent fallback):**
-- `Common CLOSED horizon selection (B)` logs: `common horizon selected: <ISO> (lag X bar(s) vs newest <ISO>)` or `common horizon: none — no common / stale ...`.
-- Per-market `latest=<ISO> has-common/missing-common`, lag vs newest.
-- If `lagBars > 3` → `stale common horizon: lag 4 bars > freshness bound 3 for 5m` → `cannot-aggregate (explicit cannot-evaluate, no silent fallback)`.
-- Alignment logs at COMMON horizon (`referenceCandleTime` = common, `HORIZON_OK` if all at common, `GRID_OK`).
+**Files changed (один коммит):** `lib/strategies/common-horizon.ts` (переписан), `lib/strategies/smart-money.ts` (`evaluateMarketsAtCommonHorizon` + partition + anchor), `scripts/smart-money-readonly.ts`, `scripts/smart-money-diagnostic.ts` (единый gate + честная диагностика + возврат explainability), `scripts/test-common-horizon.ts` (переписан, 227 проверок), `PROJECT_CONTEXT.md` (этот §42).
 
-**Regression tests (9 mandatory cases, `scripts/test-common-horizon.ts` 46/46):**
-- Exact production race: 5 markets, one at T 09:45, four at T+5m 09:50 → common 09:45, newest 09:50, lag 1, no mixed horizons, all evaluated at common 09:45, mock alignment safe.
-- Safe common T available: evaluation at T for all (via common, not per-market latest).
-- After T+5m appears at last market → auto transition to T+5m (common moves to 09:50, lag 0).
-- Stale common beyond freshness bound (lag 4 > 3) → `commonHorizon=null`, `usable=false`, `cannot-evaluate`, no results.
-- No common horizon (disjoint sets) → `null`, `usable=false`.
-- 1d BINGX excluded BEFORE common selection: BINGX (16:00) not in eligible, common among 4 is 00:00 UTC, 4/4 eligible.
-- All 4 eligible 1d same UTC horizon → common 00:00, usable, mock alignment safe.
-- No-lookahead: candles after common (09:50,09:55) don't affect result; truncated length excludes future, last is common 09:45.
-- Already-aligned unchanged: all at 09:50 → common 09:50, lag 0, mock alignment safe, no behavior change.
-- Signal absent: `smart-money.ts` has no `prisma.signal` writes (grep 0).
-
-**Interaction checks:**
-- Eligibility BEFORE common: BINGX 1d excluded via `isSmartMoneyExchangeEligible` before `selectCommonClosedHorizon` (tested).
-- Alignment at common: `checkCandleAlignment` still strict, now on `resultsAtCommon` (identical horizon, so safe when all at common).
-- No DB/Strategy/PM2 touched: `Strategy id=2` remains `DRAFT enabled=false timeframes=[..."1d"]`, PM2 workers not started, no `prisma.signal` writes.
-
-**Verification (Arena, read-only, no workers):**
-- `npx tsx scripts/test-common-horizon.ts` 46/46
-- `npx tsx scripts/test-smart-money-eligibility.ts` 96/96 (existing, not broken)
-- `npx tsx scripts/test-smart-money-diagnostic.ts` 95/95
-- `npx tsx scripts/test-ohlcv-cli.ts` 105/105, `test-ohlcv-pilot.ts` 131/131, `test-ohlcv-lock.ts` pure 56/56 SKIPPED
-- `npx -p typescript tsc --noEmit --skipLibCheck` no new errors in `lib/strategies/*` / `scripts/smart-money-*` / `test-common-horizon` (remaining `node:`/`process`/`@prisma/client` are baseline stub, not new)
-- `npm run build` compiles (baseline `next build` stub, no new deps)
-- `git diff --check` clean, `grep -R "prisma.signal"` 0 in `lib/strategies/smart-money.ts` + `common-horizon.ts`, `grep -R "pg_try_advisory_lock"` unchanged, schema 0 lines.
-
-**Files changed (this FIX, one commit):**
-- `lib/strategies/common-horizon.ts` (NEW, pure, 120 lines)
-- `lib/strategies/smart-money.ts` (import + `evaluateMarketsAtCommonHorizon` + `formatCommonHorizonDiagnostics`, ~80 lines added, no scoring/alignment change)
-- `scripts/smart-money-readonly.ts` (loop replacement to common horizon, eligibility before selection, diagnostics, ~70 lines changed)
-- `scripts/smart-money-diagnostic.ts` (same, ~70 lines changed, 1d summary fixed)
-- `scripts/test-common-horizon.ts` (NEW, 46/46 regression, ~380 lines)
-- `PROJECT_CONTEXT.md` (this §42)
-
-**Safety preserved:**
-- `lib/strategies/alignment.ts` unchanged (strict).
-- `lib/strategies/smart-money-eligibility.ts` unchanged (BINGX 1d Option A).
-- `lib/smc/*` / `scoring` unchanged.
-- No Prisma schema change (`git diff prisma/schema.prisma` 0).
-- No `Signal` writes (`grep -R prisma.signal` 0 in new files).
-- No `Strategy id=2` mutation, no PM2 auto-start, no DB mutation, no exchange API in tests.
-
-**Operational effect:**
-- Before: transient 5m cannot-aggregate ~15s every 5m during ingestion pass (BINANCE 09:45 vs 09:50).
-- After: read at 09:50:15 (mid-pass) selects common 09:45, all 5 evaluated at 09:45 (identical horizon) → SAFE, can-aggregate at common (slightly stale by 1 bar, lag 1 ≤3). At 09:50:35 (pass completed) common moves to 09:50 → SAFE at newest. Stale >3 bars → explicit cannot-aggregate (no silent fallback).
-- `freshness bound 3 bars` balanced: 5m allows 15m lag, 1h allows 3h, 1d allows 3d — prevents too-old fallback while minimizing transient windows.
-
-**Deliverable:** ONE additional commit atop `83613d0d7393fc3e0934113e77a79c73c4424463` (not amend), push only `arena/01a08b68-svechnoy-suslik`, STOP after FIX (no DB/Strategy/PM2 mutation).
-
+**Deliverable:** ОДИН reviewable FIX-коммит ровно поверх `ec73320723327f68a64be435b87aff0e5701f110` (не amend), push только в `arena/01a09002-svechnoy-suslik`. DB/Strategy/PM2/worker/Signal Engine — не тронуты. После коммита и отчёта — STOP.

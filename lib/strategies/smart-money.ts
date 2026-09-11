@@ -45,7 +45,8 @@ import type { Direction, StrategyReason } from "./trend-suslik";
 import {
   selectCommonClosedHorizon,
   truncateCandlesToHorizon,
-  COMMON_HORIZON_MAX_LAG_BARS,
+  type CommonHorizonSelection,
+  type CommonHorizonStatus,
 } from "./common-horizon";
 
 // Re-export aggregation for convenience
@@ -903,70 +904,131 @@ export async function evaluateSmartMoneyMarketFromDb(
 }
 
 /**
- * Evaluate markets at COMMON CLOSED horizon (B).
- * Selects latest common horizon present at ALL eligible markets, truncates candles to it,
- * then evaluates each market at that exact horizon (no-lookahead).
- * If no common or stale beyond bound → usable=false, resultsAtCommon=[] (cannot-evaluate).
+ * Evaluate markets at the COMMON CLOSED horizon.
+ *
+ * Set semantics (contract — см. заголовок lib/strategies/common-horizon.ts):
+ *  - exchange eligibility (Option A) применяется ВЫЗЫВАЮЩИМ до этого function:
+ *    BINGX для 1d сюда не попадает и не может влиять на H / freshness / denominator;
+ *  - рынки, которые сама Strategy помечает `filtered` (top500Only /
+ *    minimumQuoteVolume24h), НЕ являются участниками common horizon и не могут
+ *    наложить вето на горизонт всего актива — при этом они возвращаются в
+ *    `results` со статусом `filtered`, ровно как в pre-common-horizon runtime;
+ *  - всё остальное — участники. У участника нет CLOSED данных / нет общего
+ *    барa / горизонт вне freshness bound → явный unusable статус, а НЕ тихий
+ *    успех на выживших. Недостаточная история после усечения сохраняет
+ *    существующую per-market cannot-evaluate семантику (видно как skipped).
+ *
+ * `now` передаётся вызывающим кодом: pure-слой не читает wall clock сам.
+ * Логика фильтров НЕ дублируется — переиспользуется applySmartMoneyFilters.
  */
+export type CommonHorizonOutcome = {
+  selection: CommonHorizonSelection;
+  /** Результаты в ПОРЯДКЕ входа: evaluated | cannot-evaluate | filtered. */
+  results: MarketStrategyResult[];
+  usable: boolean;
+  status: CommonHorizonStatus;
+  participantCount: number;
+  filteredCount: number;
+};
+
 export function evaluateMarketsAtCommonHorizon(
   markets: Array<{ meta: SmartMoneyMarketMeta; candles: SmcRawCandle[] }>,
   timeframe: SmcTimeframe,
   smcConfig: SmcScoringConfig,
-  filters: SmartMoneyFilters
-): {
-  selection: import("./common-horizon").CommonHorizonSelection;
-  resultsAtCommon: MarketStrategyResult[];
-  usable: boolean;
-} {
-  const selection = selectCommonClosedHorizon(
-    markets.map((m) => ({ exchange: m.meta.exchange, marketId: m.meta.marketId, candles: m.candles })),
-    timeframe
-  );
-  if (!selection.commonHorizon) {
-    return { selection, resultsAtCommon: [], usable: false };
+  filters: SmartMoneyFilters,
+  now: Date
+): CommonHorizonOutcome {
+  const slot: Array<MarketStrategyResult | undefined> = new Array(markets.length);
+  const participants: number[] = [];
+  let filteredCount = 0;
+
+  for (let i = 0; i < markets.length; i++) {
+    const m = markets[i];
+    const filterReason = applySmartMoneyFilters(
+      {
+        assetRank: m.meta.assetRank,
+        quoteVolume24h: m.meta.quoteVolume24h,
+      },
+      filters
+    );
+    if (filterReason !== null) {
+      slot[i] = filtered(m.meta, filterReason);
+      filteredCount++;
+    } else {
+      participants.push(i);
+    }
   }
-  const commonHorizon = selection.commonHorizon;
-  const resultsAtCommon: MarketStrategyResult[] = [];
-  for (const m of markets) {
-    const truncated = truncateCandlesToHorizon(m.candles, commonHorizon);
+
+  const selection = selectCommonClosedHorizon(
+    participants.map((i) => ({
+      exchange: markets[i].meta.exchange,
+      marketId: markets[i].meta.marketId,
+      candles: markets[i].candles,
+    })),
+    timeframe,
+    { now }
+  );
+
+  if (selection.status !== "ok" || selection.commonHorizon === null) {
+    return {
+      selection,
+      results: [],
+      usable: false,
+      status: selection.status,
+      participantCount: selection.participantCount,
+      filteredCount,
+    };
+  }
+
+  const horizon = selection.commonHorizon;
+
+  for (const i of participants) {
+    const m = markets[i];
+    const truncated = truncateCandlesToHorizon(m.candles, horizon);
+
     if (truncated.length === 0) {
-      resultsAtCommon.push({
-        exchange: m.meta.exchange,
-        market: m.meta.market,
-        marketId: m.meta.marketId,
-        timeframe: m.meta.timeframe,
-        status: "cannot-evaluate",
-        reason: `no candles up to common horizon ${commonHorizon.toISOString()}`,
-      } as MarketStrategyResult);
+      // Defensive: H взят из множества этого же рынка, так что недостижимо при
+      // честном входе. Ни в коем случае не откатываемся на более свежую свечу.
+      slot[i] = cannotEvaluate(
+        m.meta,
+        `нет CLOSED свечей не позже общего горизонта ${horizon.toISOString()}`
+      );
       continue;
     }
-    const result = evaluateSmartMoneyWithCandles(m.meta, truncated, smcConfig, filters);
-    resultsAtCommon.push(result);
-  }
-  return { selection, resultsAtCommon, usable: true };
-}
 
-export function formatCommonHorizonDiagnostics(
-  selection: import("./common-horizon").CommonHorizonSelection,
-  timeframe: SmcTimeframe
-): string[] {
-  const lines: string[] = [];
-  if (selection.commonHorizon) {
-    lines.push(
-      `common horizon selected: ${selection.commonHorizon.toISOString()} (lag ${selection.lagBars ?? 0} bar(s) vs newest ${selection.newestHorizon?.toISOString() ?? "—"})`
+    const result = evaluateSmartMoneyWithCandles(
+      m.meta,
+      truncated,
+      smcConfig,
+      filters
     );
-    if (selection.lagBars !== null && selection.lagBars > 0) {
-      lines.push(`  lag vs newest: ${selection.lagMs}ms = ${selection.lagBars} bar(s)`);
-    }
-    if (selection.lagBars !== null && selection.lagBars > COMMON_HORIZON_MAX_LAG_BARS) {
-      lines.push(`  stale common horizon beyond freshness bound → cannot-aggregate (explicit cannot-evaluate, no silent fallback)`);
-    }
-  } else {
-    lines.push(`common horizon: none — ${selection.reason ?? "unknown"} (newest ${selection.newestHorizon?.toISOString() ?? "—"})`);
-  }
-  for (const p of selection.perMarketLatest) {
-    lines.push(`  ${p.exchange} marketId=${p.marketId} latest=${p.latest?.toISOString() ?? "none"}`);
-  }
-  return lines;
-}
 
+    if (
+      result.status === "evaluated" &&
+      result.candleTime.getTime() !== horizon.getTime()
+    ) {
+      // Anchor-invariant guard (страховка от будущего рефакторинга усечения):
+      // чужой горизонт не должен попасть в группу.
+      slot[i] = cannotEvaluate(
+        m.meta,
+        `invariant: candleTime ${result.candleTime.toISOString()} ≠ общий горизонт ${horizon.toISOString()}`
+      );
+      continue;
+    }
+
+    slot[i] = result;
+  }
+
+  const results = slot.filter(
+    (r): r is MarketStrategyResult => r !== undefined
+  );
+
+  return {
+    selection,
+    results,
+    usable: true,
+    status: selection.status,
+    participantCount: selection.participantCount,
+    filteredCount,
+  };
+}

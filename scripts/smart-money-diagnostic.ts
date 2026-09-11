@@ -48,14 +48,14 @@ import {
   evaluateSmartMoneyWithCandles,
   loadSmartMoneyCandles,
   evaluateMarketsAtCommonHorizon,
-  formatCommonHorizonDiagnostics,
   DEFAULT_SMART_MONEY_FILTERS,
   type SmartMoneyFilters,
 } from "../lib/strategies/smart-money";
 import { aggregateAssetGroup } from "../lib/strategies/runtime";
 import { checkCandleAlignment, canAggregateSafely } from "../lib/strategies/alignment";
 import {
-  selectCommonClosedHorizon,
+  decideAggregationAtCommonHorizon,
+  formatCommonHorizonReport,
 } from "../lib/strategies/common-horizon";
 import {
   isSmartMoneyExchangeEligible,
@@ -384,32 +384,66 @@ async function runSymbolDiagnostic(symbol: string, timeframe: SmcTimeframe): Pro
     console.log(`\n  eligibility: all ${resultsAtLatestAll.length} markets eligible for ${timeframe} (BINGX eligible on 5m/15m/1h/4h)`);
   }
 
-  console.log(`\n=== Common CLOSED horizon selection (B) ${timeframe} ===`);
+  // ---------------------------------------------------------------
+  // (A) exchange eligibility → (B) Strategy filters → (C) participants.
+  // Common CLOSED horizon считается только по участникам C.
+  // Wall clock — ОДИН read на прогон, передаётся в pure-слой (детерминизм).
+  // ---------------------------------------------------------------
+  const runNow = new Date();
+  const exchangeExcluded = marketsData
+    .filter((d) => !isSmartMoneyExchangeEligible(d.meta.exchange, timeframe))
+    .map((d) => d.meta.exchange as string);
+
+  console.log(`\n=== Common CLOSED horizon ${timeframe} ===`);
   const commonEval = evaluateMarketsAtCommonHorizon(
     eligibleMarketsData.map((d) => ({ meta: d.meta, candles: d.candles })),
     timeframe as SmcTimeframe,
     smcConfig,
-    filters
+    filters,
+    runNow
   );
-  for (const line of formatCommonHorizonDiagnostics(commonEval.selection, timeframe as SmcTimeframe)) {
+
+  for (const line of formatCommonHorizonReport({
+    selection: commonEval.selection,
+    timeframe: timeframe as SmcTimeframe,
+    marketCount: marketsData.length,
+    exchangeEligibleCount: eligibleMarketsData.length,
+    exchangeExcluded,
+    filteredCount: commonEval.filteredCount,
+  })) {
     console.log(`  ${line}`);
   }
-  if (!commonEval.usable || !commonEval.selection.commonHorizon) {
-    console.log(`  → common horizon not usable: ${commonEval.selection.reason ?? "no common"} → cannot-aggregate`);
-  } else {
-    console.log(`  eligible evaluated at common horizon ${commonEval.selection.commonHorizon.toISOString()}:`);
-    for (const r of commonEval.resultsAtCommon) {
+
+  if (commonEval.usable) {
+    console.log(
+      `  участники, оценённые на общем горизонте ${commonEval.selection.commonHorizon?.toISOString()}:`
+    );
+    for (const r of commonEval.results) {
       if (r.status === "evaluated") {
         console.log(`    ${r.exchange} candleTime=${r.candleTime.toISOString()} direction=${r.direction} long=${r.longScore} short=${r.shortScore}`);
+        console.log(`      причины (${r.reasons.length}):`);
+        for (const reason of r.reasons) {
+          const mark = reason.long ? "LONG" : reason.short ? "SHORT" : "—";
+          console.log(`      [${mark.padEnd(5)} w=${String(reason.weight).padStart(2)}] ${reason.label} ${reason.value ?? ""}`);
+        }
       } else {
-        console.log(`    ${r.exchange} cannot-evaluate at common: ${r.reason}`);
+        console.log(`    ${r.exchange} ${r.status}: ${r.reason}`);
       }
     }
+  } else {
+    console.log(
+      `  → общий горизонт недоступен [${commonEval.status.toUpperCase()}] — cannot-aggregate (явный отказ, без тихого успеха на части рынков)`
+    );
   }
-  const eligibleResults = commonEval.usable ? commonEval.resultsAtCommon : [];
+
+  const eligibleResults = commonEval.usable ? commonEval.results : [];
+  const gate = decideAggregationAtCommonHorizon({
+    selection: commonEval.selection,
+    results: eligibleResults,
+    timeframe: timeframe as SmcTimeframe,
+  });
   // Alignment at COMMON horizon (strict identical-horizon preserved)
-  // candleTime is common horizon; same interval [candleTime, candleTime+tf)
-  const alignment = checkCandleAlignment(eligibleResults, timeframe);
+  const alignment = gate.alignment;
   console.log(`\n=== Выравнивание окон (alignment) ${timeframe} ===`);
   if (alignment.referenceCandleTime) {
     console.log(`  referenceCandleTime: ${alignment.referenceCandleTime.toISOString()} (all evaluated must equal this)`);
@@ -434,9 +468,17 @@ async function runSymbolDiagnostic(symbol: string, timeframe: SmcTimeframe): Pro
     console.log(`  ✓ ALIGNED ${alignment.alignedCount}/${alignment.totalEvaluated} safe — можно агрегировать (grid OK + same horizon)`);
   }
 
-  if (!canAggregateSafely(alignment)) {
+  if (!alignment.safe) {
+    console.log(`  ⚠ MISALIGNED — cannot-aggregate for multi-exchange ${timeframe}: ${alignment.reason ?? "unsafe"}`);
+  } else if (!gate.anchor.ok) {
+    console.log(`  ⚠ ANCHOR: результаты не заякорены на общем горизонте: ${gate.anchor.anomalies.join("; ")}`);
+  }
+
+  if (!gate.allowed) {
     console.log(`\n=== MULTI-EXCHANGE AGGREGATION REFUSED ${asset.symbol} ${timeframe} ${SMART_MONEY_SLUG} v${strategyVersion} ===`);
-    console.log(`  reason: ${alignment.reason ?? "unsafe alignment"}`);
+    for (const reason of gate.refusalReasons) {
+      console.log(`  reason: ${reason}`);
+    }
     if (alignment.referenceCandleTime) console.log(`  referenceCandleTime: ${alignment.referenceCandleTime.toISOString()}`);
     if (alignment.offGrid.length > 0) console.log(`  offGrid: ${alignment.offGrid.map((o) => `${o.exchange} ${o.candleTime.toISOString()}`).join(", ")}`);
     if (alignment.horizonMismatch.length > 0) console.log(`  horizonMismatch: ${alignment.horizonMismatch.map((h) => `${h.exchange} ${h.candleTime.toISOString()}`).join(", ")}`);
@@ -469,11 +511,11 @@ async function runSymbolDiagnostic(symbol: string, timeframe: SmcTimeframe): Pro
       const excluded = resultsAtLatestAll.filter((r) => !isSmartMoneyExchangeEligible(r.exchange, timeframe));
       const excludedList = excluded.map((e) => e.exchange).join(", ") || "—";
       console.log(
-        `\nВывод Phase3E 1d: safe после eligibility-фильтра/COMMON horizon — ${alignment.alignedCount}/${alignment.totalEvaluated} eligible рынков aligned на COMMON horizon${alignment.referenceCandleTime ? ` ${alignment.referenceCandleTime.toISOString()}` : ""}; BINGX исключён из Smart Money 1d aggregation policy (${eligibleResults.length}/${resultsAtLatestAll.length} eligible, excluded: ${excludedList}).`
+        `\nВывод Phase3E 1d: safe после eligibility-фильтра/COMMON horizon — ${alignment.alignedCount}/${alignment.totalEvaluated} eligible рынков aligned на COMMON horizon${alignment.referenceCandleTime ? ` ${alignment.referenceCandleTime.toISOString()}` : ""}; BINGX исключён из Smart Money 1d aggregation policy (${eligibleResults.length}/${resultsAtLatestAll.length} eligible, excluded: ${excludedList}; участников common horizon: ${commonEval.participantCount}, filtered: ${commonEval.filteredCount}).`
       );
     } else {
       console.log(
-        `\nВывод Phase3E 1d: misaligned после eligibility-фильтра — ${alignment.alignedCount}/${alignment.totalEvaluated} eligible aligned (offGrid ${alignment.offGrid.length}, horizonMismatch ${alignment.horizonMismatch.length}); BINGX исключён из Smart Money 1d aggregation policy (${eligibleResults.length}/${resultsAtLatestAll.length} eligible). 1d пока НЕЛЬЗЯ разблокировать без доп. нормализации, без фабрикации OHLC.`
+        `\nВывод Phase3E 1d: misaligned после eligibility-фильтра — ${alignment.alignedCount}/${alignment.totalEvaluated} eligible aligned (offGrid ${alignment.offGrid.length}, horizonMismatch ${alignment.horizonMismatch.length}); BINGX исключён из Smart Money 1d aggregation policy как eligibility-исключение (не stale и не «нет общего бара»); eligible рынков: ${eligibleMarketsData.length}/${resultsAtLatestAll.length}, участников common horizon: ${commonEval.participantCount}, filtered: ${commonEval.filteredCount}, причина отказа: ${commonEval.selection.status.toUpperCase()}. 1d пока НЕЛЬЗЯ разблокировать без доп. нормализации, без фабрикации OHLC.`
       );
     }
   }

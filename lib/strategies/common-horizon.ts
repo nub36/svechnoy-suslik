@@ -1,130 +1,331 @@
 /**
- * Common CLOSED horizon selection for Smart Money read runtime (FIX for transient ingestion race).
+ * Common CLOSED horizon selection for the Smart Money read runtime.
  *
- * Problem: sequential ingestion (25 tasks, ~15 sec) + concurrent SMC read causes transient
- * horizonMismatch: during a pass, one market's latest CLOSED is T while others are T+5m,
- * leading to strict alignment fail (cannot-aggregate) for ~15 sec, then ALIGNED after pass.
- * This is visibility race, not exchange boundary bug. We must minimize transient
- * cannot-evaluate windows while keeping CLOSED-only, no-lookahead, strict identical-horizon.
+ * PROBLEM (production, observed on BTC): the OHLCV worker ingests 5 exchanges
+ * sequentially (25 tasks, ~15s, cadence 120000ms) and materializes `closed=true`
+ * for a candle only when that market's own slot in the pass runs. Therefore the
+ * DB's "latest CLOSED candle" per exchange is a function of that market's slot,
+ * not of the canonical UTC grid. A concurrent Smart Money read then legitimately
+ * sees e.g. BINANCE at T while BYBIT/GATE/KUCOIN/BINGX are already at T+5m, and
+ * the strict alignment guard correctly refuses (MISALIGNED / cannot-aggregate)
+ * for ~15 seconds every 5m. Safety was right; availability was needlessly lost.
  *
- * Solution B (chosen, minimal, no schema migration): Smart Money read selects
- * latest COMMON CLOSED horizon that is present at ALL eligible markets (exact timestamp
- * intersection, CLOSED, canonical UTC grid). Per-exchange evaluation then uses
- * candles up to EXACT common horizon (truncate, no future candles), not newest per market.
- * If common horizon is stale beyond freshness bound or no common exists → cannot-evaluate.
- * For 1d, eligibility excludes BINGX BEFORE common selection (common among 4 eligible).
+ * CONTRACT (Solution B, read-side, minimal, no migration):
+ *   1. exchange eligibility            (smart-money-eligibility.ts, Option A)
+ *   2. Strategy filters                (applySmartMoneyFilters — reused, not duplicated)
+ *   3. latest COMMON CLOSED horizon H  (exact timestamp intersection over participants)
+ *   4. freshness: relative skew between participants + absolute staleness vs wall clock
+ *   5. truncate EACH participant to H  (CLOSED only, no candles after H)
+ *   6. evaluate each market exactly at H
+ *   7. strict alignment + anchor check still mandatory before aggregation
  *
- * This file is pure, no DB, no side effects, deterministic, no lookahead.
+ * PARTICIPANT SET (what may veto H):
+ *   - A market excluded by exchange eligibility (BINGX for 1d) is not a participant
+ *     and never influences H, denominator or freshness.
+ *   - A market excluded by Strategy filters (top500Only / minimumQuoteVolume24h) is
+ *     `filtered` — it is not a participant either: Strategy itself declared it
+ *     out of scope, so it must not veto the asset's horizon.
+ *   - A market that passed eligibility AND filters IS a participant. If it has no
+ *     CLOSED data, no common horizon, or is beyond a freshness bound, the answer is
+ *     an explicit unusable status (DATA_UNAVAILABLE / NO_COMMON_HORIZON / *_STALE),
+ *     NEVER a silent success on the remaining markets. Insufficient history after
+ *     truncation keeps the pre-existing per-market cannot-evaluate semantics
+ *     (visible as skipped, not dropped).
+ *
+ * INVARIANTS: CLOSED-only, no-lookahead, deterministic, canonical UTC grid, never
+ * aggregate mixed horizons, no silent stale fallback. `now` is always injected by
+ * the caller so the pure layer never reads the wall clock itself.
+ *
+ * Pure: no DB, no Prisma, no side effects, no Signal, no exchange API.
  */
 
-import { SMCTIMEFRAME_MS, type SmcTimeframe, type SmcRawCandle } from "../smc/types";
-import { isCanonicalAligned } from "./alignment";
+import {
+  SMCTIMEFRAME_MS,
+  type SmcRawCandle,
+  type SmcTimeframe,
+} from "../smc/types";
+import {
+  canAggregateSafely,
+  checkCandleAlignment,
+  isCanonicalAligned,
+  type AlignmentCheck,
+} from "./alignment";
+import type { MarketStrategyResult } from "./runtime";
+
+/** Fail-closed input contract for this layer (mirrors SmcInputError style). */
+export class CommonHorizonError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CommonHorizonError";
+  }
+}
 
 /**
- * Freshness bound: max lag (in bars) between newest available horizon (max latest per market)
- * and selected common horizon before we consider common stale and fail to cannot-evaluate.
- * Prevents silent fallback too far back (e.g., common 1h behind newest due to missing data).
- *
- * For 5m: 3 bars = 15m, for 1h: 3h, for 1d: 3d. Chosen conservatively; matches typical
- * SMC needs (needs history, but not too stale). If common lag > 3 bars, we treat as stale.
+ * RELATIVE skew bound. Max lag (in bars) between the newest participant horizon and
+ * the selected common horizon. Preserved from the original fix (not weakened):
+ * beyond it we refuse instead of aggregating on a horizon one market is far behind.
  */
-export const COMMON_HORIZON_MAX_LAG_BARS = 3;
+export const COMMON_HORIZON_RELATIVE_MAX_LAG_BARS = 3;
 
-export type CommonHorizonSelection = {
-  /** Latest timestamp present as CLOSED at ALL eligible markets (or null if none) */
-  commonHorizon: Date | null;
-  /** Newest horizon among eligible markets (max latest per market) */
-  newestHorizon: Date | null;
-  /** Lag in ms between newest and common (null if no common) */
-  lagMs: number | null;
-  /** Lag in bars (lagMs / tfMs) */
-  lagBars: number | null;
-  /** Reason when common is null or stale */
-  reason?: string;
-  /** All eligible markets' latest times for diagnostics */
-  perMarketLatest: Array<{ exchange: string; marketId: number; latest: Date | null }>;
-  /** Common horizon diagnostics: count of markets that have it */
-  eligibleCount: number;
-};
+/**
+ * ABSOLUTE staleness bound vs the expected latest CLOSED bar on the current wall
+ * clock. A relative bound alone is blind to UNIFORM staleness: if ingestion stalls,
+ * all markets agree, lag is 0, and a naive reader would happily "aggregate" data
+ * that is days old. One extra closed bar of tolerance covers exactly the pass
+ * skew this fix exists for (a slow/late market), and nothing more.
+ *
+ * OPERATIONAL SAFETY POLICY — deliberately NOT a Strategy/Admin trading
+ * parameter: it must not be tradeable away by editing Strategy JSON.
+ */
+export const COMMON_HORIZON_ABSOLUTE_MAX_LAG_BARS: Record<SmcTimeframe, number> =
+  {
+    "5m": 1,
+    "15m": 1,
+    "1h": 1,
+    "4h": 1,
+    "1d": 1,
+  };
 
-export type MarketCandles = {
+/**
+ * Why a common horizon is usable or not. Operators must be able to tell
+ * "no shared bar" apart from "shared bar is too old" and "a participant has no
+ * data at all" — they need different remediation.
+ */
+export type CommonHorizonStatus =
+  /** usable common horizon */
+  | "ok"
+  /** nothing left after eligibility + Strategy filters */
+  | "no_participants"
+  /** a participant passed eligibility+filters but has no canonical CLOSED candle */
+  | "data_unavailable"
+  /** every participant has CLOSED data, yet no timestamp exists in all of them */
+  | "no_common_horizon"
+  /** participants disagree more than the relative bound */
+  | "relative_lag_stale"
+  /** common horizon older than expected latest CLOSED + absolute bound */
+  | "absolute_stale"
+  /** common horizon newer than the expected latest CLOSED bar (impossible under honest CLOSED flags) */
+  | "future_horizon";
+
+/** Statuses that must prevent multi-exchange aggregation. */
+export const COMMON_HORIZON_UNUSABLE_STATUSES: readonly CommonHorizonStatus[] = [
+  "no_participants",
+  "data_unavailable",
+  "no_common_horizon",
+  "relative_lag_stale",
+  "absolute_stale",
+  "future_horizon",
+];
+
+export type CommonHorizonMarket = {
   exchange: string;
   marketId: number;
-  candles: SmcRawCandle[]; // ASC, closed=true only, already filtered
+  /** ASC, closed=true only (loader contract) */
+  candles: SmcRawCandle[];
+};
+
+export type CommonHorizonSelection = {
+  status: CommonHorizonStatus;
+  /**
+   * Latest timestamp present as canonical CLOSED at ALL participants, else null.
+   * NOTE: also present on the *rejected* statuses (relative_lag_stale /
+   * future_horizon / absolute_stale) — a horizon can be computed and still be
+   * unusable; `status`/`usable` decide, this field is for diagnostics.
+   */
+  commonHorizon: Date | null;
+  /** Newest canonical CLOSED horizon among participants. */
+  newestHorizon: Date | null;
+  /** Expected latest CLOSED openTime for `now` on the canonical UTC grid. */
+  expectedLatestClosed: Date;
+  /** Injected wall clock (echoed for deterministic diagnostics). */
+  now: Date;
+  /** relative: newestHorizon - commonHorizon (null when no common) */
+  lagMs: number | null;
+  lagBars: number | null;
+  /** absolute: expectedLatestClosed - commonHorizon (may be negative → future_horizon) */
+  absoluteLagMs: number | null;
+  absoluteLagBars: number | null;
+  relativeMaxLagBars: number;
+  absoluteMaxLagBars: number;
+  /** participants = eligibility-passing markets that are not Strategy-`filtered` */
+  participantCount: number;
+  /** participants vetoing the horizon because they have no usable CLOSED data */
+  marketsWithoutData: Array<{ exchange: string; marketId: number }>;
+  perMarketLatest: Array<{
+    exchange: string;
+    marketId: number;
+    latest: Date | null;
+    hasCommon: boolean;
+  }>;
+  /** Always non-empty: human-readable verdict for operator output/logs. */
+  reason: string;
 };
 
 /**
- * Select latest common CLOSED horizon.
+ * Expected latest CLOSED candle openTime for a canonical UTC grid timeframe.
  *
- * @param markets - eligible markets with their CLOSED candles (ASC). Each candles array
- *   should already be filtered to closed=true and sorted ASC. We consider only
- *   openTime where closed=true and isCanonicalAligned (grid). For 1d, caller must have
- *   already filtered eligible markets (BINGX excluded).
- * @param timeframe - SMC timeframe
- * @param options.freshnessBars - max allowed lag bars before stale (default 3)
+ * A candle opening at k*D closes at (k+1)*D. Ingestion marks it
+ * `closed = closeTime < now` with `closeTime = openTime + D - 1`, i.e. exactly
+ * `openTime + D <= now`. So at `now === k*D` the candle opened at (k-1)*D is
+ * ALREADY closed (boundary belongs to the just-closed bar), while the candle
+ * opened at k*D is still open. Hence: floor(now / D) * D - D.
  *
- * Returns commonHorizon = max timestamp that is present in ALL markets' sets,
- * or null if no common or stale beyond bound.
+ * Deliberately NOT based on the exchange-reported nullable `closeTime`.
+ */
+export function expectedLatestClosedOpenTime(
+  now: Date,
+  timeframe: SmcTimeframe
+): Date {
+  assertValidNow(now);
+  const durationMs = SMCTIMEFRAME_MS[timeframe];
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    throw new CommonHorizonError(
+      `timeframe "${String(timeframe)}" не имеет канонической длительности`
+    );
+  }
+  const floorMs = Math.floor(now.getTime() / durationMs) * durationMs;
+  return new Date(floorMs - durationMs);
+}
+
+function assertValidNow(now: Date): void {
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+    throw new CommonHorizonError(
+      "now: ожидается валидная Date (значение передаёт вызывающий код, а не этот модуль)"
+    );
+  }
+}
+
+function toBarCount(deltaMs: number, durationMs: number): number {
+  // Оба конца лежат на canonical UTC grid ⇒ деление всегда точное;
+  // Math.round только убирает риск накопления float-шума в будущем.
+  return Math.round(deltaMs / durationMs);
+}
+
+/**
+ * Select the latest common canonical CLOSED horizon over the participant set,
+ * then validate freshness (relative skew + absolute staleness).
+ *
+ * Real intersection semantics: H is a timestamp that physically EXISTS as a
+ * CLOSED grid-aligned candle in EVERY participant. It is NOT min(latest) —
+ * min(latest) can name a bar that the other markets do not have at all when
+ * their history contains a hole.
  */
 export function selectCommonClosedHorizon(
-  markets: MarketCandles[],
+  markets: CommonHorizonMarket[],
   timeframe: SmcTimeframe,
-  options?: { freshnessBars?: number }
+  options: {
+    now: Date;
+    relativeMaxLagBars?: number;
+    absoluteMaxLagBars?: number;
+  }
 ): CommonHorizonSelection {
-  const freshnessBars = options?.freshnessBars ?? COMMON_HORIZON_MAX_LAG_BARS;
-  const tfMs = SMCTIMEFRAME_MS[timeframe];
+  assertValidNow(options.now);
+
+  const durationMs = SMCTIMEFRAME_MS[timeframe];
+  const relativeMaxLagBars =
+    options.relativeMaxLagBars ?? COMMON_HORIZON_RELATIVE_MAX_LAG_BARS;
+  const absoluteMaxLagBars =
+    options.absoluteMaxLagBars ?? COMMON_HORIZON_ABSOLUTE_MAX_LAG_BARS[timeframe];
+  const expectedLatestClosed = expectedLatestClosedOpenTime(
+    options.now,
+    timeframe
+  );
+
+  const base = {
+    now: options.now,
+    expectedLatestClosed,
+    relativeMaxLagBars,
+    absoluteMaxLagBars,
+    participantCount: markets.length,
+    marketsWithoutData: [] as Array<{ exchange: string; marketId: number }>,
+  };
+
+  const fail = (
+    status: CommonHorizonStatus,
+    reason: string,
+    extra: Partial<CommonHorizonSelection> = {}
+  ): CommonHorizonSelection => ({
+    ...base,
+    status,
+    reason,
+    commonHorizon: null,
+    newestHorizon: null,
+    lagMs: null,
+    lagBars: null,
+    absoluteLagMs: null,
+    absoluteLagBars: null,
+    perMarketLatest: [],
+    ...extra,
+  });
 
   if (markets.length === 0) {
-    return {
-      commonHorizon: null,
-      newestHorizon: null,
-      lagMs: null,
-      lagBars: null,
-      reason: "no eligible markets for common horizon",
-      perMarketLatest: [],
-      eligibleCount: 0,
-    };
+    return fail(
+      "no_participants",
+      "нет участников: все рынки отсечены exchange eligibility или Strategy filters"
+    );
   }
 
-  // Build per-market latest and sets
-  const perMarketLatest: Array<{ exchange: string; marketId: number; latest: Date | null }> = [];
+  // Per-participant canonical CLOSED timestamp sets. `closed` and the canonical
+  // grid are both required; a market whose only rows are off-grid has NO usable
+  // data rather than "different data".
   const sets: Array<Set<number>> = [];
+  const latestPerMarket: Array<{
+    exchange: string;
+    marketId: number;
+    latest: Date | null;
+  }> = [];
+  const marketsWithoutData: Array<{ exchange: string; marketId: number }> = [];
   let newestMs: number | null = null;
 
   for (const m of markets) {
-    // Filter to canonical aligned CLOSED candles only (defensive; loader already closed=true)
-    const times: number[] = [];
+    const times = new Set<number>();
     let latest: Date | null = null;
     for (const c of m.candles) {
-      if (!c.closed) continue;
-      // Only consider canonical grid times
+      if (c.closed !== true) continue;
       if (!isCanonicalAligned(c.openTime, timeframe)) continue;
       const ms = c.openTime.getTime();
-      times.push(ms);
-      if (!latest || ms > latest.getTime()) latest = c.openTime;
+      times.add(ms);
+      if (latest === null || ms > latest.getTime()) latest = c.openTime;
     }
-    perMarketLatest.push({ exchange: m.exchange, marketId: m.marketId, latest });
-    if (latest && (newestMs === null || latest.getTime() > newestMs)) {
+    if (times.size === 0) {
+      marketsWithoutData.push({ exchange: m.exchange, marketId: m.marketId });
+    }
+    sets.push(times);
+    latestPerMarket.push({
+      exchange: m.exchange,
+      marketId: m.marketId,
+      latest,
+    });
+    if (latest !== null && (newestMs === null || latest.getTime() > newestMs)) {
       newestMs = latest.getTime();
     }
-    sets.push(new Set(times));
   }
 
   const newestHorizon = newestMs !== null ? new Date(newestMs) : null;
+  const withLatest = {
+    ...base,
+    marketsWithoutData,
+    newestHorizon,
+    perMarketLatest: latestPerMarket.map((p) => ({
+      ...p,
+      hasCommon: false,
+    })),
+  };
 
-  if (sets.length === 0) {
-    return {
-      commonHorizon: null,
-      newestHorizon,
-      lagMs: null,
-      lagBars: null,
-      reason: "no candle sets",
-      perMarketLatest,
-      eligibleCount: markets.length,
-    };
+  // A participant without usable data must NOT be silently dropped so that the
+  // rest can reach minExchanges: that is a data-quality condition.
+  if (marketsWithoutData.length > 0) {
+    return fail(
+      "data_unavailable",
+      `DATA_UNAVAILABLE: у ${marketsWithoutData
+        .map((m) => `${m.exchange}(id ${m.marketId})`)
+        .join(", ")} нет ни одной canonical CLOSED свечи для ${timeframe} — ` +
+        "участник отсечён не был (eligibility+filters пройдены), поэтому общий горизонт не выбирается молча",
+      { ...withLatest, marketsWithoutData }
+    );
   }
 
-  // Intersection: start with first set, intersect with others
+  // Exact intersection over ALL participants (order-independent by construction).
   let intersection = new Set<number>(sets[0]);
   for (let i = 1; i < sets.length; i++) {
     const next = new Set<number>();
@@ -136,102 +337,280 @@ export function selectCommonClosedHorizon(
   }
 
   if (intersection.size === 0) {
-    return {
-      commonHorizon: null,
-      newestHorizon,
-      lagMs: null,
-      lagBars: null,
-      reason: "no common CLOSED horizon across all eligible markets",
-      perMarketLatest,
-      eligibleCount: markets.length,
-    };
+    return fail(
+      "no_common_horizon",
+      `NO_COMMON_HORIZON: ни один canonical CLOSED timestamp не присутствует у всех ${markets.length} участников ${timeframe} ` +
+        `(latest: ${latestPerMarket
+          .map((p) => `${p.exchange}=${p.latest?.toISOString() ?? "—"}`)
+          .join(", ")})`,
+      withLatest
+    );
   }
 
-  // Latest common = max in intersection
   let commonMs = -Infinity;
   for (const t of intersection) {
     if (t > commonMs) commonMs = t;
   }
   const commonHorizon = new Date(commonMs);
+  const perMarketLatest = latestPerMarket.map((p) => ({
+    ...p,
+    hasCommon: sets[latestPerMarket.indexOf(p)].has(commonMs),
+  }));
 
-  // Freshness check: lag between newest and common must be within bound
-  if (newestMs !== null) {
-    const lagMs = newestMs - commonMs;
-    const lagBars = Math.round(lagMs / tfMs); // exact multiple because canonical grid
-    if (lagBars > freshnessBars) {
-      return {
-        commonHorizon: null,
-        newestHorizon,
-        lagMs,
-        lagBars,
-        reason: `stale common horizon: lag ${lagBars} bars (${lagMs}ms) > freshness bound ${freshnessBars} bars for ${timeframe} (common ${commonHorizon.toISOString()}, newest ${newestHorizon?.toISOString()})`,
-        perMarketLatest,
-        eligibleCount: markets.length,
-      };
-    }
+  const decorate = (
+    status: CommonHorizonStatus,
+    reason: string,
+    horizon: Date | null
+  ): CommonHorizonSelection => {
+    const lagMs = newestMs === null ? null : newestMs - commonMs;
+    const absoluteLagMs = expectedLatestClosed.getTime() - commonMs;
     return {
-      commonHorizon,
+      ...base,
+      marketsWithoutData,
+      status,
+      reason,
+      commonHorizon: horizon,
       newestHorizon,
-      lagMs,
-      lagBars,
-      reason: lagBars > 0 ? `common lag ${lagBars} bar(s) behind newest` : undefined,
       perMarketLatest,
-      eligibleCount: markets.length,
+      lagMs,
+      lagBars: lagMs === null ? null : toBarCount(lagMs, durationMs),
+      absoluteLagMs,
+      absoluteLagBars: toBarCount(absoluteLagMs, durationMs),
     };
+  };
+
+  // Relative skew first: it names the inter-market disagreement, which is the
+  // actionable diagnosis when some markets are fresh and one is behind.
+  const lagBars = toBarCount(newestMs! - commonMs, durationMs);
+  if (lagBars > relativeMaxLagBars) {
+    return decorate(
+      "relative_lag_stale",
+      `RELATIVE_LAG_STALE: участники расходятся на ${lagBars} бар(ов) ` +
+        `(newest ${newestHorizon?.toISOString()} vs common ${commonHorizon.toISOString()}) ` +
+        `> bound ${relativeMaxLagBars} для ${timeframe} — агрегация запрещена`,
+      commonHorizon
+    );
   }
 
-  return {
-    commonHorizon,
-    newestHorizon,
-    lagMs: 0,
-    lagBars: 0,
-    perMarketLatest,
-    eligibleCount: markets.length,
-  };
+  const absoluteLagBars = toBarCount(
+    expectedLatestClosed.getTime() - commonMs,
+    durationMs
+  );
+  if (absoluteLagBars < 0) {
+    return decorate(
+      "future_horizon",
+      `FUTURE_HORIZON: общий CLOSED горизонт ${commonHorizon.toISOString()} новее ожидаемого ` +
+        `latest CLOSED ${expectedLatestClosed.toISOString()} для ${timeframe} — несогласованные CLOSED-данные, агрегация запрещена`,
+      commonHorizon
+    );
+  }
+  if (absoluteLagBars > absoluteMaxLagBars) {
+    return decorate(
+      "absolute_stale",
+      `ABSOLUTE_STALE: общий горизонт ${commonHorizon.toISOString()} отстаёт на ${absoluteLagBars} ` +
+        `бар(ов) от ожидаемого latest CLOSED ${expectedLatestClosed.toISOString()} ` +
+        `> bound ${absoluteMaxLagBars} для ${timeframe} (now=${options.now.toISOString()}) — ` +
+        "равномерно устаревшие данные, тихий успех на них недопустим",
+      commonHorizon
+    );
+  }
+
+  return decorate(
+    "ok",
+    `OK: общий CLOSED горизонт ${commonHorizon.toISOString()} у всех ${markets.length} участников ${timeframe} ` +
+      `(relative lag ${lagBars}/${relativeMaxLagBars}, absolute lag ${absoluteLagBars}/${absoluteMaxLagBars} ` +
+      `от ожидаемого ${expectedLatestClosed.toISOString()})`
+    ,
+    commonHorizon
+  );
 }
 
 /**
- * Truncate candles to horizon (inclusive).
- * Returns new array with only candles where openTime <= commonHorizon.
- * Preserves ASC order, deterministic, no-lookahead (excludes future candles after horizon).
+ * Truncate a market's candles to the common horizon (inclusive), CLOSED only.
+ * The CLOSED re-filter keeps this helper safe for any caller, not only the
+ * `where { closed: true }` loader.
  */
 export function truncateCandlesToHorizon(
   candles: SmcRawCandle[],
   commonHorizon: Date
 ): SmcRawCandle[] {
+  if (!(commonHorizon instanceof Date) || !Number.isFinite(commonHorizon.getTime())) {
+    throw new CommonHorizonError("commonHorizon: ожидается валидная Date");
+  }
   const ms = commonHorizon.getTime();
-  // Since ASC, we can find last index where openTime <= ms
-  // Simple filter is deterministic and pure
-  return candles.filter((c) => c.openTime.getTime() <= ms);
+  return candles.filter(
+    (c) => c.closed === true && c.openTime.getTime() <= ms
+  );
 }
 
 /**
- * Helper for diagnostics: returns per-market latest before truncation and whether it has common.
+ * Anchor check: after truncation, EVERY evaluated market must report exactly H.
+ *
+ * This is not redundant with checkCandleAlignment: with a single evaluated
+ * market the alignment guard is trivially safe (one horizon cannot disagree
+ * with itself), yet its result may still be anchored elsewhere. It also keeps
+ * protecting the invariant if truncation/anchoring is ever refactored.
  */
-export function commonHorizonDiagnostics(
-  markets: MarketCandles[],
-  timeframe: SmcTimeframe,
-  selection: CommonHorizonSelection
-): string[] {
+export function assertEvaluatedAtHorizon(
+  results: MarketStrategyResult[],
+  horizon: Date | null
+): { ok: boolean; anomalies: string[] } {
+  if (horizon === null) {
+    const nonEmpty = results.filter((r) => r.status === "evaluated");
+    return {
+      ok: nonEmpty.length === 0,
+      anomalies:
+        nonEmpty.length === 0
+          ? []
+          : nonEmpty.map(
+              (r) =>
+                `${r.exchange}: evaluated при отсутствии общего горизонта`
+            ),
+    };
+  }
+  const ms = horizon.getTime();
+  const anomalies: string[] = [];
+  for (const r of results) {
+    if (r.status !== "evaluated") continue;
+    if (r.candleTime.getTime() !== ms) {
+      anomalies.push(
+        `${r.exchange} (market ${r.marketId}): candleTime=${r.candleTime.toISOString()} ≠ общий горизонт ${horizon.toISOString()}`
+      );
+    }
+  }
+  return { ok: anomalies.length === 0, anomalies };
+}
+
+export type AggregationGateDecision = {
+  allowed: boolean;
+  refusalReasons: string[];
+  /** Strict cross-exchange alignment check that gated this decision. */
+  alignment: AlignmentCheck;
+  /** Anchor check result (every evaluated market at H). */
+  anchor: { ok: boolean; anomalies: string[] };
+};
+
+/**
+ * SINGLE mandatory gate for multi-exchange aggregation. Aggregation is allowed
+ * only when ALL of these hold:
+ *   - a common horizon was selected (status ok), and
+ *   - every evaluated result is anchored at that horizon, and
+ *   - the existing strict alignment guard passes.
+ *
+ * `checkCandleAlignment` / `canAggregateSafely` are NOT weakened and NOT
+ * optional here — they stay in the path by construction.
+ */
+export function decideAggregationAtCommonHorizon(input: {
+  selection: CommonHorizonSelection;
+  results: MarketStrategyResult[];
+  timeframe: SmcTimeframe;
+}): AggregationGateDecision {
+  const { selection, results, timeframe } = input;
+  const refusalReasons: string[] = [];
+
+  if (selection.status !== "ok" || selection.commonHorizon === null) {
+    refusalReasons.push(`common horizon: ${selection.reason}`);
+  }
+
+  const anchor = assertEvaluatedAtHorizon(results, selection.commonHorizon);
+  if (!anchor.ok) {
+    refusalReasons.push(
+      `anchor: ${anchor.anomalies.join("; ")} — рыночный результат заякорен не на общем горизонте`
+    );
+  }
+
+  const alignment = checkCandleAlignment(results, timeframe);
+  if (!canAggregateSafely(alignment)) {
+    refusalReasons.push(
+      `alignment: ${alignment.reason ?? "unsafe alignment (offGrid/horizonMismatch/no evaluated)"}`
+    );
+  }
+
+  return {
+    allowed: refusalReasons.length === 0,
+    refusalReasons,
+    alignment,
+    anchor,
+  };
+}
+
+/**
+ * Operator-facing report. Explains the four sets explicitly, because "why is
+ * there no signal?" depends on knowing who was eligible, who was filtered, who
+ * was a participant and who vetoed the horizon.
+ */
+export function formatCommonHorizonReport(input: {
+  selection: CommonHorizonSelection;
+  timeframe: SmcTimeframe;
+  /** all markets considered for this asset×TF before eligibility */
+  marketCount: number;
+  /** markets kept by exchange eligibility */
+  exchangeEligibleCount: number;
+  /** exchanges dropped by eligibility policy */
+  exchangeExcluded: string[];
+  /** eligible markets dropped by Strategy filters */
+  filteredCount: number;
+}): string[] {
+  const {
+    selection,
+    timeframe,
+    marketCount,
+    exchangeEligibleCount,
+    exchangeExcluded,
+    filteredCount,
+  } = input;
   const lines: string[] = [];
-  if (selection.commonHorizon) {
+
+  lines.push(
+    `обменное eligibility: ${exchangeEligibleCount}/${marketCount} eligible` +
+      (exchangeExcluded.length > 0
+        ? `, исключено eligibility-политикой: ${exchangeExcluded.join(", ")} (Smart Money 1d aggregation policy)`
+        : ` (BINGX eligible на 5m/15m/1h/4h)`)
+  );
+  lines.push(
+    `Strategy filters: filtered ${filteredCount} — не влияет на выбор горизонта (рынок вне выборки стратегии)`
+  );
+  lines.push(
+    `участники common horizon: ${selection.participantCount}` +
+      (selection.marketsWithoutData.length > 0
+        ? `, без CLOSED данных: ${selection.marketsWithoutData
+            .map((m) => m.exchange)
+            .join(", ")}`
+        : "")
+  );
+  lines.push(
+    `ожидаемый latest CLOSED (wall clock ${selection.now.toISOString()}): ${selection.expectedLatestClosed.toISOString()}`
+  );
+
+  for (const p of selection.perMarketLatest) {
     lines.push(
-      `common horizon selected: ${selection.commonHorizon.toISOString()} (lag ${selection.lagBars ?? 0} bar(s) vs newest ${selection.newestHorizon?.toISOString() ?? "—"})`
+      `  ${p.exchange} marketId=${p.marketId} latest CLOSED=${p.latest?.toISOString() ?? "нет данных"}${
+        selection.commonHorizon
+          ? p.hasCommon
+            ? " has-common"
+            : " MISSING-COMMON"
+          : ""
+      }`
+    );
+  }
+
+  if (selection.status === "ok" && selection.commonHorizon !== null) {
+    lines.push(
+      `✓ common horizon: ${selection.commonHorizon.toISOString()} ` +
+        `(relative lag ${selection.lagBars}/${selection.relativeMaxLagBars} бар, ` +
+        `absolute lag ${selection.absoluteLagBars}/${selection.absoluteMaxLagBars} бар от ожидаемого)`
     );
   } else {
+    // Отбракованный горизонт может быть вычислен — показываем его явно, чтобы
+    // «0 eligible» и «горизонта нет» не выглядели одинаково.
     lines.push(
-      `common horizon: none — ${selection.reason ?? "unknown"} (newest ${selection.newestHorizon?.toISOString() ?? "—"})`
+      `✗ common horizon недоступен [${selection.status.toUpperCase()}]` +
+        (selection.commonHorizon
+          ? ` (вычисленный общий бар ${selection.commonHorizon.toISOString()} отбракован)`
+          : "") +
+        `: ${selection.reason}`
     );
   }
-  for (const p of selection.perMarketLatest) {
-    const hasCommon =
-      selection.commonHorizon &&
-      markets
-        .find((m) => m.marketId === p.marketId)
-        ?.candles.some((c) => c.openTime.getTime() === selection.commonHorizon!.getTime());
-    lines.push(
-      `  ${p.exchange} marketId=${p.marketId} latest=${p.latest?.toISOString() ?? "none"} ${hasCommon ? "has-common" : "missing-common"}`
-    );
-  }
+
   return lines;
 }

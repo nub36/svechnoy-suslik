@@ -24,20 +24,20 @@ import {
   validateSmartMoneyRuntime,
   evaluateSmartMoneyWithCandles,
   evaluateMarketsAtCommonHorizon,
-  formatCommonHorizonDiagnostics,
   loadSmartMoneyCandles,
   applySmartMoneyFilters,
   DEFAULT_SMART_MONEY_FILTERS,
   type SmartMoneyFilters,
 } from "../lib/strategies/smart-money";
 import { aggregateAssetGroup } from "../lib/strategies/runtime";
-import { checkCandleAlignment, canAggregateSafely } from "../lib/strategies/alignment";
+// Единая точка решения об агрегации: decideAggregationAtCommonHorizon
+// внутри вызывает checkCandleAlignment + canAggregateSafely (strengthened, not weakened).
 import {
   isSmartMoneyExchangeEligible,
-  filterSmartMoneyEligibleResults,
 } from "../lib/strategies/smart-money-eligibility";
 import {
-  selectCommonClosedHorizon,
+  decideAggregationAtCommonHorizon,
+  formatCommonHorizonReport,
 } from "../lib/strategies/common-horizon";
 import { fileURLToPath } from "node:url";
 import { validateTrendSuslikConfig } from "../lib/strategies/config";
@@ -775,56 +775,75 @@ async function runSymbolMode(symbol: string, timeframe: SmcTimeframe, diagnostic
     }
   }
 
-  // For diagnostics, also prepare results at latest (for eligibility display)
-  const resultsAtLatestAll = marketsData.map((d) => d.resultAtLatest);
+  // ---------------------------------------------------------------
+  // Sets: (A) exchange eligibility → (B) Strategy filters → (C) participants.
+  // Common CLOSED horizon считается только по участникам C.
+  // Wall clock читается ОДИН раз на прогон и передаётся в pure-слой (детерминизм).
+  // ---------------------------------------------------------------
+  const runNow = new Date();
   const eligibleMarketsData = marketsData.filter((d) =>
     isSmartMoneyExchangeEligible(d.meta.exchange, timeframe)
   );
-  const eligibleResultsAtLatest = filterSmartMoneyEligibleResults(resultsAtLatestAll, timeframe);
-  if (eligibleResultsAtLatest.length !== resultsAtLatestAll.length) {
-    const excluded = resultsAtLatestAll.filter(
-      (r) => !isSmartMoneyExchangeEligible(r.exchange, timeframe)
-    );
-    console.log(
-      `\n  eligibility: excluded ${excluded.map((e) => e.exchange).join(", ")} for ${timeframe} (Smart Money policy: BINGX ineligible for 1d; ${eligibleMarketsData.length}/${marketsData.length} eligible)`
-    );
-  } else {
-    console.log(`\n  eligibility: all ${resultsAtLatestAll.length} markets eligible for ${timeframe} (BINGX eligible on 5m/15m/1h/4h)`);
-  }
+  const exchangeExcluded = marketsData
+    .filter((d) => !isSmartMoneyExchangeEligible(d.meta.exchange, timeframe))
+    .map((d) => d.meta.exchange as string);
 
-  // --- Common CLOSED horizon selection (B) ---
-  // Latest COMMON CLOSED horizon that is present at ALL eligible markets (exact intersection, CLOSED, canonical grid).
-  // For 1d, BINGX already excluded, so common among 4 eligible only.
-  // Per-exchange evaluation will use candles up to EXACT common horizon (no-lookahead, deterministic).
-  console.log(`\n=== Common CLOSED horizon selection (B) ${timeframe} ===`);
+  console.log(`\n=== Common CLOSED horizon ${timeframe} ===`);
   const commonEval = evaluateMarketsAtCommonHorizon(
     eligibleMarketsData.map((d) => ({ meta: d.meta, candles: d.candles })),
-    timeframe as import("../lib/smc/types").SmcTimeframe,
+    timeframe,
     smcConfig,
-    filters
+    filters,
+    runNow
   );
-  for (const line of formatCommonHorizonDiagnostics(commonEval.selection, timeframe as import("../lib/smc/types").SmcTimeframe)) {
+
+  for (const line of formatCommonHorizonReport({
+    selection: commonEval.selection,
+    timeframe,
+    marketCount: marketsData.length,
+    exchangeEligibleCount: eligibleMarketsData.length,
+    exchangeExcluded,
+    filteredCount: commonEval.filteredCount,
+  })) {
     console.log(`  ${line}`);
   }
-  if (!commonEval.usable || !commonEval.selection.commonHorizon) {
-    console.log(`  → common horizon not usable: ${commonEval.selection.reason ?? "no common"} → cannot-aggregate (explicit, no silent fallback)`);
-  } else {
-    console.log(`  eligible markets evaluated at common horizon ${commonEval.selection.commonHorizon.toISOString()}:`);
-    for (const r of commonEval.resultsAtCommon) {
+
+  if (commonEval.usable) {
+    console.log(
+      `  участники, оценённые на общем горизонте ${commonEval.selection.commonHorizon?.toISOString()}:`
+    );
+    for (const r of commonEval.results) {
       if (r.status === "evaluated") {
         console.log(
           `    ${r.exchange} candleTime=${r.candleTime.toISOString()} direction=${r.direction} long=${r.longScore} short=${r.shortScore}`
         );
+        console.log(`      причины (${r.reasons.length}):`);
+        for (const reason of r.reasons) {
+          const mark = reason.long ? "LONG" : reason.short ? "SHORT" : "—";
+          console.log(
+            `      [${mark.padEnd(5)} w=${String(reason.weight).padStart(2)}] ${reason.label} ${reason.value ?? ""}`
+          );
+        }
       } else {
-        console.log(`    ${r.exchange} cannot-evaluate at common: ${r.reason}`);
+        console.log(`    ${r.exchange} ${r.status}: ${r.reason}`);
       }
     }
+  } else {
+    console.log(
+      `  → общий горизонт недоступен [${commonEval.status.toUpperCase()}] — multi-exchange агрегация запрещена (явный отказ, без тихого успеха на части рынков)`
+    );
   }
 
-  // Use resultsAtCommon for strict alignment & aggregation (identical-horizon safety preserved)
-  const eligibleResults = commonEval.usable ? commonEval.resultsAtCommon : [];
-  // For diagnostics when not usable, we still want to show why common not usable, but eligibleResults will be empty → alignment safe=false
-  const alignment = checkCandleAlignment(eligibleResults, timeframe);
+  // Агрегационный вход: только results на общем горизонте. При unusable — пустое
+  // множество, и строгий alignment гарантированно запретит агрегацию.
+  const eligibleResults = commonEval.usable ? commonEval.results : [];
+  const gate = decideAggregationAtCommonHorizon({
+    selection: commonEval.selection,
+    results: eligibleResults,
+    timeframe,
+  });
+  const alignment = gate.alignment;
+
   console.log(`\n=== Выравнивание окон (alignment) at COMMON horizon ${timeframe} ===`);
   if (alignment.referenceCandleTime) {
     console.log(`  referenceCandleTime: ${alignment.referenceCandleTime.toISOString()} (all evaluated must equal this)`);
@@ -832,7 +851,11 @@ async function runSymbolMode(symbol: string, timeframe: SmcTimeframe, diagnostic
     console.log(`  referenceCandleTime: — (no evaluated markets)`);
   }
   for (const d of alignment.details) {
-    const horizonFlag = alignment.horizonMismatch.some((h) => h.exchange === d.exchange && h.marketId === d.marketId) ? "HORIZON_MISMATCH" : "HORIZON_OK";
+    const horizonFlag = alignment.horizonMismatch.some(
+      (h) => h.exchange === d.exchange && h.marketId === d.marketId
+    )
+      ? "HORIZON_MISMATCH"
+      : "HORIZON_OK";
     const gridFlag = d.aligned ? "GRID_OK" : "OFF_GRID";
     console.log(`  ${d.exchange}: candleTime=${d.candleTime.toISOString()} UTC hour=${d.utcHour} offset=${d.offsetMs}ms ${gridFlag} ${horizonFlag}`);
   }
@@ -853,10 +876,15 @@ async function runSymbolMode(symbol: string, timeframe: SmcTimeframe, diagnostic
   } else {
     console.log(`  ✓ ALIGNED ${alignment.alignedCount}/${alignment.totalEvaluated} safe — можно агрегировать (grid OK + same horizon)`);
   }
+  if (!gate.anchor.ok) {
+    console.log(`  ⚠ ANCHOR: результаты не заякорены на общем горизонте: ${gate.anchor.anomalies.join("; ")}`);
+  }
 
-  if (!canAggregateSafely(alignment)) {
+  if (!gate.allowed) {
     console.log(`\n=== MULTI-EXCHANGE AGGREGATION REFUSED ${asset.symbol} ${timeframe} ${SMART_MONEY_SLUG} v${strategyVersion} ===`);
-    console.log(`  reason: ${alignment.reason ?? "unsafe alignment"}`);
+    for (const reason of gate.refusalReasons) {
+      console.log(`  reason: ${reason}`);
+    }
     if (alignment.referenceCandleTime) console.log(`  referenceCandleTime: ${alignment.referenceCandleTime.toISOString()}`);
     if (alignment.offGrid.length > 0) console.log(`  offGrid: ${alignment.offGrid.map((o) => `${o.exchange} ${o.candleTime.toISOString()}`).join(", ")}`);
     if (alignment.horizonMismatch.length > 0) console.log(`  horizonMismatch: ${alignment.horizonMismatch.map((h) => `${h.exchange} ${h.candleTime.toISOString()}`).join(", ")}`);
