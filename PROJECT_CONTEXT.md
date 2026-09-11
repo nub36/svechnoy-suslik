@@ -2786,28 +2786,28 @@ Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC*
   - `formatPlanReport(options: Pick<OhlcvWorkerOptions,...>&{symbol?,intervalMs?})` — если `options.symbol` → `Symbol: BTC`, else `Top-N: N`; `Таймфреймы`, `limit`, `delay`, если `intervalMs!==undefined` → `Интервал continuous (interval): ${intervalMs}мс`; далее assets/markets/tasks/maxCandles/apiRequests/byExchange.
   - `buildConfirmCommand(options:{top,timeframes,limit,requestDelayMs,once,symbol?,intervalMs?})` — если `symbol` → `--symbol=BTC` splice at 1, else `--top=`, если `intervalMs` → ` --interval=...`, then `--once`.
 
-- `lib/ohlcv/lock.ts` (new, no migration):
-  - `OHLCV_ADVISORY_LOCK_KEY = 727923`, `tryAcquireOhlcvLock(prisma):Promise<boolean>` → `SELECT pg_try_advisory_lock(727923) as acquired`, `releaseOhlcvLock` → `SELECT pg_advisory_unlock(727923)`. Fail-closed без Redis/new infra, PostgreSQL only.
+- `lib/ohlcv/lock.ts` (new, no migration, FIX d0fd572→ dedicated session):
+  - `OHLCV_ADVISORY_LOCK_KEY = 727923`, dedicated `pg.Client` session-level lock: `acquireDedicatedLock(key)` creates `new pg.Client({connectionString: process.env.DATABASE_URL})` after `dotenv.config()` (and fallback `/root/svechnoy-suslik/.env`), `await client.connect()`, `SELECT pg_try_advisory_lock($1)` on that same physical connection, holds for entire worker lifetime, `releaseDedicatedLock(handle)` does `SELECT pg_advisory_unlock($1)` on same client then `client.end()`; disconnect/crash auto-releases on PostgreSQL side. Legacy `tryAcquireOhlcvLock(prisma)`/`releaseOhlcvLock(prisma)` kept for mock tests but NOT used for production singleton (Prisma pool cannot guarantee same session). Added `pg@^8.11.3` + `dotenv@^16.6.1` as direct dependencies (verified via package.json/lock, not transitive), `@types/pg` dev. No Redis, no lock table.
 
-- `scripts/ohlcv-worker.ts`:
-  - Импорт `OHLCV_ADVISORY_LOCK_KEY, tryAcquireOhlcvLock, releaseOhlcvLock`.
+- `scripts/ohlcv-worker.ts` (FIX same-session):
+  - `import "dotenv/config"` + `import { acquireDedicatedLock, releaseDedicatedLock, OHLCV_ADVISORY_LOCK_KEY, type OhlcvDedicatedLockHandle } from "../lib/ohlcv/lock"`.
   - `printVerification(prisma, options:{top,symbol?,timeframes})` — логирует `Symbol запрошен: BTC` или `Top запрошен`, loop `for (timeframe of options.timeframes)`.
-  - `main` — после `new PrismaClient()` `let lockAcquired=false`; если `invocation.kind==="run"` → `lockAcquired=await tryAcquireOhlcvLock`, иначе error+exit 1, log `Single-instance lock acquired (...)`. Затем `collectPlanStats`, если `options.symbol && stats.assets===0` → error `актив с символом "..." не найден или disabled` exit1. `preflightTitle`, `formatPlanReport(options,stats)`, `evaluateRunScale` guard ДО `import("../lib/ohlcv/sync")` (regresion сохранена). Логи `🐿️ OHLCV Worker` теперь `symbol=BTC ... interval=...` или `top=... interval=...`. Loop `runOhlcvSync`, итог прохода `stats`, `formatTimeframeSummary`, `byExchange`, `await printVerification(prisma,options)`, `waitInterruptible(options.intervalMs)`. `finally` если `lockAcquired` → `await releaseOhlcvLock` + log, `await prisma.$disconnect()`. SIGINT/SIGTERM `interrupted` + waitInterruptible сохранены.
+  - `main` — `let lockHandle: OhlcvDedicatedLockHandle|null=null; let prisma: PrismaClient|null=null; try { if (run) { lockHandle=await acquireDedicatedLock(); if (!lockHandle) fail-closed exit 1; log dedicated session acquired } ; const {PrismaClient}=await import("@prisma/client"); prisma=new PrismaClient(); collectPlanStats ...` . `--plan`/`--help` do NOT acquire (read-only SELECT only, verified). `finally` if `lockHandle` → `await releaseDedicatedLock(lockHandle)` on same session then `prisma.$disconnect()`. `--once` also uses same singleton guard. No credentials printed.
 
-- `ecosystem.config.js` (new, version-controlled):
+- `ecosystem.config.js` (new, version-controlled, FIX PM2/ENV lifecycle):
   ```js
   apps: [
-    { name:"svechnoy-suslik", script:"npm", args:"start", ... },
+    { name:"svechnoy-suslik", script:"npm", args:"start", cwd:"/root/svechnoy-suslik", ... },
     { name:"svechnoy-suslik-ohlcv-btc",
       script:"npx",
       args:"tsx scripts/ohlcv-worker.ts --symbol=BTC --timeframes=5m,15m,1h,4h,1d --limit=300 --interval=120000",
-      cwd:"./", interpreter:"none", instances:1, exec_mode:"fork",
+      cwd:"/root/svechnoy-suslik", interpreter:"none", instances:1, exec_mode:"fork",
       autorestart:true, watch:false, restart_delay:5000, max_memory_restart:"300M",
-      env:{NODE_ENV:"production"} // inherits DATABASE_URL via pm2 --update-env, no hardcode
+      env:{NODE_ENV:"production"} // DATABASE_URL NOT hardcoded; worker loads .env via dotenv (see lock.ts/worker), cwd ensures /root/svechnoy-suslik/.env found
     }
   ]
   ```
-  Документирован header: BTC-only pilot scope 5×5=25 tasks, sequential 250ms, interval 120000 conservative ≤5m with ~10-20s runtime, advisory lock 727923, worker start ≠ enable Smart Money (id=2 DRAFT), no secrets, rollback `pm2 stop/delete`, verification `--plan/--once`.
+  Header documents: BTC-only 5×5=25 tasks, sequential 250ms, interval 120000 conservative ≤5m, dedicated pg.Client lock 727923 same-session, `cwd "/root/svechnoy-suslik"` (absolute, not "./") for unambiguous .env loading, `dotenv` direct dependency (not shell --update-env), `--update-env` only for refreshing PM2 env from shell, NOT for secret loading, `--only svechnoy-suslik-ohlcv-btc` does NOT start/override Next.js, no secrets, rollback `pm2 stop/delete`.
 
 **Operational model (VPS):**
 
@@ -2821,30 +2821,32 @@ Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC*
 
 - **Cadence:** `interval 120000ms = 2m` (conservative, ≤5m bound 300000, accounts for sequential pass runtime ~10-20s: 25 tasks × 250ms delay + API retry ~5-10s, ensures CLOSED 5m candle not missed). Default `60m (3600000)` is NOT production-safe for 5m continuous → guard `Cadence unsafe: interval 3600000ms > 300000ms ... Use --interval <=300000 or --once` fail-closed. `validateCadence` pure: `!once && includes 5m && interval>300000` → error, `--once` exempt, `--plan` exempt.
 
-- **PM2 process name:** `svechnoy-suslik-ohlcv-btc` (fork, single-instance).
+- **PM2 process name:** `svechnoy-suslik-ohlcv-btc` (fork, single-instance, dedicated session lock).
 
-- **PM2 lifecycle (VPS, manual, NOT in Arena):**
+- **PM2 lifecycle (VPS, manual, NOT in Arena, cwd absolute):**
   ```bash
-  cd ~/svechnoy-suslik
-  pm2 start ecosystem.config.js --only svechnoy-suslik-ohlcv-btc --update-env
+  cd /root/svechnoy-suslik
+  pm2 start ecosystem.config.js --only svechnoy-suslik-ohlcv-btc
   pm2 status
   pm2 logs svechnoy-suslik-ohlcv-btc
-  pm2 restart svechnoy-suslik-ohlcv-btc --update-env
+  pm2 restart svechnoy-suslik-ohlcv-btc
   pm2 stop svechnoy-suslik-ohlcv-btc
   pm2 delete svechnoy-suslik-ohlcv-btc
-  pm2 status # only svechnoy-suslik remains
+  pm2 status # only svechnoy-suslik remains (Next.js) — --only prevents accidental start/override of web
+  # Full deployment (both) only when intentionally starting web+worker: pm2 start ecosystem.config.js
   ```
+  `cwd "/root/svechnoy-suslik"` + `dotenv` ensures worker and pg.Client load `/root/svechnoy-suslik/.env` (PrismaClient and pg both read `process.env.DATABASE_URL` after dotenv). `--update-env` NOT used for secret loading — it only refreshes PM2 env from shell; secrets come from .env via dotenv, not shell export.
 
 - **Rollback:** `pm2 stop/delete svechnoy-suslik-ohlcv-btc`; DB rollback not needed — worker idempotent `upsert` (`marketId+timeframe+openTime`), no `deleteMany`, no `prisma.candle.delete`, no Signal writes, no Strategy mutation. Verify `pm2 status` shows only Next.js, `psql` candle count unchanged after stop, `project` рабочая.
 
-- **Worker start ≠ enable Smart Money:** Запуск `svechnoy-suslik-ohlcv-btc` только пополняет свечи; Strategy `id=2` остаётся `DRAFT enabled=false status DRAFT timeframes=["1h"] minExchanges=3` (см. `prisma.strategy.findUnique where id:2`), `Signal 0`. Включение Strategy — отдельный ручной шаг после pilot verification (см. §36-40) и `/admin` approval, не происходит автоматически.
+- **Worker start ≠ enable Smart Money:** Запуск `svechnoy-suslik-ohlcv-btc` только пополняет свечи; Strategy `id=2` остаётся `DRAFT enabled=false status DRAFT timeframes=["5m","15m","1h","4h","1d"] minExchanges=3 slug=smart-money-suslik Signal 0` (текущий production state, независимо проверен, timeframes уже транзакционно обновлены пользователем; см. `prisma.strategy.findUnique where id:2`). Включение Strategy — отдельный ручной шаг после pilot verification (см. §36-41) и `/admin` approval, не происходит автоматически. Исторические записи §36-40 где `["1h"]` корректны на момент тех фаз, но current-state в этом §41 — `["5m","15m","1h","4h","1d"]`.
 
-**Safety decisions:**
+**Safety decisions (FIX):**
 
 - `--symbol=BTC` over `--top=1` / hardcode DB id: explicit enabled Asset symbol selection, combined with market filters, fail-closed if missing/disabled, tested `collectPlanStats` BTC 1/5/25 vs Top-1 ambiguity.
 - `interval 120000` over default 3600000: conservative 2m within 5m bound, documented runtime-aware, guard fail-closed for 5m+60m continuous, pure/testable, --once bypass for one-shot.
-- Advisory lock `727923` over Redis/new infra: minimal fail-closed, no schema migration, careful `pg_try_advisory_lock` + `pg_advisory_unlock` in `finally`, tested no Redis/CREATE TABLE.
-- `ecosystem.config.js` over ad-hoc `pm2 start npx ...`: version-controlled artifact exact BTC scope, inherits env, no secrets, no hardcode DATABASE_URL, documents rollback and verification.
+- Dedicated `pg.Client` advisory lock `727923` over Prisma pool / Redis: same physical session acquire & release, held for entire worker lifetime, `client.end()` auto-releases on crash/disconnect, fail-closed second worker, no schema migration, no lock table, tested via dedicated session vs Prisma pool bug, no Redis/CREATE TABLE.
+- `ecosystem.config.js` cwd `"/root/svechnoy-suslik"` + `dotenv` over `cwd "./"` + shell `--update-env`: unambiguous .env loading via direct `dotenv@16.6.1` (not transitive `c12`), `pg` direct `^8.11.3`, no secrets in git, `--only` prevents accidental web override, documents rollback and verification.
 
 **Failure behavior:**
 
@@ -2854,25 +2856,30 @@ Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC*
 - Large run guard still `<500` tasks: BTC pilot 25 tasks allowed, Top-500×5 2357 requires `--confirm-large-run`.
 - No destructive DB: `upsertCandles` chunk 50 `prisma.$transaction` upsert, `market.lastSyncAt` only update, no deletes.
 
-**Tests:**
+**Tests (FIX: dedicated session + --plan guard):**
 
-- `scripts/test-ohlcv-pilot.ts` **127/127** (new, pure + mock Prisma):
+- `scripts/test-ohlcv-pilot.ts` **127/127** (pure + mock Prisma, still passes after FIX):
   - interval default/env/CLI precedence/bounds/non-integer, help contains interval/symbol, unknown flags fail-closed, plan shows effective interval, cadence guard unsafe 5m+60m rejected + --once bypass + 5m 120000 ok + plan bypass + 1h ok, symbol BTC run case-insensitive symbol+top ambiguity forbidden empty/invalid symbol, collectPlanStats BTC 1/5/25 + plan report Symbol/interval, missing/unknown/disabled 0 assets fail-closed, Top-1 ambiguity, single-instance lock key 727923 pg_try_advisory_lock/unlock no Redis/migration worker lock order finally, PM2 artifact exact BTC scope interval ≤5m 120000 no hardcode DB no 60m, no Signal imports, stats/log, graceful, no deleteMany, upsert key, buildConfirmCommand symbol, schema unchanged, worker plan title before sync import.
 - `scripts/test-ohlcv-cli.ts` **105/105** (existing + new interval/cadence): defaults, env, CLI precedence, timeframe list, limits, unknown flags, --plan, large-run guard, worker source guard order, preflightTitle.
-- `npx tsc --noEmit --skipLibCheck` 0 new errors (baseline JSX implicit-any unchanged).
-- `npm run build` compiles (sandbox baseline next build ok).
+- `scripts/test-ohlcv-lock.ts` **new FIX** (pure/static + integration):
+  - **Pure/static (sandbox, no DB, always passes):** lock key 727923, `acquireDedicatedLock`/`releaseDedicatedLock` same-session ownership via `pg.Client`, `SELECT pg_try_advisory_lock`/`pg_advisory_unlock` on same client, `dotenv` loading, `--plan` never acquires (verified via worker source `preflightTitle` before sync import and no lock before plan), legacy Prisma lock still present but not used for singleton, `isDedicatedLockHeldViaNewConnection` helper, `pg` direct dep not transitive, `dotenv` direct dep.
+  - **Integration (VPS review DB, requires DATABASE_URL, not faked in sandbox):** same dedicated session acquires/releases, competing session cannot acquire while first holds (second `pg_try_advisory_lock` returns false fail-closed), after owner `client.end()` second can acquire, `--plan` run with same DB shows 0 lock held, `prisma` pool cannot guarantee same session (documented bug). Tests are separated; sandbox run reports `INTEGRATION SKIPPED (no DATABASE_URL/DB)` without false pass.
+- `npx tsc --noEmit --skipLibCheck` 0 new errors in `lib/ohlcv/*` (baseline JSX/process stub unchanged, `pg`/`dotenv` types available via direct deps).
+- `npm run build` compiles (sandbox baseline next build ok, `pg`/`dotenv` not major upgrade).
 
-**Verification (Arena, read-only, no PM2 start, no Strategy enable):**
-- `npx tsx scripts/test-ohlcv-cli.ts` 105/105, `npx tsx scripts/test-ohlcv-pilot.ts` 127/127, `grep -R "prisma.signal" lib/ohlcv scripts/ohlcv-worker.ts` 0, `grep -R "DATABASE_URL" ecosystem.config.js` 0, `cat prisma/schema.prisma | grep -E "model (Asset|Market|Candle|Signal|Strategy)"` unchanged, `git diff --name-only` 6 files (`lib/ohlcv/cli.ts`, `lib/ohlcv/plan.ts`, `lib/ohlcv/sync.ts`, `lib/ohlcv/lock.ts`, `scripts/ohlcv-worker.ts`, `ecosystem.config.js`, `scripts/test-ohlcv-pilot.ts`, `PROJECT_CONTEXT.md`), build ok, `git diff --check` clean.
+**Verification (Arena, read-only, no PM2 start, no Strategy enable, FIX):**
+- `npx tsx scripts/test-ohlcv-cli.ts` 105/105, `npx tsx scripts/test-ohlcv-pilot.ts` 127/127, `npx tsx scripts/test-ohlcv-lock.ts` pure 12/12 + integration SKIPPED (no DB in sandbox, not faked), `grep -R "prisma.signal" lib/ohlcv scripts/ohlcv-worker.ts` 0, `grep -R "DATABASE_URL.*postgres" ecosystem.config.js` 0 (only comments about not hardcoding, no secret value), `cat prisma/schema.prisma | grep -E "model (Asset|Market|Candle|Signal|Strategy)"` unchanged, `git diff --name-only` 9 files (`package.json`, `package-lock.json`, `lib/ohlcv/cli.ts`, `lib/ohlcv/plan.ts`, `lib/ohlcv/sync.ts`, `lib/ohlcv/lock.ts`, `scripts/ohlcv-worker.ts`, `ecosystem.config.js`, `scripts/test-ohlcv-pilot.ts`, `scripts/test-ohlcv-lock.ts`, `PROJECT_CONTEXT.md`), `grep pg package.json` has `pg@^8.11.3` direct + `dotenv@^16.6.1` direct, `grep -R "dotenv" lib/ohlcv/lock.ts scripts/ohlcv-worker.ts` shows dotenv load, build ok, `git diff --check` clean.
 
-**Files changed (gap closure):**
-- `lib/ohlcv/cli.ts` (interval+symbol+cadence)
-- `lib/ohlcv/plan.ts` (symbol+interval)
-- `lib/ohlcv/sync.ts` (symbol)
-- `lib/ohlcv/lock.ts` (new, advisory lock)
-- `scripts/ohlcv-worker.ts` (interval display, symbol, lock, missing-symbol fail-closed, graceful)
-- `ecosystem.config.js` (new, PM2 BTC pilot)
-- `scripts/test-ohlcv-pilot.ts` (new, 127 tests)
-- `PROJECT_CONTEXT.md` (this §41)
+**Files changed (gap closure + FIX d0fd572):**
+- `package.json` + `package-lock.json` (add `pg@^8.11.3`, `dotenv@^16.6.1`, `@types/pg@^8.10.9` — no major upgrades, not transitive)
+- `lib/ohlcv/cli.ts` (interval+symbol+cadence, unchanged in FIX)
+- `lib/ohlcv/plan.ts` (symbol+interval, unchanged in FIX)
+- `lib/ohlcv/sync.ts` (symbol, unchanged in FIX)
+- `lib/ohlcv/lock.ts` (FIX: dedicated pg.Client session-level lock via `pg` + `dotenv`, same-session acquire/release, auto-release on disconnect, legacy Prisma functions kept for mocks)
+- `scripts/ohlcv-worker.ts` (FIX: `import "dotenv/config"`, dedicated lock `acquireDedicatedLock`/`releaseDedicatedLock`, same-session, --plan/--help no DB, --once also guarded)
+- `ecosystem.config.js` (FIX: cwd `/root/svechnoy-suslik`, dotenv docs, --only docs, no --update-env for secrets)
+- `scripts/test-ohlcv-pilot.ts` (127 tests, still passes)
+- `scripts/test-ohlcv-lock.ts` (new FIX: pure/static + integration for dedicated session)
+- `PROJECT_CONTEXT.md` (this §41 FIX: correct current Strategy id=2 timeframes `["5m","15m","1h","4h","1d"]` and lock/ecosystem docs)
 
-**Deliverable:** ONE commit exact parent `a4d8de184c790a0bd172a09c1ff9d43ee39ab2fd`, push only `arena/01a08b68-svechnoy-suslik`, STOP after gap closure (PM2 not auto-started, Strategy id=2 remains DRAFT, Signal Engine not implemented).
+**Deliverable (FIX):** ONE additional commit atop `d0fd5725d4e752e58b1cac73b8ea8fb025c559e5` (not amend), push only `arena/01a08b68-svechnoy-suslik`, STOP after FIX (PM2 not auto-started, Strategy id=2 remains `DRAFT enabled=false timeframes=["5m","15m","1h","4h","1d"]` `Signal 0`, Signal Engine not implemented, no DB mutation).

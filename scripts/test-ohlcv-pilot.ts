@@ -16,7 +16,7 @@ import {
   formatPlanReport,
   buildConfirmCommand,
 } from "../lib/ohlcv/plan";
-import { OHLCV_ADVISORY_LOCK_KEY, tryAcquireOhlcvLock, releaseOhlcvLock } from "../lib/ohlcv/lock";
+import { OHLCV_ADVISORY_LOCK_KEY, acquireDedicatedLock, releaseDedicatedLock, tryAcquireOhlcvLock, releaseOhlcvLock } from "../lib/ohlcv/lock";
 
 let passed = 0;
 let total = 0;
@@ -205,12 +205,16 @@ ok(planLinesTop.some(l => l.includes("Top-N: 10")), "plan Top-N still shows for 
 console.log("\n=== 4) Single-instance advisory lock ===");
 ok(typeof OHLCV_ADVISORY_LOCK_KEY === "number", "lock key is number");
 ok(OHLCV_ADVISORY_LOCK_KEY === 727923, "lock key 727923");
-ok(typeof tryAcquireOhlcvLock === "function", "tryAcquireOhlcvLock is function");
-ok(typeof releaseOhlcvLock === "function", "releaseOhlcvLock is function");
+ok(typeof acquireDedicatedLock === "function", "acquireDedicatedLock is function (dedicated session)");
+ok(typeof releaseDedicatedLock === "function", "releaseDedicatedLock is function (dedicated session)");
+ok(typeof tryAcquireOhlcvLock === "function", "tryAcquireOhlcvLock still exists (legacy mock)");
+ok(typeof releaseOhlcvLock === "function", "releaseOhlcvLock still exists (legacy mock)");
 // Check no Redis, no new infra, no migration
 const lockSource = readFileSync("lib/ohlcv/lock.ts", "utf8");
 ok(lockSource.includes("pg_try_advisory_lock"), "lock uses pg_try_advisory_lock");
 ok(lockSource.includes("pg_advisory_unlock"), "lock uses pg_advisory_unlock");
+ok(lockSource.includes("new Client") || lockSource.includes("pg.Client"), "lock uses dedicated pg.Client (same-session)");
+ok(lockSource.includes("dotenv"), "lock loads dotenv for DATABASE_URL");
 ok(!lockSource.includes("redis"), "lock does not use Redis");
 ok(!lockSource.includes("Redlock"), "no Redlock");
 ok(!lockSource.includes("CREATE TABLE"), "no migration CREATE TABLE");
@@ -218,13 +222,13 @@ ok(!lockSource.includes("migration"), "no migration");
 
 // Check worker uses lock
 const workerSource = readFileSync("scripts/ohlcv-worker.ts", "utf8");
-ok(workerSource.includes("tryAcquireOhlcvLock"), "worker imports tryAcquireOhlcvLock");
-ok(workerSource.includes("releaseOhlcvLock"), "worker imports releaseOhlcvLock");
+ok(workerSource.includes("acquireDedicatedLock"), "worker imports acquireDedicatedLock (dedicated session)");
+ok(workerSource.includes("releaseDedicatedLock"), "worker imports releaseDedicatedLock (same session)");
 ok(workerSource.includes("OHLCV_ADVISORY_LOCK_KEY"), "worker uses lock key");
 ok(workerSource.includes("Single-instance"), "worker logs single-instance");
-ok(workerSource.indexOf("await tryAcquireOhlcvLock") < workerSource.indexOf("await collectPlanStats"), "worker acquires lock before plan stats");
-ok(workerSource.includes("lockAcquired"), "worker tracks lockAcquired");
-ok(workerSource.includes("releaseOhlcvLock") && workerSource.includes("finally"), "worker releases lock in finally");
+ok(workerSource.indexOf("await acquireDedicatedLock") < workerSource.indexOf("await collectPlanStats"), "worker acquires dedicated lock before plan stats (same-session)");
+ok(workerSource.includes("lockHandle"), "worker tracks lockHandle (dedicated session)");
+ok(workerSource.includes("releaseDedicatedLock") && workerSource.includes("finally"), "worker releases dedicated lock in finally (same session)");
 
 console.log("\n=== 5) PM2 artifact ===");
 ok(existsSync("ecosystem.config.js"), "ecosystem.config.js exists");

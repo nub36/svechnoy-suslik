@@ -1,3 +1,4 @@
+import "dotenv/config";
 import type { PrismaClient } from "@prisma/client";
 import { sleep } from "../lib/ohlcv/retry";
 import {
@@ -14,8 +15,9 @@ import {
 } from "../lib/ohlcv/plan";
 import {
   OHLCV_ADVISORY_LOCK_KEY,
-  releaseOhlcvLock,
-  tryAcquireOhlcvLock
+  acquireDedicatedLock,
+  releaseDedicatedLock,
+  type OhlcvDedicatedLockHandle
 } from "../lib/ohlcv/lock";
 
 /**
@@ -170,34 +172,34 @@ async function main() {
   //    бирж — ТОЛЬКО после предохранителя ниже).
   const options = invocation.options;
 
-  const { PrismaClient } = await import(
-    "@prisma/client"
-  );
-
-  const prisma = new PrismaClient();
-  let lockAcquired = false;
-
+  let lockHandle: OhlcvDedicatedLockHandle | null = null;
+  let prisma: PrismaClient | null = null;
   try {
-    // Single-instance guard for continuous/once run (not for --plan)
+    // Single-instance guard for continuous/once run (not for --plan/--help)
+    // Uses dedicated pg.Client session-level lock: acquire & release on same physical connection,
+    // held for entire worker lifetime, auto-released on disconnect/crash.
     if (invocation.kind === "run") {
       try {
-        lockAcquired = await tryAcquireOhlcvLock(prisma);
+        lockHandle = await acquireDedicatedLock(OHLCV_ADVISORY_LOCK_KEY);
       } catch (e) {
-        console.error(`Single-instance guard error acquiring advisory lock ${OHLCV_ADVISORY_LOCK_KEY}:`, e instanceof Error ? e.message : String(e));
+        console.error(`Single-instance guard error acquiring advisory lock ${OHLCV_ADVISORY_LOCK_KEY} on dedicated session:`, e instanceof Error ? e.message : String(e));
         process.exitCode = 1;
         return;
       }
-      if (!lockAcquired) {
-        console.error(`Single-instance guard: OHLCV worker already running (advisory lock ${OHLCV_ADVISORY_LOCK_KEY} held). Another instance is active — refusing to start overlapping.`);
+      if (!lockHandle) {
+        console.error(`Single-instance guard: OHLCV worker already running (dedicated session advisory lock ${OHLCV_ADVISORY_LOCK_KEY} held). Another instance is active — refusing to start overlapping.`);
         process.exitCode = 1;
         return;
       }
-      console.log(`Single-instance lock acquired (advisory lock ${OHLCV_ADVISORY_LOCK_KEY}).`);
+      console.log(`Single-instance lock acquired on dedicated session (advisory lock ${OHLCV_ADVISORY_LOCK_KEY}).`);
     }
+
+    const { PrismaClient } = await import("@prisma/client");
+    prisma = new PrismaClient();
 
     // Читаем масштаб прогона (read-only SELECT).
     const stats = await collectPlanStats(
-      prisma,
+      prisma!,
       options
     );
 
@@ -271,7 +273,7 @@ async function main() {
 
     do {
       const started = Date.now();
-      const stats = await runOhlcvSync(prisma, options);
+      const stats = await runOhlcvSync(prisma!, options);
 
       console.log("\n--- итог прохода ---");
       console.log(`активов: ${stats.assets}`);
@@ -295,7 +297,7 @@ async function main() {
         );
       }
 
-      await printVerification(prisma, options);
+      await printVerification(prisma!, options);
 
       console.log(`проход ${Date.now() - started}ms`);
 
@@ -311,13 +313,15 @@ async function main() {
       console.log("Остановлено пользователем.");
     }
   } finally {
-    if (lockAcquired) {
+    if (lockHandle) {
       try {
-        await releaseOhlcvLock(prisma);
-        console.log(`Single-instance lock released (advisory lock ${OHLCV_ADVISORY_LOCK_KEY}).`);
+        await releaseDedicatedLock(lockHandle);
+        console.log(`Single-instance lock released from dedicated session (advisory lock ${OHLCV_ADVISORY_LOCK_KEY}).`);
       } catch {}
     }
-    await prisma.$disconnect();
+    if (prisma) {
+      await prisma.$disconnect();
+    }
   }
 }
 
