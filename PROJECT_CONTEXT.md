@@ -2606,3 +2606,73 @@ SmcScoringConfig {
 **Reference (§17 audit):** `lib/exchanges/bingx.ts`, `binance.ts/bybit.ts/gate.ts/kucoin.ts`, `lib/ohlcv/sync.ts`, `lib/strategies/alignment.ts`, `docs/phase3e-diagnostic-report.md`, `scripts/smart-money-diagnostic.ts`, `app/api/admin/strategies/[id]/route.ts`.
 
 **Deliverable:** Documentation-only audit on exact `d5029df`, STOP after audit (next commit is Option A implementation after review).
+
+==================================================
+40. SMART MONEY OPTION A — ELIGIBILITY POLICY (IMPLEMENTED) 11.09.2026
+==================================================
+
+**Baseline:** `4a62758b499917bc94ed7dfebc0cb5c147caa807` (BingX 1d audit, parent `d5029df40d75fd2d6ba36ac55c4bfac95a8e254c`; **NO DB mutation, NO workers, NO Signal, NO SMC/math, NO 1d enable**). Narrow Option A implementation on exact `4a62758`, parent verified.
+
+**Decision (from §39 audit):** BingX remains fully supported globally. Smart Money eligibility is the ONLY narrow 1d exclusion:
+- `5m: BINANCE,BYBIT,GATE,KUCOIN,BINGX` (5)
+- `15m: BINANCE,BYBIT,GATE,KUCOIN,BINGX` (5)
+- `1h: BINANCE,BYBIT,GATE,KUCOIN,BINGX` (5)
+- `4h: BINANCE,BYBIT,GATE,KUCOIN,BINGX` (5)
+- `1d: BINANCE,BYBIT,GATE,KUCOIN` (4, **BINGX ineligible ONLY for Smart Money 1d multi-exchange aggregation**)
+
+Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC** boundary while four others are canonical **00:00 UTC** (offGrid + horizonMismatch). What is **proven** is observed 16:00 UTC + our ingestion stores `row[0]` without shift; what remains **unproven without BingX docs/wire proof** is exact documented session contract (e.g., `UTC+8`). The eligibility policy requires only observed incompatibility, not docs claim. Audit wording corrected to label `UTC+8` as **hypothesis**, not proven.
+
+**Semantics (eligibility vs alignment vs minExchanges — strictly separated):**
+- **Eligibility** = which exchanges may participate for a given Smart Money timeframe (Strategy-layer policy, pure).
+- **Alignment** = after eligibility filtering, EVERY remaining evaluated market must still pass generic `checkCandleAlignment` (canonical grid `openTime % tfMs===0` + exact identical latest CLOSED `candleTime`). No BINGX exception inside `lib/strategies/alignment.ts` — unfiltered 5-market 1d with BINGX 16:00 remains `safe=false`.
+- **minExchanges** = separate: eligibility first → evaluate remaining → alignment safe → aggregate only if safe → `aggregateAssetGroup` retains normal `minExchanges` semantics. Never interpret “4 eligible and minExchanges=3” as permission for stale/misaligned.
+
+**Implementation:**
+- **New pure Strategy-layer policy:** `lib/strategies/smart-money-eligibility.ts` (no `lib/smc/*`, no Prisma, no adapter, no `alignment` internals)
+  - `isSmartMoneyExchangeEligible(exchange: string, timeframe: string): boolean` — typed, fail-closed for unknown, deterministic, no `Date.now`, no DB.
+  - `filterSmartMoneyEligibleResults(results: MarketStrategyResult[], timeframe): MarketStrategyResult[]` — pure, preserves order.
+  - `ELIGIBLE_EXCHANGES_BY_TF` / `getEligibleExchanges(timeframe)` — explicit matrix.
+  - Policy: `BINGX+1d=>false`, `BINGX+5m/15m/1h/4h=>true`, `BINANCE/BYBIT/GATE/KUCOIN` + all TF including 1d => true.
+- **Call sites changed (exhaustive audit):** `checkCandleAlignment`/`canAggregateSafely`/`aggregateAssetGroup` for Smart Money found via grep in `lib/strategies/*`, `scripts/*`, `app/*` — only two production aggregation paths exist:
+  - `scripts/smart-money-diagnostic.ts` — added import of eligibility, filter `eligibleResults = filterSmartMoneyEligibleResults(results, timeframe)` with eligibility log, then `checkCandleAlignment(eligibleResults, timeframe)` and `aggregateAssetGroup(..., eligibleResults, ...)`. Per-exchange evaluation logs still show all exchanges (including BINGX 1d) for visibility; only aggregation denominator excludes BINGX 1d.
+  - `scripts/smart-money-readonly.ts` — same (added import, filter, log, then alignment/aggregate on filtered). Both modes (normal and `--diagnostic-canonical-config`) use eligibility before alignment.
+  - `lib/strategies/smart-money.ts` — per-market evaluator only, no aggregation; no change needed (verified no `checkCandleAlignment` there).
+  - `app/api/admin/strategies/[id]/route.ts` — no aggregation; no change (still rejects 1d). No other `app/` or `lib/` file aggregates Smart Money (verified via grep).
+- **Generic alignment unchanged:** `lib/strategies/alignment.ts` has zero BINGX special-case; `isCanonicalAligned` / `checkCandleAlignment` / `canAggregateSafely` remain pure canonical.
+- **Admin/API:** **DO NOT enable 1d in this commit.** `allowedVerified = ["5m","15m","1h","4h"]` in `app/api/admin/strategies/[id]/route.ts` still rejects 1d with `400 1d временно недоступен...`. `components/admin/SmartMoneyStrategyEditor.tsx` still disables 1d button (`disabled`, tooltip “1d временно недоступен... 16:00 UTC vs 00:00 UTC”) and shows verified checkmarks only for 5m/15m/1h/4h. No enabling, no `Strategy id=2` mutation (remains `DRAFT enabled=false timeframes=["1h"] minExchanges=3`).
+- **No DB/candle/Signal changes:** no `prisma.strategy.update/signal`, no `prisma.candle` update/delete, no ingestion adapter change, no workers, no derived UTC daily, no `lib/signals`.
+
+**Tests — new focused suite `scripts/test-smart-money-eligibility.ts` 81/81 (pure, no DB, deterministic):**
+- **A matrix 17:** BINGX 5m/15m/1h/4h true, 1d false, other four 1d true, unknown fail-closed, `ELIGIBLE_EXCHANGES_BY_TF`, `getEligibleExchanges`, filter helpers.
+- **B defense-in-depth:** unfiltered 4×00 + BINGX16 passed directly to generic `checkCandleAlignment("1d")` => `safe=false`, `offGrid`/`horizonMismatch` BINGX, not weakened.
+- **C filtered 1d:** same input after filtering => exactly 4 (no BINGX), `safe=true` when four same T00, `shouldAggregate` true, `aggregateAssetGroup` with 4 => evaluated 4.
+- **D stale eligible:** after BINGX filtering, make GATE one canonical day stale => `safe=false`, `horizonMismatch` GATE, aggregate NOT called.
+- **E off-grid eligible:** after filtering, make GATE off-grid 01:00 => `safe=false`, `offGrid` GATE, NOT called.
+- **F minExchanges independence:** 2 eligible/evaluable aligned with `minExchanges=3` => `NEUTRAL` (not fabricated LONG/SHORT), confirmation reflects 2.
+- **G no fake NEUTRAL:** mixed `cannot-evaluate`/`filtered` remains `cannot-evaluate` + `skipped` counts, not converted to NEUTRAL votes.
+- **H determinism:** same inputs => identical filtered/alignment/aggregate.
+- **I invariants:** eligibility pure no `CandleData`/`candleTime`/`CLOSED`/`lookahead`/`prisma`/`signal`; `CLOSED-only` still enforced via `evaluateSmartMoneyWithCandles` (`closed=false => cannot-evaluate`).
+
+**Regression (all green, strictly no || true):**
+- `test-smart-money-eligibility` 81/81
+- `test-smart-money-diagnostic` 95/95
+- `test-smart-money` 62/62
+- `test-smart-money-phase3c-fix` 40/40
+- `test-smc-phase3d-config` 70/70, `phase3d-b` 55/55, `phase3d-c` 91/91, `phase3d-d` 126/126
+- `test-smc-range` 50/50, `scoring` 63/63, `evaluate` 31/31, `admin-consistency` 84/84, etc.
+- `npx tsc --noEmit` — no new errors in changed Strategy-layer files (sandbox baseline has known implicit-any/JSX stub errors unrelated to this commit; our pure policy file type-checks with `skipLibCheck`)
+- `npm run build` — compilation succeeds (Next build fails only on missing stub prisma client in sandbox, same baseline)
+- `git diff --check` clean (trailing whitespace fixed)
+- `git merge-base --is-ancestor edf3732 HEAD` => 1 (NOT ancestor)
+
+**Safety confirmed:** NO DB writes, NO workers, NO candle mutation, NO Strategy mutation, NO Signal, NO Signal Engine, 1d Admin/API still disabled, `canAggregateSafely` still mandatory after eligibility.
+
+**Files changed (narrow):**
+- `lib/strategies/smart-money-eligibility.ts` (new, pure)
+- `scripts/smart-money-diagnostic.ts` (import + filter before alignment/aggregate)
+- `scripts/smart-money-readonly.ts` (same)
+- `scripts/test-smart-money-eligibility.ts` (new, 81 tests)
+- `docs/bingx-1d-alignment-audit.md` (wording correction: `Proven (observed)` vs `hypothesis UTC+8`)
+- `PROJECT_CONTEXT.md` (this §40; also audit wording remains hypothesis not proven)
+
+**Deliverable:** ONE commit exact parent `4a62758`, push only `arena/01a08b68-svechnoy-suslik`, STOP after ONE implementation commit.

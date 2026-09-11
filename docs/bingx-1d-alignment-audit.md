@@ -9,7 +9,7 @@
 
 ## 0. Executive Summary (proven, not speculation)
 
-**Proven root cause:** BingX Spot `GET /openApi/spot/v2/market/kline?interval=1d` returns a **real 24h exchange candle whose daily boundary is 00:00 UTC+8 = 16:00 UTC**, not 00:00 UTC. Our ingestion code does **not** introduce the offset — it faithfully stores `openTime = Number(row[0])` as given by the API. Therefore stored BingX `1d` rows are **internally regular 24h candles from 16:00→16:00 UTC**, not canonical UTC days with a timestamp bug.
+**Proven (observed):** BingX Spot `GET /openApi/spot/v2/market/kline?interval=1d` returns a **real 24h exchange candle whose daily boundary is observed as 16:00 UTC** in real PostgreSQL data, not 00:00 UTC. **Strong hypothesis (unproven without BingX docs/wire capture):** boundary corresponds to `00:00 UTC+8` (Asia/Shanghai) — `16:00 UTC = 00:00+08:00` arithmetic matches and is plausible for Asia-origin exchange, but documented contract is not yet quoted. Our ingestion code does **not** introduce the offset — it faithfully stores `openTime = Number(row[0])` as given by the API. Therefore stored BingX `1d` rows are **internally regular 24h candles from 16:00→16:00 UTC**, not canonical UTC days with a timestamp bug.
 
 **Consequence:** Multi-exchange `1d` aggregation with the other four exchanges (canonical 00:00 UTC grid) is unsafe and is correctly **REFUSED** by Phase 3E generic alignment guard (`offGrid + horizonMismatch`). `5m/15m/1h/4h` are unaffected — BingX is observed aligned on those grids and remains globally usable.
 
@@ -98,7 +98,7 @@ Checked `lib/exchanges/bingx.ts:172-176` — only three query params. No hidden 
 | **BYBIT** | `bybitInterval("1d") === "D"` | `GET /v5/market/kline?interval=D` — **Bybit docs: UTC** (category=spot, `D` = UTC day) | `openTime = Number(row[0])`, `closeTime = openTime+86400000-1` | `00:00:00Z` |
 | **GATE** | `"1d"` | `GET /api/v4/spot/candlesticks?interval=1d` — **Gate docs: UTC** | `openTime = Number(row[0])*1000`, `closeTime = openTime+86400000-1` | `00:00:00Z` |
 | **KUCOIN** | `"1day"` | `GET /api/v1/market/candles?type=1day` — **KuCoin docs: UTC** (with `startAt/endAt` in seconds) | `openTime = Number(row[0])*1000`, `closeTime = openTime+86400*1000-1` | `00:00:00Z` |
-| **BINGX** | `"1d"` | `GET /openApi/spot/v2/market/kline?interval=1d` — **BingX docs: likely UTC+8** (not UTC) | `openTime = Number(row[0])` verbatim, `closeTime = openTime+86400000-1` | **`16:00:00Z`** (`openTime % 86400000 === 57600000`) |
+| **BINGX** | `"1d"` | `GET /openApi/spot/v2/market/kline?interval=1d` — **Observed 16:00 UTC; hypothesis: BingX session likely UTC+8** (not UTC, pending docs/wire proof) | `openTime = Number(row[0])` verbatim, `closeTime = openTime+86400000-1` | **`16:00:00Z`** (`openTime % 86400000 === 57600000`) |
 
 **Key differentiator:** All five adapters **do the same** — they take `openTime` as given and derive `closeTime` locally with `+ duration -1`. None does timezone conversion. The **exchange-side definition** of what `interval=1d` means is what differs. Binance/Bybit/Gate/KuCoin define it as UTC day; BingX defines it as Asia session day. Our code's uniformity proves the divergence is **external**, not internal.
 
@@ -290,7 +290,7 @@ The generic guard already refuses `5/5` with BingX `1d` mixed in (since `offGrid
 
 ## 10. Proven Root Cause (concise, evidence-labeled)
 
-**Proven:** BingX Spot `1d` kline's `openTime` as returned by `GET /openApi/spot/v2/market/kline?interval=1d` is **16:00 UTC** (not `00:00 UTC`), while Binance/Bybit/Gate/KuCoin same endpoint with `1d` equivalent returns `00:00 UTC`. Our code stores it verbatim (`Number(row[0])` → `new Date(openTime)`), so the offset is **not** introduced by our code. The `16:00 UTC` boundary is byte-for-byte the exchange's definition of a daily candle.
+**Proven (observed, not docs contract):** BingX Spot `1d` kline's `openTime` as returned by `GET /openApi/spot/v2/market/kline?interval=1d` is **observed as 16:00 UTC** in real PostgreSQL data (not `00:00 UTC`), while Binance/Bybit/Gate/KuCoin same call returns `00:00 UTC`. Our code stores it verbatim (`Number(row[0])` → `new Date(openTime)`), so the offset is **not** introduced by our code. The `16:00 UTC` boundary is byte-for-byte the exchange's definition of a daily candle.
 
 **Evidence:**
 - `lib/exchanges/bingx.ts:172-251` — no timezone conversion, `openTime` verbatim.
@@ -493,7 +493,7 @@ const eligible = results.filter(r => isBingX1dExcluded(r.exchange, timeframe));
 
 | Question | Answer | Evidence | Hypothesis vs Proven |
 |---|---|---|---|
-| Why 16:00 UTC? | BingX defines `1d` as **Asia session day 00:00 CST (UTC+8) = 16:00 UTC** | `lib/exchanges/bingx.ts` stores `row[0]` verbatim, no shift; other exchanges same code path yield `00:00 UTC`; `16*3600000=57600000=8h` offset | Proven: API origin, not our code. Hypothesis: exact doc phrase “UTC+8” to be quoted from BingX docs + `curl` wire capture (next commit) |
+| Why 16:00 UTC? | **Observed** BingX `1d` boundary is **16:00 UTC** in real PostgreSQL data (vs 00:00 for other four); **hypothesis** is Asia session `00:00 CST (UTC+8) = 16:00 UTC` (8h offset `57600000`) — plausible but not yet documented by BingX docs/wire proof | `lib/exchanges/bingx.ts` stores `row[0]` verbatim, no shift; other exchanges same path yield `00:00 UTC` | Proven: observed 16:00 UTC + no shift in our ingestion (API origin). Hypothesis: exact session definition `UTC+8` to be quoted from docs + `curl` wire capture |
 | Which steps could have introduced it? | None — 7-step ingestion is pass-through (adapter → worker → upsert → DB). Intraday `5m/15m/1h/4h` control shows no global skew, isolating `1d` session definition. | `bingx.ts` lines 172-251, `sync.ts` `upsertCandles`, `@@unique([marketId,timeframe,openTime])` | Proven: no `+8h` in code |
 | Is stored OHLC a different window (A) or timestamp bug (B)? | **A — real 16:00→16:00 UTC window** (00:00→00:00 CST). OHLC is for that window, not a UTC day. | No shift code; `1d` isolated; `24h` continuity; OHLC divergence test will show `BINGX 16:00` ≠ `BINANCE 00:00` for same UTC date | Proven A, B disproven by code absence; live OHLC divergence to be recorded as VPS proof |
 | Why others are 00:00 UTC? | Binance/Bybit/Gate/KuCoin document **UTC** daily (`interval=1d/D/1day` = UTC midnight). | Adapter interval maps + observed `00:00Z` DB rows | Proven: cross-exchange differential |

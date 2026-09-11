@@ -52,6 +52,10 @@ import {
 } from "../lib/strategies/smart-money";
 import { aggregateAssetGroup } from "../lib/strategies/runtime";
 import { checkCandleAlignment, canAggregateSafely } from "../lib/strategies/alignment";
+import {
+  isSmartMoneyExchangeEligible,
+  filterSmartMoneyEligibleResults,
+} from "../lib/strategies/smart-money-eligibility";
 import { fileURLToPath } from "node:url";
 import { parseSmartMoneyArgs, validateCliArgs } from "./smart-money-cli-args";
 
@@ -353,9 +357,23 @@ async function runSymbolDiagnostic(symbol: string, timeframe: SmcTimeframe): Pro
     }
   }
 
-  // Alignment guard before aggregation — generic for 5m/15m/1h/4h/1d
+  // Eligibility (Strategy-layer, Option A narrow): BINGX ineligible ONLY for 1d aggregation.
+  // Per-exchange evaluation above remains visible for all exchanges; only aggregation uses eligible subset.
+  const eligibleResults = filterSmartMoneyEligibleResults(results, timeframe);
+  if (eligibleResults.length !== results.length) {
+    const excluded = results.filter(
+      (r) => !isSmartMoneyExchangeEligible(r.exchange, timeframe)
+    );
+    console.log(
+      `\n  eligibility: excluded ${excluded.map((e) => e.exchange).join(", ")} for ${timeframe} (Smart Money policy: BINGX ineligible for 1d; ${eligibleResults.length}/${results.length} eligible)`
+    );
+  } else {
+    console.log(`\n  eligibility: all ${results.length} markets eligible for ${timeframe} (BINGX eligible on 5m/15m/1h/4h)`);
+  }
+
+  // Alignment guard before aggregation — generic for 5m/15m/1h/4h/1d (after eligibility)
   // candleTime is latest CLOSED candle openTime; same timeframe + same candleTime => same interval [candleTime, candleTime+tf)
-  const alignment = checkCandleAlignment(results, timeframe);
+  const alignment = checkCandleAlignment(eligibleResults, timeframe);
   console.log(`\n=== Выравнивание окон (alignment) ${timeframe} ===`);
   if (alignment.referenceCandleTime) {
     console.log(`  referenceCandleTime: ${alignment.referenceCandleTime.toISOString()} (all evaluated must equal this)`);
@@ -388,7 +406,7 @@ async function runSymbolDiagnostic(symbol: string, timeframe: SmcTimeframe): Pro
     if (alignment.horizonMismatch.length > 0) console.log(`  horizonMismatch: ${alignment.horizonMismatch.map((h) => `${h.exchange} ${h.candleTime.toISOString()}`).join(", ")}`);
     console.log(`  Действие: per-exchange результаты выше валидны, но multi-exchange агрегация НЕ вычисляется (aggregateAssetGroup не вызван).`);
   } else {
-    const agg = aggregateAssetGroup(asset.symbol, timeframe, SMART_MONEY_SLUG, strategyVersion, results, minExchanges);
+    const agg = aggregateAssetGroup(asset.symbol, timeframe, SMART_MONEY_SLUG, strategyVersion, eligibleResults, minExchanges);
     console.log(`\n=== Агрегация ${asset.symbol} ${timeframe} ${SMART_MONEY_SLUG} v${strategyVersion} ===`);
     console.log(`  direction: ${agg.direction} ${agg.conflict ? "(КОНФЛИКТ)" : ""}`);
     console.log(`  votes: LONG ${agg.longVotes} SHORT ${agg.shortVotes} NEUTRAL ${agg.neutralVotes} evaluated ${agg.evaluated} skipped ${agg.skipped}`);
