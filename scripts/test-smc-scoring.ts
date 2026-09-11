@@ -770,6 +770,246 @@ function checkInvariant(
   );
 }
 
+/* ---------- 25b–27b. RANGE_POSITION outside — CURRENT SEMANTICS (no clamp, scoring still awards) ---------- */
+/* Regression closing audit TODO: verifies that outsideRange=true still scores via zone.
+ * Observed VPS: 5m ≈ -0.91 (DISCOUNT) and 1d ≈ 2.236..2.242 (PREMIUM) both currently award.
+ * Representation unbounded is intentional; scoring ignores outsideRange gate.
+ * Future lifecycle (maxAge / N-bars-outside / no scoring outside) is product hypothesis for Backtest/OOS, not defect.
+ */
+{
+  // A) active range: position <0, outsideRange=true, zone=DISCOUNT => LONG +10, SHORT 0
+  const outsideDiscount = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      range: {
+        current: {} as never,
+        priceContext: {
+          price: 100,
+          position: -0.91,
+          eqBand: 0.02,
+          zone: "DISCOUNT",
+          outsideRange: true
+        }
+      }
+    },
+    cfg()
+  );
+  ok(
+    outsideDiscount.longScore === 10 &&
+      reasonOf(outsideDiscount.reasons, "RANGE_POSITION").longPoints === 10 &&
+      reasonOf(outsideDiscount.reasons, "RANGE_POSITION").shortPoints === 0 &&
+      outsideDiscount.shortScore === 0,
+    "25b: outside DISCOUNT pos -0.91 (outsideRange=true, zone DISCOUNT) => LONG +10, SHORT 0 (CURRENT SEMANTICS, no clamp)"
+  );
+  ok(
+    reasonOf(outsideDiscount.reasons, "RANGE_POSITION").value !== null &&
+      reasonOf(outsideDiscount.reasons, "RANGE_POSITION").value!.includes("-0.91") &&
+      !reasonOf(outsideDiscount.reasons, "RANGE_POSITION").value!.includes("pos=0.000000"),
+    "25c: outside DISCOUNT payload remains observable (-0.91 not clamped to 0/1)"
+  );
+
+  const outsideDiscountExtreme = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      range: {
+        current: {} as never,
+        priceContext: {
+          price: 100,
+          position: -2.0,
+          eqBand: 0.02,
+          zone: "DISCOUNT",
+          outsideRange: true
+        }
+      }
+    },
+    cfg()
+  );
+  ok(
+    outsideDiscountExtreme.longScore === 10 &&
+      reasonOf(outsideDiscountExtreme.reasons, "RANGE_POSITION").longPoints === 10,
+    "25d: outside DISCOUNT pos -2.0 => still LONG +10 (unbounded preserved)"
+  );
+
+  // B) active range: position >1, outsideRange=true, zone=PREMIUM => SHORT +10, LONG 0
+  const outsidePremium = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      range: {
+        current: {} as never,
+        priceContext: {
+          price: 100,
+          position: 2.24,
+          eqBand: 0.02,
+          zone: "PREMIUM",
+          outsideRange: true
+        }
+      }
+    },
+    cfg()
+  );
+  ok(
+    outsidePremium.shortScore === 10 &&
+      reasonOf(outsidePremium.reasons, "RANGE_POSITION").shortPoints === 10 &&
+      reasonOf(outsidePremium.reasons, "RANGE_POSITION").longPoints === 0 &&
+      outsidePremium.longScore === 0,
+    "26b: outside PREMIUM pos 2.24 (outsideRange=true, zone PREMIUM) => SHORT +10, LONG 0 (CURRENT SEMANTICS)"
+  );
+  ok(
+    reasonOf(outsidePremium.reasons, "RANGE_POSITION").value !== null &&
+      reasonOf(outsidePremium.reasons, "RANGE_POSITION").value!.includes("2.24") &&
+      !reasonOf(outsidePremium.reasons, "RANGE_POSITION").value!.includes("pos=1.000000"),
+    "26c: outside PREMIUM payload 2.24 not clamped to 1"
+  );
+
+  // B2) VPS real 1d 2.236..2.242
+  const outsidePremium236 = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      range: {
+        current: {} as never,
+        priceContext: {
+          price: 100,
+          position: 2.236,
+          eqBand: 0.02,
+          zone: "PREMIUM",
+          outsideRange: true
+        }
+      }
+    },
+    cfg()
+  );
+  ok(
+    outsidePremium236.shortScore === 10 &&
+      reasonOf(outsidePremium236.reasons, "RANGE_POSITION").shortPoints === 10,
+    "26d: outside PREMIUM pos 2.236 VPS 1d example => SHORT +10"
+  );
+
+  const outsidePremium242 = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      range: {
+        current: {} as never,
+        priceContext: {
+          price: 100,
+          position: 2.242,
+          eqBand: 0.02,
+          zone: "PREMIUM",
+          outsideRange: true
+        }
+      }
+    },
+    cfg()
+  );
+  ok(outsidePremium242.shortScore === 10, "26e: outside PREMIUM pos 2.242 VPS => SHORT +10");
+
+  // Also verify exactly configured weight via custom weight 7 (keep sum 100: 10→7 -3 + confluence 5→8 +3)
+  const customWeight = cfg({}, { rangePosition: 7, confluence: 8 });
+  const outsideDiscountCustom = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      range: {
+        current: {} as never,
+        priceContext: {
+          price: 100,
+          position: -0.91,
+          eqBand: 0.02,
+          zone: "DISCOUNT",
+          outsideRange: true
+        }
+      }
+    },
+    customWeight
+  );
+  ok(
+    reasonOf(outsideDiscountCustom.reasons, "RANGE_POSITION").longPoints === 7 &&
+      outsideDiscountCustom.longScore === 7,
+    "25e: outside DISCOUNT with custom weight 7 => LONG +7 (exactly configured weight)"
+  );
+  const outsidePremiumCustom = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      range: {
+        current: {} as never,
+        priceContext: {
+          price: 100,
+          position: 2.24,
+          eqBand: 0.02,
+          zone: "PREMIUM",
+          outsideRange: true
+        }
+      }
+    },
+    customWeight
+  );
+  ok(
+    reasonOf(outsidePremiumCustom.reasons, "RANGE_POSITION").shortPoints === 7 &&
+      outsidePremiumCustom.shortScore === 7,
+    "26f: outside PREMIUM custom 7 => SHORT +7 (exactly configured weight)"
+  );
+
+  // D) inside-range remains unchanged (re-assert)
+  const insideDiscount = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      range: {
+        current: {} as never,
+        priceContext: {
+          price: 100,
+          position: 0.2,
+          eqBand: 0.02,
+          zone: "DISCOUNT",
+          outsideRange: false
+        }
+      }
+    },
+    cfg()
+  );
+  ok(
+    insideDiscount.longScore === 10 &&
+      reasonOf(insideDiscount.reasons, "RANGE_POSITION").longPoints === 10,
+    "25f: inside DISCOUNT 0.2 still LONG +10 (unchanged)"
+  );
+  const insidePremium = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      range: {
+        current: {} as never,
+        priceContext: {
+          price: 100,
+          position: 0.8,
+          eqBand: 0.02,
+          zone: "PREMIUM",
+          outsideRange: false
+        }
+      }
+    },
+    cfg()
+  );
+  ok(
+    insidePremium.shortScore === 10 &&
+      reasonOf(insidePremium.reasons, "RANGE_POSITION").shortPoints === 10,
+    "26g: inside PREMIUM 0.8 still SHORT +10 (unchanged)"
+  );
+  const insideEq = evaluateSmcFromFacts(
+    {
+      ...baseFacts(),
+      range: {
+        current: {} as never,
+        priceContext: {
+          price: 100,
+          position: 0.5,
+          eqBand: 0.02,
+          zone: "EQUILIBRIUM",
+          outsideRange: false
+        }
+      }
+    },
+    cfg()
+  );
+  ok(insideEq.longScore === 0 && insideEq.shortScore === 0, "27b: inside EQUILIBRIUM 0.5 still 0 (unchanged)");
+}
+
+
 /* ---------- 28–29. CONFLUENCE ---------- */
 
 {

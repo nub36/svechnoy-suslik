@@ -2291,7 +2291,16 @@ Public: `/articles`, `/articles/[slug]`
 - edf3732 NOT ancestor
 - **Do not claim all Top-100 assets have multi-TF history** — timeframe runtime/alignment verified on BTC across 5 exchanges; availability for each asset still depends on stored CLOSED history.
 
-TODO/AUDIT before final Smart Money acceptance — RANGE_POSITION: during real diagnostics observed rangePosition values outside [0,1], e.g. 5m pos ≈ -0.91, 1d pos ≈ 2.24. No math change in this commit. Before final acceptance, verify dealing-range lifecycle/invalidation semantics when price is outside active range — determine whether outside-range position is intended or range should have been invalidated/replaced.
+RANGE_POSITION CURRENT SEMANTICS — CLOSED/UNDERSTOOD (11.09.2026, this commit — TEST/DOC ONLY, no runtime change):
+During real VPS diagnostics observed: 5m historically pos ≈ -0.91 (DISCOUNT) and 1d after Option A pos ≈ 2.236..2.242 (PREMIUM). Verified now by `scripts/test-smc-scoring.ts` outside-range regression:
+
+A) REPRESENTATION — VERIFIED (intended): `position=(price-low)/(high-low)` WITHOUT clamp (`range.ts:13-14,334-340` `БЕЗ clamp`, `outsideRange=position<0||>1`); `scripts/test-smc-range.ts:686-750` explicitly proves `1.01 outsideRange=true` and `-0.01 outsideRange=true` без clamp; DO NOT CLAMP.
+
+B) CURRENT SCORING — VERIFIED + REGRESSION TESTED (preserve exact): `scoring.ts:340-360` ignores `outsideRange` as gate, `zone` still decides: `DISCOUNT (<0.48) → LONG +10`, `PREMIUM (>0.52) → SHORT +10`; therefore outside DISCOUNT/PREMIUM still receive configured `RANGE_POSITION` directional points. New `test-smc-scoring.ts` 25b–27b proves: pos -0.91 DISCOUNT => LONG+10 (value -0.91 not clamped), pos 2.236..2.242 PREMIUM => SHORT+10 (value 2.24 not clamped), custom weight 7 => exactly 7, inside 0.2/0.5/0.8 unchanged. This is CURRENT behavior, not profitability claim.
+
+C) FUTURE PRODUCT HYPOTHESIS — NOT decided, moved to Backtest/OOS roadmap: whether outside ranges should stop scoring or expire (e.g. no scoring outside, N-bars-outside invalidation, maxAge) is NOT decided; must be evaluated by Backtest / out-of-sample before changing trading semantics. Not an unresolved correctness defect. Do NOT change `lib/smc/range.ts` / `lib/smc/scoring.ts` / `lib/smc/evaluate.ts` now; expected production diff NONE.
+
+No DB/worker/Signal/Prisma change; `lib/smc/*` math preserved.
 
 ---
 Единый источник правды — этот PROJECT_CONTEXT.md. docs/ROADMAP.md удалён (0b2be00 → этот commit).
@@ -2318,8 +2327,8 @@ TODO/AUDIT before final Smart Money acceptance — RANGE_POSITION: during real d
 
 3. **RANGE_POSITION (критично, без clamp — уточнено после VPS review):** observed `5m ≈ -0.91 / 1d ≈ 2.24`.
    - **A) REPRESENTATION — CONFIRMED / TESTED:** `position=(price-low)/(high-low)` **не clamp** (`range.ts:13-14,334-340` `БЕЗ clamp`, `outsideRange=position<0||>1`); `scripts/test-smc-range.ts:686-750` явно тестирует `1.01 outsideRange=true без clamp` и `-0.01 outsideRange=true без clamp`.
-   - **B) SCORING — CONFIRMED:** `scoring.ts:340` игнорирует `outsideRange`, зона → `DISCOUNT (<0.48) → LONG`, `PREMIUM (>0.52) → SHORT`; поэтому текущая реализация **начисляет RANGE_POSITION и вне [low,high]**. Тесты `scripts/test-smc-scoring.ts:320-360` покрывают только `0.2/0.8/0.5 outsideRange=false`; **outside scoring не верифицирован тестами как желаемая семантика**.
-   - **C) PRODUCT / LIFECYCLE — NOT YET DECIDED:** старый active range остаётся scoring-релевантным после выхода цены за [low,high] (lifecycle без `maxAge`/price-invalidation, только `CHOCH`/новый `BOS` закрывают — `range.ts:278-290`). Нужно явное решение (maxAge / “N баров вне → expired” vs оставить breakout) + backtest. **Не clamp**.
+   - **B) SCORING — VERIFIED + REGRESSION (this commit, TEST/DOC ONLY):** `scoring.ts:340-360` игнорирует `outsideRange`, зона → `DISCOUNT (<0.48) → LONG + weight`, `PREMIUM (>0.52) → SHORT + weight`; поэтому текущая реализация **детерминированно начисляет RANGE_POSITION и вне [low,high]** (вне-диапазон PREMIUM → SHORT, DISCOUNT → LONG). `scripts/test-smc-scoring.ts:320-360` покрывает `0.2/0.8/0.5 outsideRange=false`; **регрессия 25b–27b (this commit) верифицирует outside: 5m -0.91 → DISCOUNT LONG+10 (payload -0.91 без clamp), 1d 2.236..2.242 → PREMIUM SHORT+10 (payload 2.24 без clamp), вес 7 → ровно 7 — текущее поведение, не claim прибыльности**.
+   - **C) PRODUCT / LIFECYCLE — FUTURE HYPOTHESIS → Backtest/OOS (NOT decided here):** старый active range остаётся scoring-релевантным после выхода цены за [low,high] (lifecycle без `maxAge`/price-invalidation, только `CHOCH`/новый `BOS` закрывают — `range.ts:278-290`). Явного решения `maxAge` / “N баров вне → expired” vs оставить breakout — нет; гипотеза перенесена в Backtest / out-of-sample roadmap. **Не clamp, не менять `lib/smc/range.ts` / `scoring.ts` сейчас**.
 
 4. **Safety invariants (не конфигурируемы):** CLOSED-only / no-lookahead / детерминизм / cannot-evaluate / chronology / exact grid+same horizon / NO Signal writes / `edf3732` NOT ancestor + plateau `===`, FSM-phase, FVG/OB state sets, `SMCTIMEFRAME_MS`.
 
@@ -2706,7 +2715,7 @@ Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC*
 **Preserved:**
 - `lib/strategies/smart-money-eligibility.ts` policy unchanged (BINGX 1d ineligible only)
 - `lib/strategies/alignment.ts` unchanged (generic canonical grid + horizon)
-- `aggregateAssetGroup` / `lib/smc/*` / scoring / RANGE_POSITION math unchanged — observed RANGE_POSITION on four eligible 1d markets `pos ≈ 2.236..2.242` still awards `SHORT +10` (outsideRange true, scored via zone, no clamp — lifecycle remains audit-open, see §34/35-40).
+- `aggregateAssetGroup` / `lib/smc/*` / scoring / RANGE_POSITION math unchanged — observed RANGE_POSITION on four eligible 1d markets `pos ≈ 2.236..2.242` still awards `SHORT +10` (outsideRange true, scored via zone, no clamp — CURRENT SEMANTICS CLOSED/UNDERSTOOD, lifecycle hypothesis → Backtest/OOS, see §33/34).
 
 **Real VPS BTC 1d Option A verification (factual, minimal):**
 - 5 per-exchange evaluable (as above, BINGX OFF_GRID)
