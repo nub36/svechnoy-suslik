@@ -1970,9 +1970,13 @@ VPS browser acceptance 9bf14ce: пункт «Стратегии»
 - no-lookahead: проекция при H не видит свечи > H; факты с
   confirmedAt > engineAsOf не показываются; evaluation с asOf ≠
   engineAsOf отклоняется (SmcProjectionError).
-- WHY→factIds: только exact existing key mapping (значения OB/FVG
-  reasons — deterministic ключи движка; confluence — ровно те же
-  выбранные факты). Exact mapping нет → [].
+- WHY→factIds: только exact existing key mapping — точные joins
+  сейчас ТОЛЬКО FVG/OB (reason.value === deterministic ключ движка).
+  OB_FVG_CONFLUENCE не содержит structured exact IDs → factIds=[]
+  всегда (никакой projection-level реконструкции соседних reasons).
+  Exact mapping нет → []. Будущий exact confluence-highlighting
+  возможен только после отдельного изменения SMC representation
+  (lib/smc/scoring.ts сейчас НЕ меняется).
 - Range position НЕ clamp: position может быть <0/>1, outsideRange
   сохраняется.
 - Deterministic SMC-идентификаторы (SMC1|…) проходят в DTO без

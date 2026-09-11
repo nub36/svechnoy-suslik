@@ -365,7 +365,7 @@ function reasonsDto(evaluation: SmcEvaluation): SmcOverlayReasonDto[] {
     shortPoints: r.shortPoints,
     maxPoints: r.maxPoints,
     value: r.value,
-    factIds: scoreReasonFactIds(r, evaluation.reasons),
+    factIds: scoreReasonFactIds(r),
   }));
 }
 

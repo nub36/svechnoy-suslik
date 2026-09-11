@@ -428,39 +428,49 @@ async function main(): Promise<void> {
     ) => ({ code, value, longPoints, shortPoints });
 
     eq(
-      scoreReasonFactIds(why("SWING_ORDER_BLOCK", obKey, 15, 0), []),
+      scoreReasonFactIds(why("SWING_ORDER_BLOCK", obKey, 15, 0)),
       [obKey],
-      "factIds: SWING_ORDER_BLOCK value === exact ob.key"
+      "factIds: exact swing OB key → [key]"
     );
     eq(
-      scoreReasonFactIds(why("INTERNAL_ORDER_BLOCK", obKey, 5, 0), []),
+      scoreReasonFactIds(why("INTERNAL_ORDER_BLOCK", obKey, 5, 0)),
       [obKey],
-      "factIds: INTERNAL_ORDER_BLOCK value === exact ob.key"
+      "factIds: exact internal OB key → [key]"
     );
     eq(
-      scoreReasonFactIds(why("FVG", fvgKey, 0, 10), []),
+      scoreReasonFactIds(why("FVG", fvgKey, 0, 10)),
       [fvgKey],
-      "factIds: FVG value === exact fvg.key"
+      "factIds: exact FVG key → [key]"
     );
     eq(
-      scoreReasonFactIds(why("SWING_ORDER_BLOCK", null), []),
+      scoreReasonFactIds(why("SWING_ORDER_BLOCK", null)),
       [],
       "factIds: OB reason без value → []"
     );
     eq(
-      scoreReasonFactIds(why("FVG", null), []),
+      scoreReasonFactIds(why("FVG", null)),
       [],
       "factIds: FVG reason без value → []"
     );
     eq(
-      scoreReasonFactIds(why("SWING_ORDER_BLOCK", fvgKey), []),
+      scoreReasonFactIds(why("SWING_ORDER_BLOCK", fvgKey)),
       [],
-      "factIds: OB reason с FVG-ключом (чужой формат) → []"
+      "factIds: OB reason с FVG-ключом (чужой формат, не exact) → []"
     );
     eq(
-      scoreReasonFactIds(why("FVG", obKey), []),
+      scoreReasonFactIds(why("FVG", obKey)),
       [],
-      "factIds: FVG reason с OB-ключом (чужой формат) → []"
+      "factIds: FVG reason с OB-ключом (чужой формат, не exact) → []"
+    );
+    eq(
+      scoreReasonFactIds(why("SWING_ORDER_BLOCK", "OB|1h|up|swing|не-ключ")),
+      [],
+      "factIds: malformed/non-key OB-строка (без exact SMC1|OB| формата) → []"
+    );
+    eq(
+      scoreReasonFactIds(why("FVG", "FVG|1h|down|1767290400000")),
+      [],
+      "factIds: malformed/non-key FVG-строка (без exact SMC1|FVG| формата) → []"
     );
     for (const code of [
       "SWING_TREND",
@@ -471,48 +481,87 @@ async function main(): Promise<void> {
       "DIRECTION_CONFLICT",
     ]) {
       eq(
-        scoreReasonFactIds(why(code, "TREND_UP"), []),
+        scoreReasonFactIds(why(code, "TREND_UP")),
         [],
         `factIds: ${code} не является exact ключом → []`
       );
     }
     eq(
-      scoreReasonFactIds(why("LIQUIDITY_SWEEP", "SELL_SIDE @2026-01-01T00:00:00.000Z", 10, 0), []),
+      scoreReasonFactIds(why("LIQUIDITY_SWEEP", "SELL_SIDE @2026-01-01T00:00:00.000Z", 10, 0)),
       [],
       "factIds: LIQUIDITY_SWEEP value (side@time) не восстанавливает level key → []"
     );
     eq(
-      scoreReasonFactIds(why("SOME_UNKNOWN_WHY", fvgKey, 1, 0), []),
+      scoreReasonFactIds(why("SOME_UNKNOWN_WHY", fvgKey, 1, 0)),
       [],
       "factIds: неизвестный reason-код → []"
     );
 
-    // confluence: ровно те же выбранные факты (swing preferred, потом internal)
+    // OB_FVG_CONFLUENCE: НИКОГДА не получает reconstructed IDs.
+    // Сам reason не содержит structured exact IDs → [] всегда,
+    // даже с набранными points и даже если value кто-то подложит.
     eq(
-      scoreReasonFactIds(why("OB_FVG_CONFLUENCE", null, 5, 0), [
-        why("SWING_ORDER_BLOCK", obKey, 15, 0),
-        why("INTERNAL_ORDER_BLOCK", obKey + "|i", 5, 0),
-        why("FVG", fvgKey, 10, 0),
-      ]),
-      [obKey, fvgKey],
-      "factIds: confluence с points = [выбранный swing OB key, FVG key]"
+      scoreReasonFactIds(why("OB_FVG_CONFLUENCE", null, 5, 0)),
+      [],
+      "factIds: confluence с points → [] (нет exact ID в самом reason)"
     );
     eq(
-      scoreReasonFactIds(why("OB_FVG_CONFLUENCE", null, 5, 0), [
-        why("SWING_ORDER_BLOCK", null, 0, 0),
-        why("INTERNAL_ORDER_BLOCK", obKey + "|i", 5, 0),
-        why("FVG", fvgKey, 10, 0),
-      ]),
-      [obKey + "|i", fvgKey],
-      "factIds: confluence при отсутствии swing OB = [internal OB key, FVG key]"
-    );
-    eq(
-      scoreReasonFactIds(why("OB_FVG_CONFLUENCE", null, 0, 0), [
-        why("SWING_ORDER_BLOCK", obKey, 15, 0),
-        why("FVG", fvgKey, 10, 0),
-      ]),
+      scoreReasonFactIds(why("OB_FVG_CONFLUENCE", null, 0, 0)),
       [],
       "factIds: confluence без points → []"
+    );
+    eq(
+      scoreReasonFactIds(why("OB_FVG_CONFLUENCE", fvgKey, 5, 0)),
+      [],
+      "factIds: confluence с подложенным FVG-ключом в value → [] (не реконструируем)"
+    );
+    eq(
+      scoreReasonFactIds(why("OB_FVG_CONFLUENCE", obKey, 5, 0)),
+      [],
+      "factIds: confluence с подложенным OB-ключом в value → [] (не реконструируем)"
+    );
+
+    // Интеграционный гарант: рядом лежат OB и FVG reasons с точными
+    // ключами — confluence в DTO всё равно НЕ получает linkage.
+    const evalConfluence = fakeEvaluation({
+      longScore: 25,
+      shortScore: 0,
+      direction: "LONG",
+      reasons: [
+        { code: "SWING_TREND", label: "t", longPoints: 20, shortPoints: 0, maxPoints: 20, value: "TREND_UP" },
+        { code: "SWING_ORDER_BLOCK", label: "o", longPoints: 15, shortPoints: 0, maxPoints: 15, value: obKey },
+        { code: "INTERNAL_ORDER_BLOCK", label: "o", longPoints: 5, shortPoints: 0, maxPoints: 5, value: obKey + "|i" },
+        { code: "FVG", label: "f", longPoints: 0, shortPoints: 10, maxPoints: 10, value: fvgKey },
+        { code: "OB_FVG_CONFLUENCE", label: "c", longPoints: 5, shortPoints: 0, maxPoints: 5, value: null },
+      ],
+    });
+    const dtoConfluence = projectMarketOverlay(
+      META_1H,
+      evalConfluence,
+      AS_OF_MS - HOUR,
+      AS_OF_MS
+    );
+    const reasonOf = (code: string) =>
+      dtoConfluence.reasons.find((r) => r.code === code);
+    eq(
+      reasonOf("SWING_ORDER_BLOCK")?.factIds,
+      [obKey],
+      "confluence-guarantee: соседний swing OB получил свой exact key"
+    );
+    eq(
+      reasonOf("INTERNAL_ORDER_BLOCK")?.factIds,
+      [obKey + "|i"],
+      "confluence-guarantee: соседний internal OB получил свой exact key"
+    );
+    eq(
+      reasonOf("FVG")?.factIds,
+      [fvgKey],
+      "confluence-guarantee: соседний FVG получил свой exact key"
+    );
+    eq(
+      reasonOf("OB_FVG_CONFLUENCE")?.factIds,
+      [],
+      "confluence-guarantee: OB_FVG_CONFLUENCE → [] ПРИ НАЛИЧИИ соседних OB+FVG reasons (никакой reconstructed linkage)"
     );
   }
 
@@ -719,6 +768,17 @@ async function main(): Promise<void> {
       liquidityReason !== undefined && liquidityReason.factIds.length === 0,
       "factIds (real): LIQUIDITY_SWEEP без exact key → []"
     );
+    const confluenceReason = overlay.reasons.find(
+      (r) => r.code === "OB_FVG_CONFLUENCE"
+    );
+    ok(
+      confluenceReason !== undefined,
+      "factIds (real): OB_FVG_CONFLUENCE reason присутствует в DTO"
+    );
+    ok(
+      confluenceReason !== undefined && confluenceReason.factIds.length === 0,
+      "factIds (real): OB_FVG_CONFLUENCE → [] (никакого reconstructed linkage)"
+    );
 
     // агрегат одного рынка
     const agg = projection.aggregate;
@@ -787,6 +847,19 @@ async function main(): Promise<void> {
       agg.perExchange.map((s) => s.exchange),
       NAMES,
       "5-market: perExchange в порядке входа"
+    );
+    ok(
+      projection.overlays.every((o) =>
+        o.reasons
+          .filter((r) => r.code === "OB_FVG_CONFLUENCE")
+          .every((r) => r.factIds.length === 0)
+      ) &&
+        projection.overlays.every(
+          (o) =>
+            o.reasons.filter((r) => r.code === "OB_FVG_CONFLUENCE").length ===
+            1
+        ),
+      "5-market: у каждой биржи ровно один OB_FVG_CONFLUENCE и его factIds === []"
     );
 
     // projection == существующая Strategy-оценка на том же H (5 рынков)

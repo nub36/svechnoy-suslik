@@ -118,19 +118,17 @@ function isExactFvgKey(value: string | null): value is string {
  *  - SWING_ORDER_BLOCK / INTERNAL_ORDER_BLOCK: reason.value === ob.key
  *    (существующий deterministic ID) → [value]; иначе [].
  *  - FVG: reason.value === fvg.key → [value]; иначе [].
- *  - OB_FVG_CONFLUENCE с набранными points: scoring документирует, что
- *    confluence строится на ТЕХ ЖЕ выбранных фактах, чьи ключи лежат в
- *    value компонентов SWING_ORDER_BLOCK (приоритетно) / INTERNAL_ORDER_BLOCK
- *    и FVG того же набора reasons ⇒ [obKey, fvgKey] только из этих value.
+ *  - OB_FVG_CONFLUENCE → [] ВСЕГДА: сам reason не содержит structured
+ *    exact IDs (value = null), а реконструкция соседних OB/FVG reasons
+ *    на уровне проекции ЗАПРЕЩЕНА контрактом (projection-level
+ *    причинная эвристика). Будущий exact confluence-highlighting
+ *    возможен только после отдельного изменения SMC representation.
  *  - все остальные коды (SWING_TREND, RECENT_SWING_BOS, INTERNAL_TREND,
  *    LIQUIDITY_SWEEP, RANGE_POSITION, DIRECTION_CONFLICT) и любые
  *    НЕИЗВЕСТНЫЕ коды → []: их value не является exact ключом факта
  *    (`BOS:up`, `pos=…`, `SELL_SIDE @…` — ключ из этого не восстанавливается).
  */
-export function scoreReasonFactIds(
-  reason: SmcWhyReasonShape,
-  allReasons: ReadonlyArray<SmcWhyReasonShape>
-): string[] {
+export function scoreReasonFactIds(reason: SmcWhyReasonShape): string[] {
   switch (reason.code) {
     case "SWING_ORDER_BLOCK":
     case "INTERNAL_ORDER_BLOCK":
@@ -139,31 +137,7 @@ export function scoreReasonFactIds(
     case "FVG":
       return isExactFvgKey(reason.value) ? [reason.value] : [];
 
-    case "OB_FVG_CONFLUENCE": {
-      if (reason.longPoints + reason.shortPoints <= 0) {
-        return [];
-      }
-      const swingOb = allReasons.find(
-        (r) => r.code === "SWING_ORDER_BLOCK"
-      );
-      const internalOb = allReasons.find(
-        (r) => r.code === "INTERNAL_ORDER_BLOCK"
-      );
-      const fvg = allReasons.find((r) => r.code === "FVG");
-      const obKey = isExactObKey(swingOb?.value ?? null)
-        ? swingOb!.value
-        : isExactObKey(internalOb?.value ?? null)
-          ? internalOb!.value
-          : null;
-      const fvgKey = isExactFvgKey(fvg?.value ?? null)
-        ? fvg!.value
-        : null;
-      const ids: string[] = [];
-      if (obKey !== null) ids.push(obKey);
-      if (fvgKey !== null) ids.push(fvgKey);
-      return ids;
-    }
-
+    case "OB_FVG_CONFLUENCE":
     default:
       return [];
   }
