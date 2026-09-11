@@ -23,6 +23,8 @@ import {
   validateSmartMoneyConfig,
   validateSmartMoneyRuntime,
   evaluateSmartMoneyWithCandles,
+  evaluateMarketsAtCommonHorizon,
+  formatCommonHorizonDiagnostics,
   loadSmartMoneyCandles,
   applySmartMoneyFilters,
   DEFAULT_SMART_MONEY_FILTERS,
@@ -34,6 +36,9 @@ import {
   isSmartMoneyExchangeEligible,
   filterSmartMoneyEligibleResults,
 } from "../lib/strategies/smart-money-eligibility";
+import {
+  selectCommonClosedHorizon,
+} from "../lib/strategies/common-horizon";
 import { fileURLToPath } from "node:url";
 import { validateTrendSuslikConfig } from "../lib/strategies/config";
 
@@ -718,27 +723,40 @@ async function runSymbolMode(symbol: string, timeframe: SmcTimeframe, diagnostic
   console.log(`Фильтры: top500Only=${filters.top500Only}, minimumQuoteVolume24h=${filters.minimumQuoteVolume24h}`);
   console.log(`Свечи: последние 500 CLOSED (DESC take 500 → reverse)`);
 
-  const results: import("../lib/strategies/runtime").MarketStrategyResult[] = [];
+  // --- Collect marketsData for common horizon (FIX for transient ingestion race, B) ---
+  // First, load CLOSED candles for each market (without yet evaluating at latest).
+  // We will evaluate at latest for diagnostics, then at common horizon for strict aggregation.
+  const marketsData: Array<{
+    meta: {
+      exchange: string;
+      market: string;
+      marketId: number;
+      timeframe: import("../lib/smc/types").SmcTimeframe;
+      assetRank: number | null;
+      quoteVolume24h: number | null;
+    };
+    candles: import("../lib/smc/types").SmcRawCandle[];
+    resultAtLatest: import("../lib/strategies/runtime").MarketStrategyResult;
+  }> = [];
 
   for (const m of markets) {
     const meta = {
       exchange: m.exchange as string,
       market: m.exchangeSymbol as string,
       marketId: m.id as number,
-      timeframe,
+      timeframe: timeframe as import("../lib/smc/types").SmcTimeframe,
       assetRank: asset.rank as number | null,
       quoteVolume24h: m.quoteVolume24h as number | null,
     };
 
     const candles = await loadSmartMoneyCandles(prisma, m.id, timeframe);
-    const result = evaluateSmartMoneyWithCandles(meta, candles, smcConfig, filters);
-    results.push(result);
+    const resultAtLatest = evaluateSmartMoneyWithCandles(meta, candles, smcConfig, filters);
+    marketsData.push({ meta, candles, resultAtLatest });
 
     console.log(`\n— ${m.exchange} ${m.exchangeSymbol} (id ${m.id}) —`);
     console.log(`  candles: ${candles.length} CLOSED (ASC после fetch)`);
     if (candles.length > 0) {
       console.log(`  last candle: ${candles[candles.length - 1].openTime.toISOString()} close=${candles[candles.length - 1].close}`);
-      // Проверка ASC: каждый openTime > предыдущего
       let asc = true;
       for (let i = 1; i < candles.length; i++) {
         if (candles[i].openTime.getTime() <= candles[i - 1].openTime.getTime()) {
@@ -748,39 +766,66 @@ async function runSymbolMode(symbol: string, timeframe: SmcTimeframe, diagnostic
       }
       console.log(`  ASC check: ${asc ? "OK" : "FAIL"}`);
     }
-    if (result.status === "evaluated") {
-      console.log(`  evaluable: true`);
-      console.log(`  longScore: ${result.longScore} shortScore: ${result.shortScore} direction: ${result.direction}`);
-      console.log(`  reasons (${result.reasons.length}):`);
-      for (const r of result.reasons) {
-        const mark = r.long ? "LONG" : r.short ? "SHORT" : "—";
-        console.log(`    [${mark.padEnd(5)} w=${String(r.weight).padStart(2)}] ${r.label} ${r.value ?? ""}`);
-      }
+    if (resultAtLatest.status === "evaluated") {
+      console.log(`  evaluable at latest: true`);
+      console.log(`  latest candleTime: ${resultAtLatest.candleTime.toISOString()} longScore: ${resultAtLatest.longScore} shortScore: ${resultAtLatest.shortScore} direction: ${resultAtLatest.direction}`);
     } else {
-      console.log(`  evaluable: false`);
-      console.log(`  status: ${result.status} reason: ${result.reason}`);
+      console.log(`  evaluable at latest: false`);
+      console.log(`  status: ${resultAtLatest.status} reason: ${resultAtLatest.reason}`);
     }
   }
 
-  // Eligibility (Strategy-layer, Option A narrow): BINGX ineligible ONLY for 1d aggregation.
-  // Per-exchange evaluation above remains visible; only aggregation uses eligible subset.
-  const eligibleResults = filterSmartMoneyEligibleResults(results, timeframe);
-  if (eligibleResults.length !== results.length) {
-    const excluded = results.filter(
+  // For diagnostics, also prepare results at latest (for eligibility display)
+  const resultsAtLatestAll = marketsData.map((d) => d.resultAtLatest);
+  const eligibleMarketsData = marketsData.filter((d) =>
+    isSmartMoneyExchangeEligible(d.meta.exchange, timeframe)
+  );
+  const eligibleResultsAtLatest = filterSmartMoneyEligibleResults(resultsAtLatestAll, timeframe);
+  if (eligibleResultsAtLatest.length !== resultsAtLatestAll.length) {
+    const excluded = resultsAtLatestAll.filter(
       (r) => !isSmartMoneyExchangeEligible(r.exchange, timeframe)
     );
     console.log(
-      `\n  eligibility: excluded ${excluded.map((e) => e.exchange).join(", ")} for ${timeframe} (Smart Money policy: BINGX ineligible for 1d; ${eligibleResults.length}/${results.length} eligible)`
+      `\n  eligibility: excluded ${excluded.map((e) => e.exchange).join(", ")} for ${timeframe} (Smart Money policy: BINGX ineligible for 1d; ${eligibleMarketsData.length}/${marketsData.length} eligible)`
     );
   } else {
-    console.log(`\n  eligibility: all ${results.length} markets eligible for ${timeframe} (BINGX eligible on 5m/15m/1h/4h)`);
+    console.log(`\n  eligibility: all ${resultsAtLatestAll.length} markets eligible for ${timeframe} (BINGX eligible on 5m/15m/1h/4h)`);
   }
 
-  // Phase 3E: cross-exchange candle-window alignment guard before aggregation (after eligibility)
-  // MarketStrategyResult.candleTime is latest CLOSED candle openTime;
-  // same candleTime + same tf => same canonical interval [candleTime, candleTime + tf).
+  // --- Common CLOSED horizon selection (B) ---
+  // Latest COMMON CLOSED horizon that is present at ALL eligible markets (exact intersection, CLOSED, canonical grid).
+  // For 1d, BINGX already excluded, so common among 4 eligible only.
+  // Per-exchange evaluation will use candles up to EXACT common horizon (no-lookahead, deterministic).
+  console.log(`\n=== Common CLOSED horizon selection (B) ${timeframe} ===`);
+  const commonEval = evaluateMarketsAtCommonHorizon(
+    eligibleMarketsData.map((d) => ({ meta: d.meta, candles: d.candles })),
+    timeframe as import("../lib/smc/types").SmcTimeframe,
+    smcConfig,
+    filters
+  );
+  for (const line of formatCommonHorizonDiagnostics(commonEval.selection, timeframe as import("../lib/smc/types").SmcTimeframe)) {
+    console.log(`  ${line}`);
+  }
+  if (!commonEval.usable || !commonEval.selection.commonHorizon) {
+    console.log(`  → common horizon not usable: ${commonEval.selection.reason ?? "no common"} → cannot-aggregate (explicit, no silent fallback)`);
+  } else {
+    console.log(`  eligible markets evaluated at common horizon ${commonEval.selection.commonHorizon.toISOString()}:`);
+    for (const r of commonEval.resultsAtCommon) {
+      if (r.status === "evaluated") {
+        console.log(
+          `    ${r.exchange} candleTime=${r.candleTime.toISOString()} direction=${r.direction} long=${r.longScore} short=${r.shortScore}`
+        );
+      } else {
+        console.log(`    ${r.exchange} cannot-evaluate at common: ${r.reason}`);
+      }
+    }
+  }
+
+  // Use resultsAtCommon for strict alignment & aggregation (identical-horizon safety preserved)
+  const eligibleResults = commonEval.usable ? commonEval.resultsAtCommon : [];
+  // For diagnostics when not usable, we still want to show why common not usable, but eligibleResults will be empty → alignment safe=false
   const alignment = checkCandleAlignment(eligibleResults, timeframe);
-  console.log(`\n=== Выравнивание окон (alignment) ${timeframe} ===`);
+  console.log(`\n=== Выравнивание окон (alignment) at COMMON horizon ${timeframe} ===`);
   if (alignment.referenceCandleTime) {
     console.log(`  referenceCandleTime: ${alignment.referenceCandleTime.toISOString()} (all evaluated must equal this)`);
   } else {

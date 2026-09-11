@@ -47,11 +47,16 @@ import {
   validateSmartMoneyRuntime,
   evaluateSmartMoneyWithCandles,
   loadSmartMoneyCandles,
+  evaluateMarketsAtCommonHorizon,
+  formatCommonHorizonDiagnostics,
   DEFAULT_SMART_MONEY_FILTERS,
   type SmartMoneyFilters,
 } from "../lib/strategies/smart-money";
 import { aggregateAssetGroup } from "../lib/strategies/runtime";
 import { checkCandleAlignment, canAggregateSafely } from "../lib/strategies/alignment";
+import {
+  selectCommonClosedHorizon,
+} from "../lib/strategies/common-horizon";
 import {
   isSmartMoneyExchangeEligible,
   filterSmartMoneyEligibleResults,
@@ -314,20 +319,32 @@ async function runSymbolDiagnostic(symbol: string, timeframe: SmcTimeframe): Pro
   }
   console.log(`Рынков к проверке: ${markets.length}`);
 
-  const results: import("../lib/strategies/runtime").MarketStrategyResult[] = [];
+  // --- Collect marketsData for common horizon (B) ---
+  const marketsData: Array<{
+    meta: {
+      exchange: string;
+      market: string;
+      marketId: number;
+      timeframe: SmcTimeframe;
+      assetRank: number | null;
+      quoteVolume24h: number | null;
+    };
+    candles: import("../lib/smc/types").SmcRawCandle[];
+    resultAtLatest: import("../lib/strategies/runtime").MarketStrategyResult;
+  }> = [];
 
   for (const m of markets) {
     const meta = {
       exchange: m.exchange as string,
       market: m.exchangeSymbol as string,
       marketId: m.id as number,
-      timeframe,
+      timeframe: timeframe as SmcTimeframe,
       assetRank: asset.rank as number | null,
       quoteVolume24h: m.quoteVolume24h as number | null,
     };
     const candles = await loadSmartMoneyCandles(prisma, m.id, timeframe);
-    const result = evaluateSmartMoneyWithCandles(meta, candles, smcConfig, filters);
-    results.push(result);
+    const resultAtLatest = evaluateSmartMoneyWithCandles(meta, candles, smcConfig, filters);
+    marketsData.push({ meta, candles, resultAtLatest });
 
     console.log(`\n— ${m.exchange} ${m.exchangeSymbol} (id ${m.id}) —`);
     console.log(`  candles: ${candles.length} CLOSED (ASC после fetch)`);
@@ -338,41 +355,60 @@ async function runSymbolDiagnostic(symbol: string, timeframe: SmcTimeframe): Pro
         if (candles[i].openTime.getTime() <= candles[i - 1].openTime.getTime()) asc = false;
       }
       console.log(`  ASC check: ${asc ? "OK" : "FAIL"}`);
-      // Also log alignment per market
       const { isCanonicalAligned } = await import("../lib/strategies/alignment");
       const al = isCanonicalAligned(candles[candles.length - 1].openTime, timeframe);
       console.log(`  alignment: ${al ? "ALIGNED" : "MISALIGNED"} (openTime % timeframeMs ${al ? "==0" : "!=0"} UTC ${candles[candles.length - 1].openTime.getUTCHours()}:00)`);
     }
-    if (result.status === "evaluated") {
-      console.log(`  evaluable: true`);
-      console.log(`  longScore: ${result.longScore} shortScore: ${result.shortScore} direction: ${result.direction}`);
-      console.log(`  reasons (${result.reasons.length}):`);
-      for (const r of result.reasons) {
-        const mark = r.long ? "LONG" : r.short ? "SHORT" : "—";
-        console.log(`    [${mark.padEnd(5)} w=${String(r.weight).padStart(2)}] ${r.label} ${r.value ?? ""}`);
-      }
+    if (resultAtLatest.status === "evaluated") {
+      console.log(`  evaluable at latest: true`);
+      console.log(`  latest candleTime: ${resultAtLatest.candleTime.toISOString()} longScore: ${resultAtLatest.longScore} shortScore: ${resultAtLatest.shortScore} direction: ${resultAtLatest.direction}`);
     } else {
-      console.log(`  evaluable: false`);
-      console.log(`  status: ${result.status} reason: ${result.reason}`);
+      console.log(`  evaluable at latest: false`);
+      console.log(`  status: ${resultAtLatest.status} reason: ${resultAtLatest.reason}`);
     }
   }
 
-  // Eligibility (Strategy-layer, Option A narrow): BINGX ineligible ONLY for 1d aggregation.
-  // Per-exchange evaluation above remains visible for all exchanges; only aggregation uses eligible subset.
-  const eligibleResults = filterSmartMoneyEligibleResults(results, timeframe);
-  if (eligibleResults.length !== results.length) {
-    const excluded = results.filter(
+  const resultsAtLatestAll = marketsData.map((d) => d.resultAtLatest);
+  const eligibleMarketsData = marketsData.filter((d) =>
+    isSmartMoneyExchangeEligible(d.meta.exchange, timeframe)
+  );
+  const eligibleResultsAtLatest = filterSmartMoneyEligibleResults(resultsAtLatestAll, timeframe);
+  if (eligibleResultsAtLatest.length !== resultsAtLatestAll.length) {
+    const excluded = resultsAtLatestAll.filter(
       (r) => !isSmartMoneyExchangeEligible(r.exchange, timeframe)
     );
     console.log(
-      `\n  eligibility: excluded ${excluded.map((e) => e.exchange).join(", ")} for ${timeframe} (Smart Money policy: BINGX ineligible for 1d; ${eligibleResults.length}/${results.length} eligible)`
+      `\n  eligibility: excluded ${excluded.map((e) => e.exchange).join(", ")} for ${timeframe} (Smart Money policy: BINGX ineligible for 1d; ${eligibleMarketsData.length}/${marketsData.length} eligible)`
     );
   } else {
-    console.log(`\n  eligibility: all ${results.length} markets eligible for ${timeframe} (BINGX eligible on 5m/15m/1h/4h)`);
+    console.log(`\n  eligibility: all ${resultsAtLatestAll.length} markets eligible for ${timeframe} (BINGX eligible on 5m/15m/1h/4h)`);
   }
 
-  // Alignment guard before aggregation — generic for 5m/15m/1h/4h/1d (after eligibility)
-  // candleTime is latest CLOSED candle openTime; same timeframe + same candleTime => same interval [candleTime, candleTime+tf)
+  console.log(`\n=== Common CLOSED horizon selection (B) ${timeframe} ===`);
+  const commonEval = evaluateMarketsAtCommonHorizon(
+    eligibleMarketsData.map((d) => ({ meta: d.meta, candles: d.candles })),
+    timeframe as SmcTimeframe,
+    smcConfig,
+    filters
+  );
+  for (const line of formatCommonHorizonDiagnostics(commonEval.selection, timeframe as SmcTimeframe)) {
+    console.log(`  ${line}`);
+  }
+  if (!commonEval.usable || !commonEval.selection.commonHorizon) {
+    console.log(`  → common horizon not usable: ${commonEval.selection.reason ?? "no common"} → cannot-aggregate`);
+  } else {
+    console.log(`  eligible evaluated at common horizon ${commonEval.selection.commonHorizon.toISOString()}:`);
+    for (const r of commonEval.resultsAtCommon) {
+      if (r.status === "evaluated") {
+        console.log(`    ${r.exchange} candleTime=${r.candleTime.toISOString()} direction=${r.direction} long=${r.longScore} short=${r.shortScore}`);
+      } else {
+        console.log(`    ${r.exchange} cannot-evaluate at common: ${r.reason}`);
+      }
+    }
+  }
+  const eligibleResults = commonEval.usable ? commonEval.resultsAtCommon : [];
+  // Alignment at COMMON horizon (strict identical-horizon preserved)
+  // candleTime is common horizon; same interval [candleTime, candleTime+tf)
   const alignment = checkCandleAlignment(eligibleResults, timeframe);
   console.log(`\n=== Выравнивание окон (alignment) ${timeframe} ===`);
   if (alignment.referenceCandleTime) {
@@ -430,14 +466,14 @@ async function runSymbolDiagnostic(symbol: string, timeframe: SmcTimeframe): Pro
   }
   if (timeframe === "1d") {
     if (alignment.safe) {
-      const excluded = results.filter((r) => !isSmartMoneyExchangeEligible(r.exchange, timeframe));
+      const excluded = resultsAtLatestAll.filter((r) => !isSmartMoneyExchangeEligible(r.exchange, timeframe));
       const excludedList = excluded.map((e) => e.exchange).join(", ") || "—";
       console.log(
-        `\nВывод Phase3E 1d: safe после eligibility-фильтра — ${alignment.alignedCount}/${alignment.totalEvaluated} eligible рынков aligned на одном canonical UTC horizon${alignment.referenceCandleTime ? ` ${alignment.referenceCandleTime.toISOString()}` : ""}; BINGX исключён из Smart Money 1d aggregation policy (${eligibleResults.length}/${results.length} eligible, excluded: ${excludedList}).`
+        `\nВывод Phase3E 1d: safe после eligibility-фильтра/COMMON horizon — ${alignment.alignedCount}/${alignment.totalEvaluated} eligible рынков aligned на COMMON horizon${alignment.referenceCandleTime ? ` ${alignment.referenceCandleTime.toISOString()}` : ""}; BINGX исключён из Smart Money 1d aggregation policy (${eligibleResults.length}/${resultsAtLatestAll.length} eligible, excluded: ${excludedList}).`
       );
     } else {
       console.log(
-        `\nВывод Phase3E 1d: misaligned после eligibility-фильтра — ${alignment.alignedCount}/${alignment.totalEvaluated} eligible aligned (offGrid ${alignment.offGrid.length}, horizonMismatch ${alignment.horizonMismatch.length}); BINGX исключён из Smart Money 1d aggregation policy (${eligibleResults.length}/${results.length} eligible). 1d пока НЕЛЬЗЯ разблокировать без доп. нормализации, без фабрикации OHLC.`
+        `\nВывод Phase3E 1d: misaligned после eligibility-фильтра — ${alignment.alignedCount}/${alignment.totalEvaluated} eligible aligned (offGrid ${alignment.offGrid.length}, horizonMismatch ${alignment.horizonMismatch.length}); BINGX исключён из Smart Money 1d aggregation policy (${eligibleResults.length}/${resultsAtLatestAll.length} eligible). 1d пока НЕЛЬЗЯ разблокировать без доп. нормализации, без фабрикации OHLC.`
       );
     }
   }

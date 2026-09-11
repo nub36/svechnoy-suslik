@@ -2883,3 +2883,134 @@ Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC*
 - `PROJECT_CONTEXT.md` (this §41 FIX + minimal FIX: correct timeframes and remove library absolute path coupling docs)
 
 **Deliverable (FIX):** ONE additional commit atop `d0fd5725d4e752e58b1cac73b8ea8fb025c559e5` (not amend), push only `arena/01a08b68-svechnoy-suslik`, STOP after FIX (PM2 not auto-started, Strategy id=2 remains `DRAFT enabled=false timeframes=["5m","15m","1h","4h","1d"]` `Signal 0`, Signal Engine not implemented, no DB mutation).
+
+
+==================================================
+42. SMART MONEY READ — TRANSIENT INGESTION RACE FIX (COMMON CLOSED HORIZON, B) 11.09.2026
+==================================================
+
+**Baseline exact:** `83613d0d7393fc3e0934113e77a79c73c4424463` (one reviewable commit atop `d20addfbced6267ba382ea726c75116df9c63dbb`, branch `arena/01a08b68-svechnoy-suslik`), working tree clean before FIX.
+
+**Observed production race (factual, not mocked):**
+- BTC continuous worker `svechnoy-suslik-ohlcv-btc` sequential ingestion 25 tasks/pass ~15-16s (5m/15m/1h/4h/1d interval 120000, 25 tasks).
+- Concurrent Smart Money read (Strategy id=2 `PUBLISHED enabled true timeframes all 5 minExchanges 3`) during pass caused transient 5m `MISALIGNED`:
+  - `BINANCE 09:45` vs 4 others `09:50` (UTC, canonical 5m grid, CLOSED) → `checkCandleAlignment` horizonMismatch → `cannot-aggregate`.
+  - 35s later (after pass completed) same BTC 5m `ALIGNED 5/5` at `09:50` (all 5 have 09:50).
+- This is visibility race (sequential writes + concurrent read), not exchange boundary bug. Without fix, transient cannot-evaluate window = pass duration (~15s) every 5m, minimized but not eliminated by 120000 interval.
+
+**Requirements (FIX, minimal):**
+1) Minimize transient cannot-evaluate windows between sequential ingestion and Smart Money read while preserving `CLOSED-only, no-lookahead, strict identical-horizon`.
+2) NOT weaken `lib/strategies/alignment.ts` (no aggregation of different horizons).
+3) No "newest per exchange despite mismatch".
+4) No long DB transaction around exchange API.
+5) No candle timestamp/resampling change, `BINGX 1d Option A` (BINGX excluded for 1d eligibility, 4 others exact UTC grid) excluded before selection.
+6) No Signal Engine (`lib/signals`, `signal-worker`, `Signal` schema/writes untouched).
+7) Prefer no Prisma schema change — if needed STOP.
+
+**Architecture choice (B, read-side latest COMMON CLOSED horizon):**
+- Alternative A (write-side lock TX): would require long DB transaction around exchange API (holds lock for 15s, blocks ingestion, violates requirement 4) — rejected.
+- Alternative C (per-exchange latest with eventual consistency): would aggregate mixed horizons (violates 2,3) — rejected.
+- **Chosen B (read-side):** Smart Money read selects `latest COMMON CLOSED horizon` present at ALL eligible markets (exact timestamp intersection, CLOSED, canonical UTC grid, deterministic, no-lookahead). Per-exchange evaluation uses *truncated* candles up to EXACT common horizon (no future candles), min history preserved via `evaluateSmc` (insufficient truncated history → cannot-evaluate). If no common or stale beyond freshness bound → cannot-evaluate (no silent fallback). For 1d, BINGX excluded BEFORE common selection (common among 4 eligible only). Keeps `lib/strategies/alignment.ts` strict (same horizon), adds `lib/strategies/common-horizon.ts` pure helper, modifies read runtime only.
+
+**Why B is minimal:**
+- No schema migration, no DB transaction, no worker change, no new infra.
+- Keeps `alignment.ts` strict (`to keep`).
+- Deterministic, pure, testable, CLOSED-only, no-lookahead (truncation excludes future candles after common).
+- Freshness bound prevents silent fallback too far back (common 1h behind newest due to missing data → stale → cannot-evaluate).
+
+**Implementation (pure, no DB):**
+
+- **`lib/strategies/common-horizon.ts` (NEW, pure):**
+  - `SMCTIMEFRAME_MS`, `isCanonicalAligned` (canonical UTC grid), `COMMON_HORIZON_MAX_LAG_BARS=3`.
+  - `selectCommonClosedHorizon(markets, timeframe, {freshnessBars})` → `CommonHorizonSelection { commonHorizon, newestHorizon, lagMs, lagBars, reason, perMarketLatest, eligibleCount }`:
+    - Per market: filter `closed=true` + `isCanonicalAligned` (defensive), collect times Set, latest.
+    - Intersection = max timestamp present in ALL markets' sets (exact `openTime.getTime()` equality, not rounded).
+    - `commonHorizon = max(intersection)` or `null` if empty (`no common CLOSED horizon`).
+    - Freshness: `lagMs = newestMs - commonMs`, `lagBars = round(lagMs/tfMs)`, if `> freshnessBars (3)` → `commonHorizon=null` + `reason: stale ... lag X bars > bound`.
+    - Deterministic, no DB, no Signal.
+  - `truncateCandlesToHorizon(candles, commonHorizon)` → `candles.filter(openTime <= commonHorizon)` (ASC, deterministic, no-lookahead).
+  - `commonHorizonDiagnostics(markets, timeframe, selection)` → `string[]` for logging (common, newest, lag, per-market has-common).
+
+- **`lib/strategies/smart-money.ts` (modified, import + helper, no scoring change):**
+  - Added import `selectCommonClosedHorizon`, `truncateCandlesToHorizon`, `COMMON_HORIZON_MAX_LAG_BARS`.
+  - Added `evaluateMarketsAtCommonHorizon(markets, timeframe, smcConfig, filters)` → `{ selection, resultsAtCommon, usable }`:
+    - Calls `selectCommonClosedHorizon` on eligible markets' candles.
+    - If `commonHorizon === null` or `selection.commonHorizon === null` → `usable=false, resultsAtCommon=[]` (cannot-evaluate, no silent fallback).
+    - Else per market: `truncated = truncateCandlesToHorizon(candles, commonHorizon)`, `evaluateSmartMoneyWithCandles(meta, truncated, smcConfig, filters)` (min history preserved, insufficient → cannot-evaluate).
+    - Returns `resultsAtCommon` all with `candleTime === commonHorizon` if evaluated (strict identical-horizon).
+  - Added `formatCommonHorizonDiagnostics(selection, timeframe)` → `string[]` (common, newest, lag, stale note).
+
+- **`scripts/smart-money-readonly.ts` (modified, loop replacement):**
+  - Added imports `selectCommonClosedHorizon`, `COMMON_HORIZON_MAX_LAG_BARS` and `evaluateMarketsAtCommonHorizon`, `formatCommonHorizonDiagnostics`.
+  - Replaced `for (m of markets) { results.push(evaluateAtLatest) }` + `eligibleResults = filter(...)` + `checkCandleAlignment(eligibleResults)` with:
+    - Collect `marketsData: { meta, candles, resultAtLatest }` (per-market latest for diagnostics, `canoncial` ASC check).
+    - `resultsAtLatestAll = marketsData.map(d => d.resultAtLatest)` for eligibility display.
+    - `eligibleMarketsData = marketsData.filter(d => isSmartMoneyExchangeEligible(d.meta.exchange, timeframe))` (BINGX 1d excluded BEFORE common).
+    - `commonEval = evaluateMarketsAtCommonHorizon(eligibleMarketsData.map(d => ({meta, candles})), timeframe as SmcTimeframe, smcConfig, filters)` (common selection + truncated evaluation).
+    - Log `formatCommonHorizonDiagnostics`, per-market `evaluated at common` or `cannot-evaluate at common`.
+    - `eligibleResults = commonEval.usable ? commonEval.resultsAtCommon : []` (if not usable, empty → alignment safe=false).
+    - `alignment = checkCandleAlignment(eligibleResults, timeframe)` at COMMON horizon (strict identical-horizon preserved).
+  - Aggregation `aggregateAssetGroup` now on `eligibleResults` (at common), not mixed horizons.
+
+- **`scripts/smart-money-diagnostic.ts` (modified similarly):**
+  - Added same imports and common-horizon block (collect `marketsData`, `eligibleMarketsData`, `commonEval`, `eligibleResults`, alignment at common).
+  - 1d summary now correctly uses `resultsAtLatestAll` and `eligibleResults.length / resultsAtLatestAll.length` (not stale `all 5`).
+
+- **`lib/strategies/alignment.ts` (unchanged, strict):**
+  - `isCanonicalAligned`, `checkCandleAlignment` (referenceCandleTime, horizonMismatch, offGrid, safe) remains strict identical-horizon, CLOSED, canonical grid, no aggregation of different horizons.
+
+**Diagnostics (explicit, no silent fallback):**
+- `Common CLOSED horizon selection (B)` logs: `common horizon selected: <ISO> (lag X bar(s) vs newest <ISO>)` or `common horizon: none — no common / stale ...`.
+- Per-market `latest=<ISO> has-common/missing-common`, lag vs newest.
+- If `lagBars > 3` → `stale common horizon: lag 4 bars > freshness bound 3 for 5m` → `cannot-aggregate (explicit cannot-evaluate, no silent fallback)`.
+- Alignment logs at COMMON horizon (`referenceCandleTime` = common, `HORIZON_OK` if all at common, `GRID_OK`).
+
+**Regression tests (9 mandatory cases, `scripts/test-common-horizon.ts` 46/46):**
+- Exact production race: 5 markets, one at T 09:45, four at T+5m 09:50 → common 09:45, newest 09:50, lag 1, no mixed horizons, all evaluated at common 09:45, mock alignment safe.
+- Safe common T available: evaluation at T for all (via common, not per-market latest).
+- After T+5m appears at last market → auto transition to T+5m (common moves to 09:50, lag 0).
+- Stale common beyond freshness bound (lag 4 > 3) → `commonHorizon=null`, `usable=false`, `cannot-evaluate`, no results.
+- No common horizon (disjoint sets) → `null`, `usable=false`.
+- 1d BINGX excluded BEFORE common selection: BINGX (16:00) not in eligible, common among 4 is 00:00 UTC, 4/4 eligible.
+- All 4 eligible 1d same UTC horizon → common 00:00, usable, mock alignment safe.
+- No-lookahead: candles after common (09:50,09:55) don't affect result; truncated length excludes future, last is common 09:45.
+- Already-aligned unchanged: all at 09:50 → common 09:50, lag 0, mock alignment safe, no behavior change.
+- Signal absent: `smart-money.ts` has no `prisma.signal` writes (grep 0).
+
+**Interaction checks:**
+- Eligibility BEFORE common: BINGX 1d excluded via `isSmartMoneyExchangeEligible` before `selectCommonClosedHorizon` (tested).
+- Alignment at common: `checkCandleAlignment` still strict, now on `resultsAtCommon` (identical horizon, so safe when all at common).
+- No DB/Strategy/PM2 touched: `Strategy id=2` remains `DRAFT enabled=false timeframes=[..."1d"]`, PM2 workers not started, no `prisma.signal` writes.
+
+**Verification (Arena, read-only, no workers):**
+- `npx tsx scripts/test-common-horizon.ts` 46/46
+- `npx tsx scripts/test-smart-money-eligibility.ts` 96/96 (existing, not broken)
+- `npx tsx scripts/test-smart-money-diagnostic.ts` 95/95
+- `npx tsx scripts/test-ohlcv-cli.ts` 105/105, `test-ohlcv-pilot.ts` 131/131, `test-ohlcv-lock.ts` pure 56/56 SKIPPED
+- `npx -p typescript tsc --noEmit --skipLibCheck` no new errors in `lib/strategies/*` / `scripts/smart-money-*` / `test-common-horizon` (remaining `node:`/`process`/`@prisma/client` are baseline stub, not new)
+- `npm run build` compiles (baseline `next build` stub, no new deps)
+- `git diff --check` clean, `grep -R "prisma.signal"` 0 in `lib/strategies/smart-money.ts` + `common-horizon.ts`, `grep -R "pg_try_advisory_lock"` unchanged, schema 0 lines.
+
+**Files changed (this FIX, one commit):**
+- `lib/strategies/common-horizon.ts` (NEW, pure, 120 lines)
+- `lib/strategies/smart-money.ts` (import + `evaluateMarketsAtCommonHorizon` + `formatCommonHorizonDiagnostics`, ~80 lines added, no scoring/alignment change)
+- `scripts/smart-money-readonly.ts` (loop replacement to common horizon, eligibility before selection, diagnostics, ~70 lines changed)
+- `scripts/smart-money-diagnostic.ts` (same, ~70 lines changed, 1d summary fixed)
+- `scripts/test-common-horizon.ts` (NEW, 46/46 regression, ~380 lines)
+- `PROJECT_CONTEXT.md` (this §42)
+
+**Safety preserved:**
+- `lib/strategies/alignment.ts` unchanged (strict).
+- `lib/strategies/smart-money-eligibility.ts` unchanged (BINGX 1d Option A).
+- `lib/smc/*` / `scoring` unchanged.
+- No Prisma schema change (`git diff prisma/schema.prisma` 0).
+- No `Signal` writes (`grep -R prisma.signal` 0 in new files).
+- No `Strategy id=2` mutation, no PM2 auto-start, no DB mutation, no exchange API in tests.
+
+**Operational effect:**
+- Before: transient 5m cannot-aggregate ~15s every 5m during ingestion pass (BINANCE 09:45 vs 09:50).
+- After: read at 09:50:15 (mid-pass) selects common 09:45, all 5 evaluated at 09:45 (identical horizon) → SAFE, can-aggregate at common (slightly stale by 1 bar, lag 1 ≤3). At 09:50:35 (pass completed) common moves to 09:50 → SAFE at newest. Stale >3 bars → explicit cannot-aggregate (no silent fallback).
+- `freshness bound 3 bars` balanced: 5m allows 15m lag, 1h allows 3h, 1d allows 3d — prevents too-old fallback while minimizing transient windows.
+
+**Deliverable:** ONE additional commit atop `83613d0d7393fc3e0934113e77a79c73c4424463` (not amend), push only `arena/01a08b68-svechnoy-suslik`, STOP after FIX (no DB/Strategy/PM2 mutation).
+
