@@ -1,22 +1,10 @@
 import type { PrismaClient } from "@prisma/client";
 
-// Load .env via dotenv if available — standard for tsx/Prisma scripts.
-// Next.js loads .env automatically, but tsx scripts (like ohlcv-worker) need dotenv.
-// dotenv is a direct dependency (package.json) so this is a production contract, not transitive.
-// If dotenv is not installed, we silently skip (e.g., in CI where env is injected).
-try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const dotenv = require("dotenv");
-  dotenv.config();
-  // Also try explicit production path /root/svechnoy-suslik/.env if cwd is different and .env not found
-  // This handles PM2 with cwd "./" started from different directory — we try absolute path as fallback.
-  // We don't log DATABASE_URL or secrets.
-  if (!process.env.DATABASE_URL) {
-    try {
-      dotenv.config({ path: "/root/svechnoy-suslik/.env" });
-    } catch {}
-  }
-} catch {}
+// No dotenv/filesystem coupling here — reusable library.
+// Environment bootstrap (dotenv/config) is responsibility of worker entrypoint
+// (scripts/ohlcv-worker.ts does `import "dotenv/config"` before any DB use).
+// This helper only reads process.env.DATABASE_URL and fails closed if absent,
+// never logs the value.
 
 export const OHLCV_ADVISORY_LOCK_KEY = 727923; // arbitrary 32-bit key for OHLCV worker single-instance
 
@@ -35,10 +23,9 @@ export async function acquireDedicatedLock(
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
     throw new Error(
-      "DATABASE_URL not set — cannot acquire advisory lock. Ensure .env is present at /root/svechnoy-suslik/.env or cwd/.env and dotenv is loaded."
+      "DATABASE_URL not set — cannot acquire advisory lock. Ensure worker entrypoint loads .env via import \"dotenv/config\" and DATABASE_URL is set."
     );
   }
-  // Dynamic import to keep module loadable even if pg not installed (pure tests)
   let Client: typeof import("pg").Client;
   try {
     const pg = await import("pg");
@@ -103,16 +90,15 @@ export async function isDedicatedLockHeldViaNewConnection(
   const client = new Client({ connectionString });
   await client.connect();
   try {
-    // Try to acquire with try — if already held, this will return false, and we immediately release if we acquired
     const res = await client.query("SELECT pg_try_advisory_lock($1) AS acquired", [key]);
     const acquired = res.rows[0]?.acquired === true;
     if (acquired) {
       await client.query("SELECT pg_advisory_unlock($1)", [key]);
       await client.end();
-      return false; // not held by someone else, we were able to acquire
+      return false;
     }
     await client.end();
-    return true; // held by someone else
+    return true;
   } catch {
     await client.end().catch(() => {});
     throw new Error("failed to check lock");

@@ -38,12 +38,19 @@ ok(lockSource.includes("client.query") && lockSource.includes("pg_try_advisory_l
 ok(lockSource.includes("handle.client.query") || lockSource.includes("handle.client"), "release uses same handle.client (same session)");
 ok(lockSource.includes("OhlcvDedicatedLockHandle"), "exports dedicated handle type");
 
-// 3. dotenv loading — worker and lock load .env via direct dotenv dep
-ok(lockSource.includes("dotenv"), "lock loads dotenv (direct dep)");
-ok(lockSource.includes('dotenv.config') || lockSource.includes('dotenv/config'), "lock calls dotenv.config");
-ok(lockSource.includes("/root/svechnoy-suslik/.env") || lockSource.includes("DATABASE_URL"), "lock references DATABASE_URL via dotenv, fallback to /root/svechnoy-suslik/.env");
+// 3. dotenv / filesystem coupling — FIX: no absolute production path in reusable library
+ok(!lockSource.includes("/root/svechnoy-suslik"), "lock has no absolute /root/svechnoy-suslik/.env fallback (no library filesystem coupling)");
+ok(!lockSource.includes("/root/"), "lock has no absolute /root/ path");
+ok(!lockSource.includes('\nimport "dotenv') && !lockSource.includes('dotenv.config(') && !lockSource.includes('require("dotenv")'), "lock does NOT import dotenv (env bootstrap is worker entrypoint responsibility)");
+ok(lockSource.includes("process.env.DATABASE_URL"), "lock reads process.env.DATABASE_URL and fails closed if absent");
+ok(lockSource.includes("DATABASE_URL not set"), "lock fails closed with clear error if DATABASE_URL absent");
+ok(!lockSource.includes('require("dotenv")'), "lock does not do silent require dotenv");
+// Worker must have deterministic dotenv bootstrap before any DB use
 const workerSource = readFileSync("scripts/ohlcv-worker.ts", "utf8");
-ok(workerSource.includes("dotenv") || workerSource.includes('dotenv/config'), "worker loads dotenv via import \"dotenv/config\"");
+ok(workerSource.includes('import "dotenv/config"'), "worker has deterministic import \"dotenv/config\" at top (direct dotenv contract)");
+ok(workerSource.indexOf('import "dotenv/config"') < workerSource.indexOf("acquireDedicatedLock"), "worker dotenv import before dedicated lock acquire");
+ok(workerSource.indexOf('import "dotenv/config"') < workerSource.indexOf("PrismaClient"), "worker dotenv before PrismaClient creation");
+ok(!workerSource.includes("/root/svechnoy-suslik/.env"), "worker has no absolute /root/.../.env fallback (uses cwd/.env via dotenv, review symlink works)");
 ok(workerSource.includes("acquireDedicatedLock"), "worker uses acquireDedicatedLock (dedicated session)");
 ok(workerSource.includes("releaseDedicatedLock"), "worker uses releaseDedicatedLock");
 ok(!workerSource.includes("tryAcquireOhlcvLock(prisma)") || workerSource.includes("acquireDedicatedLock"), "worker does NOT use Prisma pool lock for singleton (uses dedicated)");
@@ -96,8 +103,6 @@ ok(eco.includes("--only svechnoy-suslik-ohlcv-btc") || eco.includes("--only"), "
 ok(!eco.includes("DATABASE_URL=") || eco.includes("DATABASE_URL is NOT hardcoded"), "ecosystem does not hardcode DATABASE_URL value");
 ok(eco.includes("pg.Client") || eco.includes("dedicated") || eco.includes("advisory lock 727923 on dedicated"), "ecosystem mentions dedicated session lock");
 
-console.log(`\nPure/static: ${passed}/${total}`);
-
 // === Integration (requires DATABASE_URL and reachable PostgreSQL) ===
 console.log("\n=== Integration: dedicated session lock (requires DATABASE_URL) ===");
 let integrationPassed = 0;
@@ -110,6 +115,29 @@ function iok(cond: boolean, label: string) {
 
 const dbUrl = process.env.DATABASE_URL;
 async function runIntegration() {
+// Runtime pure: lock fails closed if DATABASE_URL absent (no DB needed, always runs)
+{
+  const prev2 = process.env.DATABASE_URL;
+  const had2 = prev2 !== undefined;
+  // @ts-ignore
+  delete process.env.DATABASE_URL;
+  let threw2 = false;
+  let msg2 = "";
+  try {
+    await acquireDedicatedLock(727923);
+  } catch (e) {
+    threw2 = true;
+    msg2 = e instanceof Error ? e.message : String(e);
+  } finally {
+    if (had2) process.env.DATABASE_URL = prev2;
+    else delete process.env.DATABASE_URL;
+  }
+  ok(threw2, "lock fails closed if DATABASE_URL absent (throws)");
+  ok(msg2.includes("DATABASE_URL not set"), "lock error mentions DATABASE_URL not set (fail-closed)");
+  ok(!msg2.includes("postgres://") && !msg2.includes("postgresql://"), "lock error does not log DATABASE_URL value (no credentials)");
+  ok(!lockSource.includes("console.log") || !lockSource.includes("DATABASE_URL"), "lock never logs DATABASE_URL value");
+  console.log(`\nPure/static: ${passed}/${total}`);
+}
 if (!dbUrl) {
   console.log("INTEGRATION SKIPPED (no DATABASE_URL in sandbox) — not faked as passed. VPS review will run with DATABASE_URL.");
   return { integrationPassed, integrationTotal };
