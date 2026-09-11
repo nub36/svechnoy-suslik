@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState
 } from "react";
@@ -33,6 +34,23 @@ import {
   resolveSymbolFromList
 } from "@/lib/chart/history";
 import { candleFreshness } from "@/lib/data/freshness";
+import SmartMoneyPanel from "@/components/chart/SmartMoneyPanel";
+import {
+  applySmcResponse,
+  beginSmcRequest,
+  buildSmcPanelView,
+  buildSmcRequestUrl,
+  clearSmcOnDisable,
+  initialSmcRequestState,
+  isSmcAbortError,
+  needsSmcFetch,
+  parseSmcProjection,
+  shouldFetchSmc,
+  smcFailureMessage,
+  smcRequestKey,
+  type SmcFetchOutcome,
+  type SmcRequestState,
+} from "@/lib/chart/smc-panel";
 import {
   buildChartSearch,
   CHART_TIMEFRAMES,
@@ -488,6 +506,22 @@ export default function CandleChart({
   const [showRsi, setShowRsi] = useState(true);
   const [showMacd, setShowMacd] =
     useState(true);
+
+  /* ---------- P1-C: Smart Money панель (UI-only) ---------- */
+
+  // Toggle управляет ТОЛЬКО загрузкой/показом read-only SMC-панели этого
+  // графика. Он не читает и не меняет Strategy.enabled, не ходит в admin
+  // API, ничего не пишет в БД и не создаёт сигналов. Persistence не нужна.
+  const [smcEnabled, setSmcEnabled] =
+    useState(false);
+  const [smcState, setSmcState] = useState<
+    SmcRequestState
+  >(initialSmcRequestState);
+  const smcRequestIdRef = useRef(0);
+  const smcAbortRef = useRef<
+    AbortController | null
+  >(null);
+  const smcStateRef = useRef(smcState);
 
   /* ---------- применение темы к графику ---------- */
 
@@ -1741,6 +1775,152 @@ export default function CandleChart({
     applyVisibility();
   }, [applyVisibility]);
 
+  /* ---------- P1-C: загрузка Smart Money (race/abort) ---------- */
+
+  const commitSmc = useCallback(
+    (next: SmcRequestState) => {
+      smcStateRef.current = next;
+      setSmcState(next);
+    },
+    []
+  );
+
+  const loadSmc = useCallback(async () => {
+    if (
+      !shouldFetchSmc({
+        enabled: smcEnabled,
+        symbol,
+        timeframe,
+      })
+    ) {
+      return;
+    }
+
+    if (
+      !needsSmcFetch({
+        enabled: smcEnabled,
+        symbol,
+        timeframe,
+        state: smcStateRef.current,
+      })
+    ) {
+      return;
+    }
+
+    // тот же паттерн, что и у свечей: обрыв предыдущего запроса
+    // + identity по счётчику, чтобы отсталый ответ не перезаписал новый
+    smcAbortRef.current?.abort();
+
+    const controller = new AbortController();
+    smcAbortRef.current = controller;
+
+    const requestId = ++smcRequestIdRef.current;
+    const key = smcRequestKey(symbol, timeframe);
+
+    commitSmc(
+      beginSmcRequest(smcStateRef.current, requestId, key)
+    );
+
+    try {
+      const response = await fetch(
+        buildSmcRequestUrl(symbol, timeframe),
+        { signal: controller.signal }
+      );
+
+      const raw = await response.text();
+
+      let outcome: SmcFetchOutcome;
+
+      if (!response.ok) {
+        outcome = {
+          ok: false,
+          message: smcFailureMessage(raw, response.status),
+        };
+      } else {
+        let parsed: unknown = null;
+
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          parsed = null;
+        }
+
+        const projection = parseSmcProjection(parsed);
+
+        outcome =
+          projection === null
+            ? {
+                ok: false,
+                message:
+                  "Некорректный ответ Smart Money API",
+              }
+            : { ok: true, projection };
+      }
+
+      commitSmc(
+        applySmcResponse(
+          smcStateRef.current,
+          requestId,
+          outcome,
+          key
+        )
+      );
+    } catch (error) {
+      if (isSmcAbortError(error)) {
+        return;
+      }
+
+      commitSmc(
+        applySmcResponse(
+          smcStateRef.current,
+          requestId,
+          {
+            ok: false,
+            message: "Ошибка соединения с сервером",
+          },
+          key
+        )
+      );
+    }
+  }, [
+    smcEnabled,
+    symbol,
+    timeframe,
+    commitSmc,
+  ]);
+
+  useEffect(() => {
+    if (!smcEnabled) {
+      return;
+    }
+
+    void loadSmc();
+
+    return () => {
+      smcAbortRef.current?.abort();
+    };
+  }, [smcEnabled, loadSmc]);
+
+  const toggleSmc = useCallback(
+    (checked: boolean) => {
+      setSmcEnabled(checked);
+      smcAbortRef.current?.abort();
+      smcAbortRef.current = null;
+      // OFF: панель гаснет сразу, активный id уходит в -1,
+      // поэтому поздний ответ будет отброшен (stale-панели нет)
+      commitSmc(clearSmcOnDisable(smcStateRef.current));
+    },
+    [commitSmc]
+  );
+
+  const smcView = useMemo(
+    () =>
+      smcState.projection === null
+        ? null
+        : buildSmcPanelView(smcState.projection),
+    [smcState.projection]
+  );
+
   /* ---------- UI ---------- */
 
   const selectedMarket = markets.find(
@@ -1961,6 +2141,25 @@ export default function CandleChart({
             MACD
           </label>
         </fieldset>
+
+        <fieldset className="chartToggles">
+          <legend className="muted">
+            Аналитика
+          </legend>
+
+          <label title="Только показ аналитики на этом графике; работа стратегии не меняется">
+            <input
+              type="checkbox"
+              checked={smcEnabled}
+              onChange={(e) =>
+                toggleSmc(
+                  e.target.checked
+                )
+              }
+            />
+            Смарт Мани
+          </label>
+        </fieldset>
       </div>
 
       {status === "error" ? (
@@ -2082,6 +2281,17 @@ export default function CandleChart({
           .
         </div>
       )}
+
+      {smcEnabled ? (
+        <SmartMoneyPanel
+          phase={smcState.phase}
+          view={smcView}
+          error={smcState.error}
+          onRetry={() => {
+            void loadSmc();
+          }}
+        />
+      ) : null}
     </div>
   );
 }

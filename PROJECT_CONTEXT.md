@@ -2063,6 +2063,111 @@ deterministic повторный результат.
 только UI-state); Signal Engine НЕ входит (остаётся будущим P5).
 
 
+## §31j. P1-C — панель Smart Money подключена к CandleChart (read-only UI) (11.09.2026)
+
+SCOPE: только связка `CandleChart → GET /api/chart/smc → P1-A DTO →
+Smart Money summary/WHY` с UI-only toggle. Это НЕ этап рисования:
+визуальные primitives поверх свечей (BOS/CHoCH/liquidity/sweeps/FVG/OB/
+dealing range/premium-eq-discount, canvas) остаются P1-D. Предыдущая строка
+§31i «UI к графику ЕЩЁ НЕ подключён» с этого момента неактуальна (исторический
+факт этапа P1-B, не переписывается).
+
+КОД:
+- `lib/chart/smc-panel.ts` — чистый view-model: состояние запроса
+  (`off|loading|ok|error`), `shouldFetchSmc`/`needsSmcFetch`/
+  `buildSmcRequestUrl`/`smcRequestKey`, `beginSmcRequest`/
+  `applySmcResponse`/`clearSmcOnDisable` (identity-race), `isSmcAbortError`,
+  `smcFailureMessage`, `parseSmcProjection` (граница), `isSmcPanelVisible`,
+  подписи состояний (`AGGREGATE_STATUS_LABELS` — exhaustive по
+  `CommonHorizonStatus`, `MARKET_STATUS_LABELS`, `AVAILABILITY_LABELS`),
+  `formatUtcClock`, `reasonView`, `buildSmcPanelView`.
+- `components/chart/SmartMoneyPanel.tsx` — тонкий рендер ИСКЛЮЧИТЕЛЬНО из
+  view (в сырой DTO не ходит, overlay-массивы не печатает).
+- `components/chart/CandleChart.tsx` — минимальная обвязка: локальный
+  `smcEnabled` (useState(false)), `smcState` + `smcRequestIdRef` +
+  `smcAbortRef` + `smcStateRef`, `loadSmc` (тот же паттерн, что у свечей),
+  эффект только при ON, тумблер «Смарт Мани» в отдельном `<fieldset>`
+  «Аналитика» (не среди «Индикаторы»), панель под графиком.
+- `app/globals.css` — классы `.smcPanel/.smcHead/.smcTitle/.smcLine/
+  .smcChip/.smcVerdict(--long|--short|--neutral|--none)/.smcMarkets/
+  .smcMarket/.smcReasons/.smcTechnical/.smcDisclaimer` на существующих
+  CSS-переменных; тема и layout графика не менялись.
+
+TOGGLE = ТОЛЬКО UI. Он не читает и не пишет `Strategy.enabled`/status, не
+ходит в admin API, не создаёт сигналов, ничего не сохраняет между reload.
+Выключение панели НЕ выключает стратегию для кого-либо ещё.
+
+REQUEST LIFECYCLE:
+- URL строго `/api/chart/smc?symbol=<текущий symbol>&timeframe=<текущий
+  timeframe>`; `exchange` НЕ передаётся, aggregate по выбранной бирже НЕ
+  фильтруется (aggregate — уровень актива, несколько eligible бирж).
+- ON и смена symbol/timeframe → новый запрос; OFF → abort + полный сброс.
+- Ответ принимается только при `phase === "loading" && requestId === activeId`:
+  отсталый ответ прежнего окна, ответ после выключения и повторный resolve
+  того же id не могут ни перетереть новое, ни «воскресить» панель. При
+  перезапросе прежняя проекция остаётся видимой до прихода новой (без мигания).
+- Повторного запроса в то же окно нет (`loadedKey` + `needsSmcFetch`).
+- HTTP 400/404/503 и битый payload → состояние панели: текст из `{ error }`
+  тела либо «Не удалось загрузить Smart Money (HTTP nnn)» (обрезка 300
+  символов, HTML/stack не показывается). Статус, ошибка и подгрузка истории
+  графика из SMC-обвязки НЕ затрагиваются — ошибки SMC не ломают свечи
+  (проверяется сканом региона обвязки: нет `setStatus(`, `setErrorMessage(`,
+  `setHistory*`, обращения к сериям/`applyData`).
+
+ЧТО РЕНДЕРИТСЯ (только фактические поля принятого `SmcChartProjection`):
+- `assetSymbol` + `timeframe`; `aggregate.status`/`statusReason`
+  (техническая строка — только при отказе: `technicalVisible`);
+  `usable`/`gateAllowed`; `direction` → LONG/SHORT/«Нейтрально», при отказе —
+  подпись статуса (`Не удалось согласовать рынки по времени`,
+  `Данные отстают от расписания — вердикт не выдаётся`, …);
+  `confirmation` (строка DTO, без пересчёта) + `minExchanges`;
+  `evaluatedCount`/`cannotEvaluateCount`/`filteredCount`/`participantCount`;
+  `horizonMs`/`engineAsOfMs` (UTC-подписи из ms),
+  `expectedLatestClosedMs` + `lagBars`/`absoluteLagBars` с
+  `relativeMaxLagBars`/`absoluteMaxLagBars`; `exchangeExcluded`
+  (BINGX на 1d приходит из DTO — special-case в UI отсутствует);
+  `gateRefusalReasons`; `perExchange`.
+- per-exchange строки из `overlays[]`: `exchange · market`, статус
+  («оценено» / «не удалось оценить» / «вне фильтров стратегии»), `direction`,
+  `longScore`/`shortScore` (только у evaluated), `horizonMs`, `statusReason`,
+  `availability.hardFailures` (подписи кодов), и WHY из `reasons[]`:
+  `label` + «LONG x · SHORT y · макс z» + `value` (внутренние `SMC1|…`
+  ключи текстом не печатаются).
+- Дисклеймер: «Сила — это степень совпадения условий стратегии (0–100),
+  а не вероятность успешной сделки». Процентов/«вероятности» в панели нет.
+
+РАЗДЕЛЕНИЕ aggregate и биржи: aggregate-подписи не содержат имён бирж и
+overlay-терминов (FVG/OB/BOS/pivot/liquidity), per-exchange строки не
+содержат «подтверждений». Оверлеи и причины показываются как «по каждой
+бирже отдельно» с явной пометкой, что общего набора фактов на несколько
+бирж не существует.
+
+WHY→factIds (семантика P1-A неизменна): только exact mapping контракта
+(`scoreReasonFactIds`), `OB_FVG_CONFLUENCE` → `[]` всегда, соседние OB/FVG
+не подбираются, никаких новых id; панель прокидывает `factIds` КОПИЕЙ
+(мутация view не меняет DTO) — они пригодятся для highlighting на P1-D.
+
+НЕ ИЗМЕНЕНО: `package.json`/`package-lock.json`, `prisma/schema.prisma`,
+`app/api/chart/smc/route.ts`, `lib/chart/smc-api-service.ts`,
+`lib/chart/smc-projection.ts`, `lib/chart/smc-contract.ts`, `lib/smc/**`,
+`lib/strategies/**` (включая `common-horizon.ts` и `alignment.ts`), OHLCV/
+адаптеры, worker/PM2, Admin/API, Strategy в БД. Записей в БД нет.
+P1-A/P1-B semantics не правились: найденных дефектов нет.
+
+TESTS: `scripts/test-smc-panel.ts` — 308/308 (view-model + порядковые
+инварианты обвязки + скан чистоты + реальные DTO от `projectSmcChart`:
+1h 5/5 LONG и 1d с исключением BINGX; deep-freeze DTO против мутаций).
+Непустота подтверждена 9 мутациями (снятие loading-guard, игнор toggle,
+пересчёт `confirmation` из голосов, `cannot-evaluate → «Нейтрально»`,
+special-case 1d/BINGX в UI-слое, потеря `factIds`, отсутствие abort до
+`fetch`, отсутствие early-return при OFF, безусловная техническая строка) —
+каждая даёт падение. Регрессии P1-A/P1-B/SMC/chart — зелёные.
+
+ЯВНО НЕ СДЕЛАНО (P1-D): primitives поверх свечей, маркеры/зоны/линии,
+`factIds`-подсветка, тултипы, premium/equilibrium/discount-заливка,
+пере-якорение оверлеев при прокрутке. Signal Engine — по-прежнему только P5.
+
+
 ==================================================
 32. PRODUCT ROADMAP / ДАЛЬНЕЙШЕЕ РАЗВИТИЕ (10.09.2026)
 ==================================================
@@ -2109,15 +2214,24 @@ HEAD: `9085d55936b20d54add3ab6a1534515be2d3480b` (RANGE_POSITION CLOSED/UNDERSTO
 - Финальная приёмка Smart Money (read-only → staged → enabled)
 
 **P1 — SuslikChart / визуализация стратегии**
-- P1-A (11.09.2026): чистая подготовка Smart Money overlays —
+- P1-A (11.09.2026, ПРИНЯТА): чистая подготовка Smart Money overlays —
   lib/chart/smc-contract.ts + lib/chart/smc-projection.ts +
   scripts/test-smc-projection.ts; per-exchange overlays и aggregate
   summary строго разделены; кнопка «Смарт Мани Вкл/Выкл» — только
   UI overlays, НЕ global Strategy.enabled
-- P1-B (11.09.2026): read-only API boundary GET /api/chart/smc —
+- P1-B (11.09.2026, ПРИНЯТА; подтверждена на VPS: BTC 5m/1d → 200,
+  invalid 7m → 400): read-only API boundary GET /api/chart/smc —
   тонкий сервис над P1-A проекцией (lib/chart/smc-api-service.ts),
   PostgreSQL CLOSED-свечи через существующий bounded loader,
   Strategy из БД без engineering-fallback; UI ещё не подключён
+- P1-C (11.09.2026, РЕАЛИЗОВАНО, §31j): подключение панели Smart Money к
+  CandleChart — UI-only тумблер «Смарт Мани», GET /api/chart/smc с текущими
+  symbol/timeframe, aggregate (актив) и per-exchange WHY показаны раздельно,
+  race/abort-защита, ошибки изолированы от графика; без записей и без Strategy.enabled
+- P1-D (СЛЕДУЮЩИЙ): визуальные primitives поверх свечей — BOS/CHoCH,
+  structural levels, liquidity/sweeps, FVG/OB-зоны, dealing range,
+  premium/equilibrium/discount, подсветка `factIds`; после него —
+  canvas/primitives-приёмка на VPS
 - Собственный график на PostgreSQL-свечах, оверлеи SMC, объяснение `WHY` сигнала
 
 **P2 — Backtest Engine / тестер стратегий**

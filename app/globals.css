@@ -1249,6 +1249,124 @@ td:nth-child(2) {
   font-size: 12px;
 }
 
+/* ---------- P1-C: панель Smart Money (read-only, без primitives) ---------- */
+
+.smcPanel {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel2);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  font-size: 13px;
+}
+
+.smcPanel--error {
+  border-color: var(--red);
+}
+
+.smcHead,
+.smcMarketHead {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.smcTitle {
+  font-weight: 600;
+}
+
+.smcLine {
+  width: 100%;
+  font-size: 12px;
+}
+
+.smcLine--warn {
+  color: var(--red);
+}
+
+.smcChip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.smcVerdict {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+}
+
+.smcVerdict--long {
+  color: var(--green);
+  background: rgba(25, 183, 122, 0.12);
+}
+
+.smcVerdict--short {
+  color: var(--red);
+  background: rgba(240, 68, 92, 0.12);
+}
+
+.smcVerdict--neutral {
+  color: var(--muted);
+}
+
+.smcVerdict--none {
+  color: var(--muted);
+  border-style: dashed;
+}
+
+.smcMarkets {
+  width: 100%;
+}
+
+.smcMarketsNote {
+  font-size: 11px;
+  margin: 4px 0 2px;
+}
+
+.smcMarket {
+  border-top: 1px solid var(--line);
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+.smcMarketName {
+  font-weight: 600;
+}
+
+.smcList,
+.smcReasons {
+  width: 100%;
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  list-style: none;
+}
+
+.smcReason {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.smcReasonFact {
+  color: var(--accent);
+}
+
+.smcTechnical,
+.smcDisclaimer {
+  width: 100%;
+  font-size: 11px;
+}
+
 @media (max-width: 640px) {
   .chartCard {
     padding: 10px;
