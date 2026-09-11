@@ -1991,6 +1991,7 @@ VPS browser acceptance 9bf14ce: пункт «Стратегии»
 ГРАНИЦЫ:
 - API /api/chart/smc, CandleChart/UI, fancy-canvas, package changes —
   НЕ создаются в P1-A (только чистая подготовка DTO/проекции).
+  (API /api/chart/smc добавлен ПОЗЖЕ в P1-B — см. §31i.)
 - Будущая кнопка на графике «Смарт Мани Вкл/Выкл» управляет ТОЛЬКО
   UI-оверлеями; она НЕ трогает global Strategy.enabled и не пишет в БД.
 - ПРОДУКТОВЫЙ UNIVERSE = TOP-100 (НЕ 500). Legacy
@@ -2002,6 +2003,64 @@ VPS browser acceptance 9bf14ce: пункт «Стратегии»
   sessions, audit. СЕЙЧАС НЕ РЕАЛИЗОВЫВАТЬ.
 - Signal Engine остаётся будущим P5 (только после приёмки стратегии
   и бэктеста).
+
+---
+
+## §31i. P1-B — read-only API boundary /api/chart/smc (11.09.2026)
+
+API CONTRACT:
+- GET /api/chart/smc?symbol=BTC&timeframe=1h (только GET; других
+  методов нет). Таймфреймы: 5m/15m/1h/4h/1d.
+- Ответ 200 — точный P1-A SmcChartProjection DTO (второго contract
+  нет): per-exchange overlays + aggregate summary строго разделены.
+- symbol: существующий parseSymbolParam (canonicalize A-Z0-9, <=16);
+  timeframe: существующий parseTimeframeParam (белый список).
+- Ошибки — { error } с русским сообщением: 400 INVALID_SYMBOL /
+  INVALID_TIMEFRAME / STRATEGY_TIMEFRAME_UNSUPPORTED, 404
+  ASSET_NOT_FOUND, 503 STRATEGY_MISSING / STRATEGY_INVALID /
+  «База данных временно недоступна»; без stack/secrets клиенту.
+- cannot-evaluate / нет рынков / нет свечей / нет общего горизонта —
+  НЕ HTTP-ошибки: семантика в DTO (aggregate.status, per-market
+  status); cannot-evaluate никогда не превращается в direction=NEUTRAL,
+  unsafe alignment не прячется под успешный aggregate.
+
+READ-ONLY ГАРАНТИИ:
+- lib/chart/smc-api-service.ts — тонкий boundary: только загрузка и
+  валидация входа + вызов существующей P1-A проекции; все вычисления
+  SMC — внутри projectSmcChart, второго алгоритма нет.
+- deps-интерфейс содержит ТОЛЬКО чтение (asset.findUnique,
+  strategy.findFirst, market.findMany, candle.findMany); никаких
+  Prisma create/update/upsert/delete, никаких Signal writes,
+  никаких Strategy/Market/Candle writes — проверяется статически и
+  поведенчески (fake без write-методов) в test-smc-api-service.
+- Strategy читается из PostgreSQL: slug smart-money-suslik, latest
+  version, config через существующий validateSmartMoneyRuntime.
+  Engineering-config fallback запрещён (нет/невалидна → 503).
+  Strategy.enabled/status не влияют на выдачу и не меняются: оверлеи
+  графика — НЕ переключатель global Strategy.enabled.
+
+DATA SOURCE / BOUNDS:
+- только PostgreSQL CLOSED свечи; никаких внешних бирж и worker'ов.
+- bounded query: существующий loadSmartMoneyCandles — последние 500
+  CLOSED (DESC take 500 → reverse ASC), как в production runtime.
+- Рынки: enabled + ACTIVE + SPOT + USDT (convention /api/chart/*).
+- common-horizon checks НЕ ослабляются; eligibility целиком внутри
+  проекции: для 1d BINGX исключается существующей Option A (4/4
+  BINANCE/BYBIT/GATE/KUCOIN), special-case в route не дублируется.
+- Top-100: semantics существующая (top500Only=true = Top-100
+  universe), Top-500 не создаётся.
+
+TESTS: scripts/test-smc-api-service.ts (111 проверок) — valid 5m,
+valid 1d Option A, malformed/unsupported timeframe, symbol validation,
+missing asset/markets/data, cannot-evaluate, exact DTO projection
+preservation (побайтовое равенство с прямым вызовом P1-A проекции),
+aggregate без overlay-массивов, OB_FVG_CONFLUENCE factIds=[],
+exact OB/FVG factIds не теряются, no future/open candle leakage
+(future CLOSED → future_horizon fail-closed), поведенческий no-write,
+deterministic повторный результат.
+
+ЯВНО: UI к графику ЕЩЁ НЕ подключён (кнопка «Смарт Мани» — позже,
+только UI-state); Signal Engine НЕ входит (остаётся будущим P5).
 
 
 ==================================================
@@ -2055,6 +2114,10 @@ HEAD: `9085d55936b20d54add3ab6a1534515be2d3480b` (RANGE_POSITION CLOSED/UNDERSTO
   scripts/test-smc-projection.ts; per-exchange overlays и aggregate
   summary строго разделены; кнопка «Смарт Мани Вкл/Выкл» — только
   UI overlays, НЕ global Strategy.enabled
+- P1-B (11.09.2026): read-only API boundary GET /api/chart/smc —
+  тонкий сервис над P1-A проекцией (lib/chart/smc-api-service.ts),
+  PostgreSQL CLOSED-свечи через существующий bounded loader,
+  Strategy из БД без engineering-fallback; UI ещё не подключён
 - Собственный график на PostgreSQL-свечах, оверлеи SMC, объяснение `WHY` сигнала
 
 **P2 — Backtest Engine / тестер стратегий**
