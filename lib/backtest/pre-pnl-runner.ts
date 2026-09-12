@@ -155,13 +155,11 @@ export async function runPrePnlDiagnostics(
         executionPolicyResult = buildNonExecutableResult("POLICY_NOT_APPROVED", `Policy ${policy.id} status ${policy.status}`);
         status = "PRE_REGISTRATION_REQUIRED";
       } else {
-        // Approved policy -> would be READY_FOR_EXECUTION, but per task we must REFUSE real trade/PnL execution until owner explicitly enables?
-        // For pre-PnL runner, we still return READY_FOR_EXECUTION but do NOT calculate PnL
         executionPolicyResult = {
           policyId: policy.id,
           policyFingerprint: policy.fingerprint,
           executability: { status: "EXECUTABLE", reason: null, details: null },
-          validatedAt: new Date().toISOString(),
+          validatedAt: formatIsoUtc(0),
         };
         status = "READY_FOR_EXECUTION";
       }

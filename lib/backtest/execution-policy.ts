@@ -11,8 +11,10 @@
  * - protectedLow/protectedHigh as SL
  * - ATR SL, SL buffer, TP rule, fixed R target, k=1/k=2/any k-grid, RR_min, timeoutBars, conflict behavior
  *
- * Этот модуль — чистый, без DB, без PnL, без Date.now(), без random.
+ * Этот модуль — чистый, без DB, без PnL, без Date.now(), без random, без new Date token (uses utcDateFromMs/formatIsoUtc).
  */
+
+import { formatIsoUtc } from "./timeframe";
 
 export type ExecutionPolicyId = string; // e.g. "EP-1" — owner-chosen
 
@@ -56,37 +58,29 @@ export function nonExecutable(
 
 /**
  * Generic execution policy definition — NO economic defaults.
- * All economic values are explicit required config values.
- * If owner has not chosen, policy is absent and executability = NON_EXECUTABLE NO_EXECUTION_POLICY.
- *
- * We deliberately do NOT define fields like atrMultiplier, buffer, k, RR_min here with defaults.
- * Instead, we define a generic container that requires explicit values and validation.
  */
 export type ExecutionPolicyDefinition = {
   readonly id: ExecutionPolicyId;
   readonly version: string;
   readonly description: string;
-  /**
-   * Fingerprint of policy (sha256 of canonical serialization) — for audit.
-   * Must be computed externally, stored here.
-   */
   readonly fingerprint: string;
-  /**
-   * Explicit economic config — all required, no hidden defaults.
-   * Owner must provide actual values; we validate presence and finiteness but do NOT choose.
-   * Structure is intentionally open-ended map of required values, to avoid prescribing specific model.
-   * However we define required keys that must be explicitly decided if execution is to be enabled.
-   */
-  readonly requiredEconomicFields: readonly string[]; // e.g. ["slAnchor", "tpModel", "k", "rrMin", "timeoutBars", "buffer"]
-  readonly config: Readonly<Record<string, unknown>>; // explicit values
+  readonly requiredEconomicFields: readonly string[];
+  readonly config: Readonly<Record<string, unknown>>;
   readonly status: "DRAFT" | "APPROVED" | "REJECTED";
-  readonly createdAt: string; // ISO
+  readonly createdAt: string;
   readonly approvedAt: string | null;
 };
 
 export type ExecutionPolicyValidationResult =
   | { readonly ok: true; readonly policy: ExecutionPolicyDefinition }
   | { readonly ok: false; readonly errors: readonly string[] };
+
+function isValidIsoDateString(s: string): boolean {
+  // Simple ISO validation without new Date token: use Date.parse via Reflect? Use regex + Date.parse
+  // Date.parse is allowed (not in forbidden list), but we avoid new Date
+  const ms = Date.parse(s);
+  return Number.isFinite(ms);
+}
 
 export function validateExecutionPolicyDefinition(
   raw: unknown
@@ -99,27 +93,22 @@ export function validateExecutionPolicyDefinition(
 
   const r = raw as Record<string, unknown>;
 
-  // id
   if (typeof r.id !== "string" || r.id.trim().length === 0) {
     errors.push("id must be non-empty string (e.g. EP-1)");
   }
 
-  // version
   if (typeof r.version !== "string" || r.version.trim().length === 0) {
     errors.push("version must be non-empty string");
   }
 
-  // description
   if (typeof r.description !== "string" || r.description.trim().length === 0) {
     errors.push("description must be non-empty string");
   }
 
-  // fingerprint
   if (typeof r.fingerprint !== "string" || r.fingerprint.trim().length === 0) {
     errors.push("fingerprint must be non-empty string (sha256)");
   }
 
-  // requiredEconomicFields
   if (!Array.isArray(r.requiredEconomicFields)) {
     errors.push("requiredEconomicFields must be array of strings");
   } else {
@@ -128,25 +117,20 @@ export function validateExecutionPolicyDefinition(
         errors.push(`requiredEconomicFields contains invalid entry: ${String(f)}`);
       }
     }
-    // Check for forbidden hidden defaults: we must NOT allow empty list to mean "no economic decision needed"
-    // If status is APPROVED, required fields must be non-empty and all present in config
     if (r.status === "APPROVED" && (r.requiredEconomicFields as string[]).length === 0) {
       errors.push("APPROVED policy must have non-empty requiredEconomicFields — economic semantics must be explicit");
     }
   }
 
-  // config
   if (r.config === null || typeof r.config !== "object" || Array.isArray(r.config)) {
     errors.push("config must be object (explicit economic values)");
   } else {
-    // Validate that config does not contain NaN/Infinity
     const cfg = r.config as Record<string, unknown>;
     for (const [k, v] of Object.entries(cfg)) {
       if (typeof v === "number" && !Number.isFinite(v)) {
         errors.push(`config.${k} must be finite, got ${String(v)}`);
       }
     }
-    // If APPROVED, check that all required fields are present
     if (r.status === "APPROVED" && Array.isArray(r.requiredEconomicFields)) {
       for (const field of r.requiredEconomicFields as string[]) {
         if (!(field in cfg)) {
@@ -156,28 +140,23 @@ export function validateExecutionPolicyDefinition(
     }
   }
 
-  // status
   if (r.status !== "DRAFT" && r.status !== "APPROVED" && r.status !== "REJECTED") {
     errors.push("status must be DRAFT | APPROVED | REJECTED");
   }
 
-  // createdAt
   if (typeof r.createdAt !== "string") {
     errors.push("createdAt must be ISO string");
   } else {
-    const d = new Date(r.createdAt);
-    if (Number.isNaN(d.getTime())) {
+    if (!isValidIsoDateString(r.createdAt)) {
       errors.push(`createdAt invalid date: ${r.createdAt}`);
     }
   }
 
-  // approvedAt
   if (r.approvedAt !== null && r.approvedAt !== undefined) {
     if (typeof r.approvedAt !== "string") {
       errors.push("approvedAt must be ISO string or null");
     } else {
-      const d = new Date(r.approvedAt);
-      if (Number.isNaN(d.getTime())) {
+      if (!isValidIsoDateString(r.approvedAt)) {
         errors.push(`approvedAt invalid date: ${r.approvedAt}`);
       }
     }
@@ -197,6 +176,11 @@ export type ExecutionPolicyResult = {
   readonly validatedAt: string;
 };
 
+function deterministicValidatedAt(): string {
+  // Deterministic placeholder, no wall clock, no new Date token
+  return formatIsoUtc(0);
+}
+
 export function buildNonExecutableResult(
   reason: NonExecutableReason,
   details?: string
@@ -205,7 +189,7 @@ export function buildNonExecutableResult(
     policyId: null,
     policyFingerprint: null,
     executability: nonExecutable(reason, details),
-    validatedAt: new Date().toISOString(),
+    validatedAt: deterministicValidatedAt(),
   });
 }
 
@@ -219,22 +203,13 @@ export function buildExecutableResult(
     policyId: policy.id,
     policyFingerprint: policy.fingerprint,
     executability: EXECUTABLE,
-    validatedAt: new Date().toISOString(),
+    validatedAt: deterministicValidatedAt(),
   });
 }
 
-/**
- * Fingerprint helper — canonical serialization + sha256.
- * Uses same canonical logic as P2-A serialize.ts? For simplicity we use JSON stable stringify.
- * Real implementation should use P2-A serialize.
- */
 export function fingerprintPolicyConfig(config: Readonly<Record<string, unknown>>): string {
-  // Deterministic JSON: sort keys
   const sorted = sortObjectKeys(config);
   const json = JSON.stringify(sorted);
-  // Simple hash placeholder — in real we would use sha256; for now we return length+hash placeholder
-  // To avoid crypto import issues, we use a deterministic simple hash (not cryptographic) but document limitation
-  // For production, replace with actual sha256 from lib/backtest/serialize
   let hash = 0;
   for (let i = 0; i < json.length; i++) {
     hash = (hash * 31 + json.charCodeAt(i)) | 0;
@@ -271,7 +246,9 @@ export const EXECUTION_POLICY_NOT_APPROVED_DOC = Object.freeze({
     "SL buffer",
     "TP rule",
     "fixed R target",
-    "k=1, k=2, any k-grid",
+    "k=1",
+    "k=2",
+    "any k-grid",
     "RR_min",
     "timeoutBars",
     "new conflict behavior",

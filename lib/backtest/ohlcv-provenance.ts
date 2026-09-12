@@ -13,7 +13,10 @@
  * - no point-in-time history table exists
  *
  * Этот модуль предоставляет read-only диагностику и аудит write paths.
+ * No new Date token (uses formatIsoUtc).
  */
+
+import { formatIsoUtc } from "./timeframe";
 
 export type OhlcvWritePathAudit = {
   readonly file: string;
@@ -105,8 +108,8 @@ export function computeOhlcvProvenanceDiagnostics(
     rowsWithCreatedAt,
     rowsWithUpdatedAt,
     rowsWhereUpdatedAtDiffersFromCreatedAt: rowsWhereDiff,
-    earliestCreatedAt: earliestCreatedAtMs !== null ? new Date(earliestCreatedAtMs).toISOString() : null,
-    latestUpdatedAt: latestUpdatedAtMs !== null ? new Date(latestUpdatedAtMs).toISOString() : null,
+    earliestCreatedAt: earliestCreatedAtMs !== null ? formatIsoUtc(earliestCreatedAtMs) : null,
+    latestUpdatedAt: latestUpdatedAtMs !== null ? formatIsoUtc(latestUpdatedAtMs) : null,
     knownLimitations: OHLCV_PROVENANCE_LIMITATIONS,
     writePathAudits: KNOWN_OHLCV_WRITE_PATHS,
   });
@@ -132,11 +135,6 @@ export function formatOhlcvProvenanceReport(diag: OhlcvProvenanceDiagnostics): s
   return lines.join("\n");
 }
 
-/**
- * Static audit helper: check that no other unexpected Candle write paths exist
- * beyond the known one. This is best-effort static inspection, not runtime sandbox.
- * Real audit should grep for "prisma.candle.create" etc in lib/.
- */
 export const EXPECTED_CANDLE_WRITE_FILES = Object.freeze(["lib/ohlcv/sync.ts"]);
 
 export function auditCandleWritePaths(foundFiles: readonly string[]): {
