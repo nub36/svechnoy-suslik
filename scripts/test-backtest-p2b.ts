@@ -34,6 +34,24 @@
  * - FIX 5 (§12): no-lookahead — только context-channel-only формулировка:
  *   структурный барьер SignalContext + контрфакт; утечка через замыкание/
  *   глобальную переменную документирована как НЕ доказуемо предотвращённая.
+ *
+ * HARDENING #3 (2026-09-12) — FINAL NARROW TEST/DOC FIX (родитель 3234007):
+ * - §5d: TEST-PIN финальной output-ASC-проверки (V1 API и V2 API) против
+ *   post-fetch мутации УЖЕ ПРИНЯТОЙ provider-owned строки/Date. Реализация
+ *   уже отклоняет такие входы (поведение не меняется); тест обязан падать,
+ *   если финальная ASC-проверка удалена/обойдена (mutation control отчёта).
+ * - Классификация мутаций уточнена (см. §16): M23/M31 (финальная ASC)
+ *   НЕ являются универсально эквивалентными — они эквивалентны только в
+ *   рамках документированного read-only контракта провайдера (строки не
+ *   мутируются после возврата); финальная ASC остаётся самостоятельной
+ *   defense-in-depth защитой от нарушений этого контракта. M6/M18/M19/M20
+ *   остаются эквивалентными по наблюдаемому поведению (адверсариальные
+ *   сценарии: M6 покрыт внешним deepFreeze результата; M18 недостижим при
+ *   живых page-ASC/cursor guard-ах; M19/M20 дублируют друг друга и вместе
+ *   покрыты финальной ASC).
+ * - Контракт провайдера (удержание provider-owned строк/Date во время
+ *   пагинации, копии при публикации, maxRows) задокументирован в
+ *   lib/backtest/data-source.ts.
  */
 
 import type { BacktestBar } from "../lib/backtest/contract";
@@ -1184,6 +1202,114 @@ ok(!assertReadOnlyDeps(badDeps3).ok, "deps: detects $executeRaw");
   ok(fitFullPageRes.rows.length === 3, "FIX3: exact maxRows with full terminal page succeeds (no off-by-one fail)");
 
   /* ------------------------------------------------------------------ */
+  /* 5d. FINAL ASC DEFENSE — TEST-PIN (HARDENING #3)                     */
+  /* ------------------------------------------------------------------ */
+  /* Поведение реализации здесь НЕ меняется: финальная output-ASC-проверка */
+  /* уже есть в V1 и V2. Независимый mutation re-audit показал, что её     */
+  /* удаление (M23/M31) НАБЛЮДАЕМО, если провайдер мутирует Date/строку,  */
+  /* которую он уже отдал и которая уже принята пагинацией: без проверки  */
+  /* fetch молча публикует не-ASC вывод ([04:00,01:00,03:00]) или         */
+  /* дубликаты timestamp. Контракт провайдера — read-only (не мутировать  */
+  /* отданные строки), но финальная ASC-проверка остаётся независимой     */
+  /* defense-in-depth против нарушений этого контракта.                    */
+  /* Эти ассерты обязаны ПАДАТЬ, если финальная ASC-проверка удалена.      */
+
+  // (a) V2: провайдер мутирует УЖЕ ПРИНЯТУЮ строку первой страницы
+  //     (сдвигает openTime вперёд) и отдаёт вторую страницу.
+  const ascDefenseRowsA = makeSequentialRows(10, "1h", 2, T0);
+  let ascDefenseCallA = 0;
+  const ascDefenseDepsA = makeV2ScriptedDeps(() => {
+    ascDefenseCallA += 1;
+    if (ascDefenseCallA === 1) return ascDefenseRowsA;
+    ascDefenseRowsA[0].openTime.setTime(T0 + 100 * H1);
+    return [mkRow(10, "1h", T0 + 3 * H1)];
+  });
+  const ascDefenseResA = await fetchCandlesPaginatedV2({
+    ...v2Args,
+    deps: ascDefenseDepsA.deps,
+    pageSize: 2,
+  }).catch((e) => e);
+  ok(
+    ascDefenseResA instanceof Error,
+    "AST-V2-a final ASC: post-fetch мутация принятой строки → fail closed (иначе был бы не-ASC вывод)"
+  );
+  ok(
+    ascDefenseResA instanceof Error && /final not strictly ASC/.test(String(ascDefenseResA.message)),
+    "AST-V2-b final ASC: сработала именно финальная ASC-проверка V2 (message identity)"
+  );
+  ok(
+    ascDefenseRowsA[0].openTime.getTime() === T0 + 100 * H1,
+    "AST-V2-c final ASC: мутация действительно произошла (сценарий валиден, не no-op)"
+  );
+
+  // (b) V2: провайдер мутирует НАЗАД строку, на которой стоит cursor
+  //     (класс «дубликаты timestamp в выводе»).
+  const ascDefenseRowsB = makeSequentialRows(10, "1h", 2, T0);
+  let ascDefenseCallB = 0;
+  const ascDefenseDepsB = makeV2ScriptedDeps(() => {
+    ascDefenseCallB += 1;
+    if (ascDefenseCallB === 1) return ascDefenseRowsB;
+    ascDefenseRowsB[1].openTime.setTime(T0);
+    return [mkRow(10, "1h", T0 + 2 * H1)];
+  });
+  const ascDefenseResB = await fetchCandlesPaginatedV2({
+    ...v2Args,
+    deps: ascDefenseDepsB.deps,
+    pageSize: 2,
+  }).catch((e) => e);
+  ok(
+    ascDefenseResB instanceof Error && /final not strictly ASC/.test(String(ascDefenseResB.message)),
+    "AST-V2-d final ASC: cursor-строка мутирована назад → fail closed (без проверки были бы дубликаты timestamp)"
+  );
+
+  // (c) V1 API: та же защита обязана держать и старую сигнатуру.
+  const ascDefenseV1Rows = makeSequentialRows(10, "1h", 2, T0);
+  let ascDefenseV1Call = 0;
+  const ascDefenseV1Deps = {
+    asset: { findUnique: async () => ({ id: 1, symbol: "BTC" }) },
+    market: { findMany: async () => [] },
+    candle: {
+      findMany: async () => {
+        ascDefenseV1Call += 1;
+        if (ascDefenseV1Call === 1) return ascDefenseV1Rows;
+        ascDefenseV1Rows[0].openTime.setTime(T0 + 100 * H1);
+        return [mkRow(10, "1h", T0 + 3 * H1)];
+      },
+      count: async () => 0,
+    },
+  } as unknown as BacktestDataDeps;
+  const ascDefenseV1Res = await fetchCandlesPaginated(
+    ascDefenseV1Deps,
+    10,
+    "1h",
+    new Date(T0),
+    new Date(T0 + 10 * H1),
+    2
+  ).catch((e) => e);
+  ok(
+    ascDefenseV1Res instanceof Error,
+    "AST-V1-a final ASC: post-fetch мутация принятой строки → fail closed (V1 API)"
+  );
+  ok(
+    ascDefenseV1Res instanceof Error && /final array not strictly ASC/.test(String(ascDefenseV1Res.message)),
+    "AST-V1-b final ASC: сработала именно финальная ASC-проверка V1 (message identity)"
+  );
+
+  // (d) Положительный контроль: добросовестный многостраничный fetch строго ASC.
+  const ascDefenseOkRes = await fetchCandlesPaginatedV2({
+    ...v2Args,
+    deps: makeV2Deps(allCandles) as any,
+    to: new Date(T0 + 25 * H1),
+  });
+  ok(
+    ascDefenseOkRes.rows.every(
+      (row, index) =>
+        index === 0 || row.openTime.getTime() > ascDefenseOkRes.rows[index - 1].openTime.getTime()
+    ),
+    "AST-ok final ASC: добросовестный многостраничный fetch строго ASC (положительный контроль)"
+  );
+
+  /* ------------------------------------------------------------------ */
   /* 6. Aggregate — order-independent, never >1                         */
   /* ------------------------------------------------------------------ */
 
@@ -2042,6 +2168,34 @@ ok(!assertReadOnlyDeps(badDeps3).ok, "deps: detects $executeRaw");
   ok(convRange.endIndex === convRange.endIndexExclusive - 1, "mutation: endIndex = exclusive-1");
 
   // pageSize guards: already tested
+
+  /* ------------------------------------------------------------------ */
+  /* 16b. Классификация мутаций — УТОЧНЕНИЕ (HARDENING #3)               */
+  /* ------------------------------------------------------------------ */
+  /* Независимый mutation re-audit (адверсариальные входы, включая
+   * мутацию провайдером уже принятой строки) уточняет claim #2:
+   *
+   * M23/M31 (УДАЛЕНИЕ финальной output-ASC-проверки) — НЕ «универсально
+   *   эквивалентные мутанты». При добросовестном (read-only, non-mutating)
+   *   провайдере проверка избыточна, потому что конкатенация страниц уже
+   *   строго ASC (page-ASC + cursor guards). Но если провайдер мутирует
+   *   Date/строку ПОСЛЕ того, как пагинация её приняла, финальная ASC —
+   *   единственный guard, который это ловит: при её удалении fetch
+   *   публикует не-ASC вывод ([04:00,01:00,03:00]) или дубликаты
+   *   timestamp. Поэтому: «redundant under the documented non-mutating /
+   *   read-only provider contract; final ASC remains an independently
+   *   valuable defense against post-fetch mutation of already accepted
+   *   provider-owned rows». Наблюдаемо запинено в §5d (mutation control:
+   *   удаление финальной ASC → §5d падает).
+   *
+   * M6 (внутренний freeze contiguousRanges) — эквивалентен: поле всё равно
+   *   заморожено внешним deepFreeze результата (мутация падает).
+   * M18 (duplicate-openTime guard) — эквивалентен: при живых page-ASC и
+   *   cursor guard-ах дубликат в V2 недостижим, наблюдаемое поведение
+   *   (fail closed) сохраняется через них.
+   * M19/M20 (cursor guards) — эквивалентны друг другу (одно и то же
+   *   условие firstMs <= lastCursorMs) и вместе покрыты финальной ASC.
+   */
 
   /* ------------------------------------------------------------------ */
   /* 17. P2-A certification pending documentation check                 */
