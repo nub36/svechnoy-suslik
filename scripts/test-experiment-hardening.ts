@@ -17,9 +17,15 @@
  *  C7 — изоляция отпечатков OOS: изменение только OOS меняет отпечатки,
  *       но не выбор/ранжирование по TRAIN/VALIDATION.
  *
+ * HARDENING #3: проводка `experimentInvariantErrors` в `runExperiment`
+ * пинится ТОЛЬКО тестом (чтение исходника + мутационный контроль вне
+ * дерева); продакшн-швов и изменяемого модульного состояния в слое нет.
+ *
  * Всё — синтетические фикстуры; доходность не считается и не заявляется.
  */
 
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   type BacktestBar,
   type BacktestResult,
@@ -59,8 +65,7 @@ import {
   BACKTEST_FAILURE_STAGE_MAP,
   experimentInvariantErrors,
   runExperiment,
-  runExperimentReport,
-  setExperimentInvariantProbe
+  runExperimentReport
 } from "../lib/experiment/run";
 import { buildSelectionRecord, rankEvidence } from "../lib/experiment/selection";
 import {
@@ -1976,70 +1981,95 @@ ok(
 );
 
 /* ------------------------------------------------------------------ */
-/* HARDENING #2, FIX 2 — end-to-end пин проводки цепочки инвариантов    */
+/* HARDENING #3, FIX 1 — пин проводки БЕЗ продакшн-шва (test-only)      */
 /* ------------------------------------------------------------------ */
 
-const WIRING_PROBE_MARKER =
-  "hardening #2: шов проводки цепочки инвариантов (end-to-end)";
+const EXPERIMENT_DIR = join(process.cwd(), "lib", "experiment");
+const RUN_EXPERIMENT_SOURCE = readFileSync(join(EXPERIMENT_DIR, "run.ts"), "utf8");
+const normalizedRunSource = RUN_EXPERIMENT_SOURCE.replace(/\s+/g, " ");
+const runExperimentBody = (() => {
+  const start = normalizedRunSource.indexOf(
+    "export function runExperiment(input: ExperimentInput): ExperimentOutcome {"
+  );
 
-/** Шов исполняется ВНУТРИ цепочки: если runExperiment её не потребляет — маркер не всплывёт. */
-const wiredOutcome = (() => {
-  setExperimentInvariantProbe(() => [WIRING_PROBE_MARKER]);
-
-  try {
-    return runExperiment(INPUT_BASE);
-  } finally {
-    setExperimentInvariantProbe(null);
+  if (start < 0) {
+    return "";
   }
+
+  const end = normalizedRunSource.indexOf(" export function ", start + 1);
+
+  return normalizedRunSource.slice(start, end < 0 ? undefined : end);
 })();
 
 ok(
-  !wiredOutcome.ok &&
-    wiredOutcome.stage === "invariant" &&
-    wiredOutcome.errors.includes(WIRING_PROBE_MARKER),
-  "FIX 2 (H2): runExperiment ПОТРЕБЛЯЕТ цепочку инвариантов — шов на её выходе меняет исход (end-to-end)"
+  runExperimentBody.includes(
+    "const invariantErrors: readonly string[] = experimentInvariantErrors(record);"
+  ),
+  "M4b (H3): runExperiment ВЫЗЫВАЕТ experimentInvariantErrors(record) — source-пин проводки"
+);
+ok(
+  runExperimentBody.includes(
+    'if (invariantErrors.length > 0) { return { ok: false, stage: "invariant", errors: invariantErrors }; }'
+  ),
+  "M4b (H3): результат цепочки УПРАВЛЯЕТ исходом (fail-closed возврат stage=invariant)"
+);
+ok(
+  (RUN_EXPERIMENT_SOURCE.match(/experimentInvariantErrors\(record\)/g) ?? [])
+    .length === 1,
+  "M4b (H3): вызов цепочки в run.ts ровно один — обходных путей нет"
+);
+ok(
+  !RUN_EXPERIMENT_SOURCE.includes("setExperimentInvariantProbe") &&
+    !RUN_EXPERIMENT_SOURCE.includes("invariantProbe"),
+  "H3: продакшн-шов и его изменяемое состояние удалены из run.ts"
 );
 
-const additiveOutcome = (() => {
-  setExperimentInvariantProbe(() => []);
+const experimentLayerFiles = readdirSync(EXPERIMENT_DIR)
+  .filter((name) => name.endsWith(".ts"))
+  .sort();
+const probeHits = experimentLayerFiles.filter((name) => {
+  const source = readFileSync(join(EXPERIMENT_DIR, name), "utf8");
 
-  try {
-    return runExperiment(INPUT_BASE);
-  } finally {
-    setExperimentInvariantProbe(null);
-  }
-})();
+  return (
+    source.includes("setExperimentInvariantProbe") ||
+    source.includes("invariantProbe") ||
+    source.includes("InvariantProbe")
+  );
+});
 
 ok(
-  additiveOutcome.ok,
-  "FIX 2 (H2): аддитивный шов с пустым результатом не отвергает подлинную запись"
+  probeHits.length === 0,
+  `H3: во всём слое lib/experiment (${String(experimentLayerFiles.length)} файлов) нет probe-хуков/состояния`
 );
 
-const additiveAddsNotReplaces = (() => {
-  setExperimentInvariantProbe(() => [WIRING_PROBE_MARKER]);
-
-  try {
-    return (
-      experimentInvariantErrors(emptyLimitationsRecord).includes(
-        WIRING_PROBE_MARKER
-      ) &&
-      experimentInvariantErrors(emptyLimitationsRecord).some((error) =>
-        error.includes("limitations")
-      )
-    );
-  } finally {
-    setExperimentInvariantProbe(null);
-  }
-})();
+/* Негативный контроль (обязательный): два НЕСВЯЗАННЫХ прогона подряд —
+   публичного API инъекции ошибок инварианта или иного модульно-глобального
+   тестового канала не осталось; отпечаток повторного прогона не зависит от
+   промежуточного. */
+const UNRELATED_SUBJECT: ExperimentSubjectInput = {
+  strategy: { slug: "hardening-h3-other", version: "0.0.0" },
+  market: { asset: "BTCUSDT", exchange: null, timeframe: "1h", timeframeMs: H1 }
+};
+const UNRELATED_INPUT: ExperimentInput = {
+  bars: zigzag(120),
+  subject: UNRELATED_SUBJECT,
+  variants: [variant("gamma", true)],
+  selectionPolicy: { kind: "select-by-rank", stage: "TRAIN", criteria: ["netPnl"] }
+};
+const firstH3Run = runExperiment(INPUT_BASE);
+const unrelatedH3Run = runExperiment(UNRELATED_INPUT);
+const repeatedH3Run = runExperiment(INPUT_BASE);
 
 ok(
-  additiveAddsNotReplaces,
-  "FIX 2 (H2): шов ДОБАВЛЯЕТ ошибку, но не заменяет/не отключает существующие проверки"
+  firstH3Run.ok && unrelatedH3Run.ok && repeatedH3Run.ok,
+  "H3: два несвязанных прогона подряд валидны (нет глобального канала инъекции)"
 );
-
 ok(
-  experimentInvariantErrors(RECORD).length === 0 && runExperiment(INPUT_BASE).ok,
-  "FIX 2 (H2): после снятия шва поведение восстановлено (positive control)"
+  firstH3Run.ok &&
+    repeatedH3Run.ok &&
+    fingerprintExperiment(firstH3Run.record) ===
+      fingerprintExperiment(repeatedH3Run.record),
+  "H3: отпечаток повторного прогона не зависит от промежуточного несвязанного"
 );
 
 /* ------------------------------------------------------------------ */
