@@ -193,21 +193,40 @@ export function projectEvidence(report: SegmentReport): EvidenceMetrics {
   });
 }
 
+/**
+ * Свидетельство по ОДНОМУ сегменту.
+ *
+ * Статус и причина отказа берутся у САМОГО сегмента (пункт 22в), а не из
+ * сводного статуса варианта: отказ OOS-сегмента не должен превращать
+ * TRAIN-свидетельство в «rejected» и выкидывать конфигурацию из
+ * TRAIN/VALIDATION-ранжирования. Для неразрешённых вариантов (segments === null)
+ * сегментов нет, поэтому используется причина отказа уровня варианта.
+ */
 function evidenceEntry(
   variant: VariantRecord,
   segment: SplitName
 ): EvidenceEntry {
   const record = variant.segments === null ? null : variant.segments[segment];
   const report = record === null || record.report === null ? null : record.report;
+  const evaluated = record !== null && record.status === "ok" && report !== null;
 
   return {
     configurationId: variant.configurationId,
+    selectionKey: variant.selectionKey,
     label: variant.label,
     inputOrder: variant.inputOrder,
     presentationOrder: variant.presentationOrder,
-    status: variant.status,
-    rejectionReason: variant.rejection === null ? null : variant.rejection.reason,
-    metrics: report === null ? null : projectEvidence(report)
+    status: evaluated ? "evaluated" : "rejected",
+    rejectionReason: evaluated
+      ? null
+      : record === null
+        ? variant.rejection === null
+          ? "invalid-variant"
+          : variant.rejection.reason
+        : record.rejectionReason === null
+          ? "segment-failure"
+          : record.rejectionReason,
+    metrics: evaluated && report !== null ? projectEvidence(report) : null
   };
 }
 
@@ -233,6 +252,7 @@ function comparisonRow(variant: VariantRecord): ComparisonRow {
     presentationOrder: variant.presentationOrder,
     inputOrder: variant.inputOrder,
     configurationId: variant.configurationId,
+    selectionKey: variant.selectionKey,
     label: variant.label,
     status: variant.status,
     rejectionReason:

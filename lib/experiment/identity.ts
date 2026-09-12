@@ -25,6 +25,7 @@ import {
   fingerprintOf
 } from "../backtest/serialize";
 import {
+  SELECTION_KEY_SCOPE,
   type DataRange,
   type ExperimentSubject,
   type ExperimentSubjectInput,
@@ -215,6 +216,39 @@ export function configurationIdOf(args: {
   });
 }
 
+/**
+ * ВЫБОРНЫЙ (selection) ключ конфигурации — OOS-слепой ПО ПОСТРОЕНИЮ.
+ *
+ * Входы (исчерпывающе, см. `SELECTION_KEY_INPUTS`): subjectFingerprint,
+ * label, paramsFingerprint, configFingerprint, `signalSource.kind` и — только
+ * для provider-формы — объявленный `signalSource.signalSourceId`.
+ *
+ * В ключ СОЗНАТЕЛЬНО не входит `signalSource.fingerprint` list-формы:
+ * он покрывает весь список решений, включая решения OOS-окна, поэтому
+ * любое изменение только-OOS-части объявленного входа меняло бы полную
+ * `configurationId` (это правильно для происхождения) и НЕ должно менять
+ * выбор. Ни результаты, ни метрики, ни отчёты, ни статусы/ошибки сегментов
+ * в выборный ключ не входят: его невозможно «подсмотреть» в OOS.
+ */
+export function selectionKeyOf(args: {
+  readonly subjectFingerprint: string;
+  readonly label: string;
+  readonly paramsFingerprint: string;
+  readonly configFingerprint: string;
+  readonly signalSource: SignalSourceDescriptor;
+}): string {
+  return fingerprintOf({
+    scope: SELECTION_KEY_SCOPE,
+    subjectFingerprint: args.subjectFingerprint,
+    label: args.label,
+    paramsFingerprint: args.paramsFingerprint,
+    configFingerprint: args.configFingerprint,
+    signalSourceKind: args.signalSource.kind,
+    signalSourceId:
+      args.signalSource.kind === "provider" ? args.signalSource.signalSourceId : null
+  });
+}
+
 /** Вариант после попытки разрешения. */
 export interface VariantResolution {
   readonly inputOrder: number;
@@ -361,6 +395,13 @@ export function resolveVariants(
       configFingerprint,
       signalSource: source.descriptor
     });
+    const selectionKey = selectionKeyOf({
+      subjectFingerprint,
+      label: definition.label,
+      paramsFingerprint,
+      configFingerprint,
+      signalSource: source.descriptor
+    });
 
     if (seen.has(configurationId)) {
       resolutions.push({
@@ -389,7 +430,8 @@ export function resolveVariants(
         configFingerprint,
         paramsFingerprint,
         signalSource: source.descriptor,
-        configurationId
+        configurationId,
+        selectionKey
       },
       rejection: null,
       duplicateOfConfigurationId: null

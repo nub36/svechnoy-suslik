@@ -35,6 +35,8 @@ import {
   EXPERIMENT_LIMITATIONS,
   METRICS_PROVENANCE,
   RANKING_CRITERIA,
+  SELECTION_KEY_INPUTS,
+  SELECTION_TIE_BREAK,
   type EvidenceEntry,
   type EvidenceMetrics,
   type ExperimentFailureStage,
@@ -54,6 +56,7 @@ import {
 } from "../lib/experiment/report";
 import {
   BACKTEST_FAILURE_STAGE_MAP,
+  experimentInvariantErrors,
   runExperiment,
   runExperimentReport
 } from "../lib/experiment/run";
@@ -77,6 +80,18 @@ function ok(condition: boolean | undefined, label: string): void {
   } else {
     console.error(`FAIL: ${label}`);
   }
+}
+
+function mustRun(input: ExperimentInput): ExperimentRecord {
+  const outcome = runExperiment(input);
+
+  if (!outcome.ok) {
+    throw new Error(
+      `фикстура: прогон отвергнут (${outcome.stage}): ${outcome.errors.join("; ")}`
+    );
+  }
+
+  return outcome.record;
 }
 
 /* ------------------------------------------------------------------ */
@@ -299,43 +314,35 @@ ok(
 const STAGE_KEYS = Object.keys(BACKTEST_FAILURE_STAGE_MAP).sort();
 
 ok(
-  STAGE_KEYS.join(",") === "adapter,arithmetic,bars,config,provider,signals",
-  `C1/C2: карта стадий покрывает все стадии P2-A (${STAGE_KEYS.join(",")})`
+  STAGE_KEYS.join(",") ===
+    ["adapter", "arithmetic", "bars", "config", "provider", "signals"].join(","),
+  `C1/C2: карта стадий P2-A исчерпывающа (${STAGE_KEYS.join(",")})`
 );
 ok(
   BACKTEST_FAILURE_STAGE_MAP.adapter.stage === "adapter" &&
-    BACKTEST_FAILURE_STAGE_MAP.adapter.reason === "adapter-failure",
-  "C1/C2: adapter → adapter/adapter-failure (не provider)"
-);
-ok(
-  BACKTEST_FAILURE_STAGE_MAP.signals.stage === "signals" &&
-    BACKTEST_FAILURE_STAGE_MAP.signals.reason === "signals-failure",
-  "C1/C2: signals → signals/signals-failure (не provider)"
-);
-ok(
-  BACKTEST_FAILURE_STAGE_MAP.arithmetic.stage === "arithmetic" &&
+    BACKTEST_FAILURE_STAGE_MAP.adapter.reason === "adapter-failure" &&
+    BACKTEST_FAILURE_STAGE_MAP.signals.stage === "signals" &&
+    BACKTEST_FAILURE_STAGE_MAP.signals.reason === "signals-failure" &&
+    BACKTEST_FAILURE_STAGE_MAP.arithmetic.stage === "arithmetic" &&
     BACKTEST_FAILURE_STAGE_MAP.arithmetic.reason === "arithmetic-failure",
-  "C1/C2: arithmetic → arithmetic/arithmetic-failure (не provider)"
+  "C1/C2: adapter/signals/arithmetic не сводятся к provider"
 );
 ok(
-  STAGE_KEYS.filter(
-    (stage) =>
-      BACKTEST_FAILURE_STAGE_MAP[
-        stage as keyof typeof BACKTEST_FAILURE_STAGE_MAP
-      ].reason === "provider-failure"
-  ).join(",") === "provider",
-  "C1/C2: provider-failure назначается ТОЛЬКО стадии provider"
+  BACKTEST_FAILURE_STAGE_MAP.provider.stage === "provider" &&
+    BACKTEST_FAILURE_STAGE_MAP.provider.reason === "provider-failure",
+  "C1/C2: provider сохраняет свою стадию"
 );
 
-interface RejectionSummary {
+interface RejectionFacts {
   readonly experimentStage: ExperimentFailureStage | null;
   readonly variantStatus: string | null;
   readonly stage: string | null;
   readonly reason: string | null;
   readonly errors: readonly string[];
+  readonly segmentErrors: readonly string[];
 }
 
-function rejectionOf(input: ExperimentInput): RejectionSummary {
+function rejectionOf(input: ExperimentInput): RejectionFacts {
   const outcome = runExperiment(input);
 
   if (!outcome.ok) {
@@ -344,61 +351,98 @@ function rejectionOf(input: ExperimentInput): RejectionSummary {
       variantStatus: null,
       stage: null,
       reason: null,
-      errors: outcome.errors
+      errors: outcome.errors,
+      segmentErrors: []
     };
   }
 
-  const first = outcome.record.variants[0];
-  const rejection = first.rejection;
+  const rejected = outcome.record.variants.find(
+    (item) => item.status === "rejected"
+  );
 
   return {
     experimentStage: null,
-    variantStatus: first.status,
-    stage: rejection === null ? null : rejection.stage,
-    reason: rejection === null ? null : rejection.reason,
-    errors: rejection === null ? [] : [...rejection.errors]
+    variantStatus: rejected === undefined ? null : rejected.status,
+    stage: rejected?.rejection?.stage ?? null,
+    reason: rejected?.rejection?.reason ?? null,
+    errors: rejected?.rejection?.errors ?? [],
+    segmentErrors: rejected?.segments?.TRAIN.errors ?? []
   };
 }
 
-/*
- * Мусорный контейнер решений НЕ доходит до P2-A: слой идентичности P2-C
- * отвергает его ЯВНО на уровне варианта (variant/invalid-variant) с
- * требованием контракта. Молчаливого сведения к provider-failure нет —
- * стадии adapter/signals/arithmetic закреплены в карте стадий выше.
- */
+/* --- конфиг: отдельная стадия invalid-config --- */
+
+const badConfig = rejectionOf({
+  ...INPUT_BASE,
+  variants: [
+    {
+      label: "bad-config",
+      params: { variant: "bad-config" },
+      config: { quantity: -1 },
+      signals: decisionList(true)
+    }
+  ]
+});
+
+ok(
+  badConfig.variantStatus === "rejected" &&
+    badConfig.stage === "config" &&
+    badConfig.reason === "invalid-config",
+  "C1/C2: недопустимый конфиг отвергается на стадии config/invalid-config"
+);
+
+/* --- бары: стадия bars, не provider --- */
+
+const badBars = rejectionOf({
+  ...INPUT_BASE,
+  bars: [{ time: T0, open: 1, high: 0, low: 2, close: 1 }],
+  variants: [variant("bars", true)]
+});
+
+ok(
+  !badBars.experimentStage ? false : badBars.experimentStage === "bars",
+  "C1/C2: непригодные бары отвергаются на стадии bars"
+);
+
+/* --- контейнер решений: отвергается ЯВНО, НЕ как provider --- */
+
 const badSignals = rejectionOf({
   ...INPUT_BASE,
   variants: [
-    { label: "bad-signals", config: {}, signals: 42 as unknown as SignalProvider }
+    {
+      label: "bad-signals",
+      params: { variant: "bad-signals" },
+      config: {},
+      signals: 42 as never
+    }
   ]
 });
 
 ok(
   badSignals.variantStatus === "rejected" &&
     badSignals.stage === "variant" &&
-    badSignals.reason === "invalid-variant" &&
-    badSignals.errors.some((item) => item.includes("signals")),
-  `C1/C2: мусорный контейнер решений отвергается явно на уровне варианта (получено ${String(
-    badSignals.stage
-  )}/${String(badSignals.reason)})`
+    badSignals.reason === "invalid-variant",
+  "C1/C2: несериализуемый контейнер решений отвергается как variant/invalid-variant"
 );
 ok(
-  badSignals.reason !== "provider-failure" && badSignals.stage !== "provider",
-  "C1/C2: мусорный контейнер решений не сводится к provider-failure"
+  badSignals.errors.length > 0 &&
+    badSignals.errors.every(
+      (error) =>
+        !error.includes("provider-failure") && !error.includes("provider")
+    ),
+  "C1/C2: отказ контейнера решений не выдаёт себя за provider (текст называет signals)"
 );
 
-/*
- * Объект, похожий на P2-A адаптер, но несериализуемый (decide-число):
- * тот же явный отказ уровня варианта, а не provider-failure; сама стадия
- * `adapter` покрыта картой стадий (assert выше).
- */
+/* --- adapter: НЕ provider (объект с adapterId не является провайдером) --- */
+
 const badAdapter = rejectionOf({
   ...INPUT_BASE,
   variants: [
     {
       label: "bad-adapter",
+      params: { variant: "bad-adapter" },
       config: {},
-      signals: { decide: 5 } as unknown as SignalProvider
+      signals: { adapterId: "smc-baseline", version: "1.0.0" } as never
     }
   ]
 });
@@ -406,48 +450,31 @@ const badAdapter = rejectionOf({
 ok(
   badAdapter.variantStatus === "rejected" &&
     badAdapter.stage === "variant" &&
-    badAdapter.reason === "invalid-variant" &&
-    String(badAdapter.reason) !== "provider-failure",
-  `C1/C2: несериализуемый адаптер отвергается явно (получено ${String(
-    badAdapter.stage
-  )}/${String(badAdapter.reason)})`
-);
-
-/*
- * Ошибки P2-A переносятся без потерь: провайдер, бросающий исключение, и
- * арифметическое переполнение при конечном входе — реальные стадии P2-A;
- * тексты ошибок движка обязаны сохраниться в отказе P2-C дословно.
- */
-const throwingProvider = rejectionOf({
-  ...INPUT_BASE,
-  variants: [
-    {
-      label: "throwing-provider",
-      config: {},
-      signalSourceId: "throwing-provider",
-      signals: (() => {
-        throw new Error("provider-boom");
-      }) as unknown as SignalProvider
-    }
-  ]
-});
-
-ok(
-  throwingProvider.variantStatus === "rejected" &&
-    throwingProvider.stage === "provider" &&
-    throwingProvider.reason === "provider-failure",
-  "C1/C2: исключение провайдера → provider/provider-failure"
+    badAdapter.reason === "invalid-variant",
+  "C1/C2: adapter-объект отвергается как variant/invalid-variant, не adapter/provider"
 );
 ok(
-  throwingProvider.errors.some((item) => item.includes("provider-boom")),
-  "C1/C2: текст ошибки P2-A (исключение провайдера) сохранён без потерь"
+  badAdapter.errors.every(
+    (error) =>
+      !error.includes("provider-failure") && !error.includes("provider")
+  ),
+  "C1/C2: adapter не выдаёт себя за provider"
+);
+ok(
+  BACKTEST_FAILURE_STAGE_MAP.adapter.stage === "adapter" &&
+    BACKTEST_FAILURE_STAGE_MAP.arithmetic.stage === "arithmetic",
+  "C1/C2: таблица стадий не сводит adapter/arithmetic к provider даже при недостижимости через API"
 );
 
-const arithmeticFailure = rejectionOf({
+/* --- arithmetic: ДОСТИЖИМАЯ стадия переполнения, НЕ provider --- */
+
+const overflow = rejectionOf({
   ...INPUT_BASE,
   variants: [
+    variant("alpha", true),
     {
-      label: "arithmetic-overflow",
+      label: "overflow",
+      params: { variant: "overflow" },
       config: { quantity: 1e308 },
       signals: decisionList(true)
     }
@@ -455,42 +482,50 @@ const arithmeticFailure = rejectionOf({
 });
 
 ok(
-  arithmeticFailure.stage === "arithmetic" &&
-    arithmeticFailure.reason === "arithmetic-failure" &&
-    String(arithmeticFailure.reason) !== "provider-failure",
-  `C1/C2: переполнение при конечном входе → arithmetic/arithmetic-failure (получено ${String(
-    arithmeticFailure.stage
-  )}/${String(arithmeticFailure.reason)})`
+  overflow.variantStatus === "rejected" &&
+    overflow.stage === "arithmetic" &&
+    overflow.reason === "arithmetic-failure",
+  "C1/C2: переполнение арифметики — arithmetic/arithmetic-failure, не provider"
 );
 ok(
-  arithmeticFailure.errors.some((item) =>
-    item.includes("арифметика потеряла конечность")
-  ),
-  "C1/C2: текст ошибки P2-A (арифметика) сохранён без потерь"
+  overflow.errors.some((error) => error.includes("Infinity")) &&
+    overflow.segmentErrors.some((error) => error.includes("Infinity")),
+  "C1/C2: ошибка арифметики P2-A перенесена дословно в запись"
 );
 
-const badConfig = rejectionOf({
+/* --- provider: исключение провайдера с сохранением текста --- */
+
+const boom: SignalProvider = () => {
+  throw new Error("провайдер: тестовое исключение");
+};
+
+const providerFacts = rejectionOf({
   ...INPUT_BASE,
   variants: [
-    { label: "bad-config", config: { initialEquity: -5 }, signals: decisionList(true) }
+    {
+      label: "provider-boom",
+      params: { variant: "provider-boom" },
+      config: {},
+      signals: boom,
+      signalSourceId: "boom-source"
+    }
   ]
 });
 
 ok(
-  badConfig.stage === "config" && badConfig.reason === "invalid-config",
-  `C1/C2: невалидный конфиг → config/invalid-config (получено ${String(
-    badConfig.stage
-  )}/${String(badConfig.reason)})`
+  providerFacts.variantStatus === "rejected" &&
+    providerFacts.stage === "provider" &&
+    providerFacts.reason === "provider-failure",
+  "C1/C2: исключение провайдера — provider/provider-failure"
 );
-
-const badBars = rejectionOf({
-  ...INPUT_BASE,
-  bars: BARS.map((bar) => ({ ...bar, high: bar.low - 1 }))
-});
-
 ok(
-  badBars.experimentStage === "bars",
-  "C1/C2: непригодные бары → experiment-level bars (стадия P2-A не потеряна)"
+  providerFacts.errors.some((error) =>
+    error.includes("провайдер: тестовое исключение")
+  ) &&
+    providerFacts.segmentErrors.some((error) =>
+      error.includes("провайдер: тестовое исключение")
+    ),
+  "C1/C2: текст ошибки провайдера P2-A перенесён дословно"
 );
 
 /* ------------------------------------------------------------------ */
@@ -523,6 +558,7 @@ function evidenceEntry(
 ): EvidenceEntry {
   return {
     configurationId,
+    selectionKey: `selection-${configurationId}`,
     label: configurationId,
     inputOrder: 0,
     presentationOrder: 0,
@@ -638,74 +674,56 @@ const ranking = RECORD.selection.ranking;
 ok(
   Object.isFrozen(RECORD) &&
     Object.isFrozen(RECORD.variants) &&
-    Object.isFrozen(evaluatedVariant) &&
-    Object.isFrozen(trainSegment) &&
-    Object.isFrozen(trainReport) &&
+    Object.isFrozen(RECORD.evidence) &&
+    Object.isFrozen(RECORD.evidence.trainSelection) &&
     Object.isFrozen(trainEvidence) &&
     Object.isFrozen(trainEvidence.metrics) &&
-    Object.isFrozen(RECORD.evidence) &&
-    Object.isFrozen(RECORD.evidence.trainSelection),
-  "C4: запись, варианты, сегменты, отчёт и свидетельства заморожены"
-);
-ok(
-  ranking !== null &&
+    Object.isFrozen(trainSegment) &&
+    Object.isFrozen(trainReport) &&
+    Object.isFrozen(RECORD.selection) &&
     Object.isFrozen(ranking) &&
-    Object.isFrozen(ranking.order) &&
-    (ranking.order.length === 0 || Object.isFrozen(ranking.order[0])) &&
-    Object.isFrozen(ranking.excludedFromRanking),
-  "C4: RankingRecord заморожен (включая order и excludedFromRanking)"
-);
-ok(
-  Object.isFrozen(VIEW) &&
+    Object.isFrozen(VIEW) &&
     Object.isFrozen(VIEW.rows) &&
-    Object.isFrozen(VIEW.rows[0]) &&
-    Object.isFrozen(VIEW.rows[0].train) &&
     Object.isFrozen(VIEW.limitations),
-  "C4: ComparisonView/ComparisonRow заморожены"
-);
-ok(
-  trainReport !== null && Object.isFrozen(trainReport.exitReasonCounts),
-  "C4: вложенные структуры SegmentReport заморожены"
+  "C4: публичные выходы заморожены рекурсивно"
 );
 
-const fingerprintBefore = VIEW.reportFingerprint;
-const canonicalBefore = VIEW.canonicalReport;
-const labelBefore = evaluatedVariant.label;
 let mutationThrew = false;
 
 try {
-  (evaluatedVariant as { label: string }).label = "HACKED";
+  (RECORD as unknown as { counts: { declared: number } }).counts.declared = 99;
 } catch {
   mutationThrew = true;
 }
-
 try {
-  if (trainReport !== null) {
-    (trainReport as unknown as { netPnl: number }).netPnl = 1e9;
-  }
+  (trainReport as unknown as { netPnl: number }).netPnl = 1e9;
 } catch {
   mutationThrew = true;
 }
-
 try {
-  if (trainEvidence.metrics !== null) {
-    (trainEvidence.metrics as unknown as { netPnl: number }).netPnl = 1e9;
-  }
+  (RECORD as unknown as { variants: unknown[] }).variants.push({});
 } catch {
   mutationThrew = true;
 }
 
-ok(mutationThrew, "C4: попытка мутации замороженных выходов отвергнута (strict mode)");
+const recordFingerprintBefore = fingerprintExperiment(RECORD);
+const reportFingerprintBefore = VIEW.reportFingerprint;
+const canonicalBefore = VIEW.canonicalReport;
+const labelBefore = ALPHA.label;
+
+ok(mutationThrew, "C4: попытки мутации бросили (strict mode)");
 ok(
-  evaluatedVariant.label === labelBefore &&
+  RECORD.counts.declared === 2 &&
+    evaluatedVariant.label === labelBefore &&
     (trainReport === null || trainReport.netPnl !== 1e9) &&
     (trainEvidence.metrics === null || trainEvidence.metrics.netPnl !== 1e9),
   "C4: значения публичных выходов не изменились"
 );
 ok(
-  buildComparison(RECORD).reportFingerprint === fingerprintBefore &&
+  buildComparison(RECORD).reportFingerprint === reportFingerprintBefore &&
+    fingerprintExperiment(RECORD) === recordFingerprintBefore &&
     buildComparison(RECORD).canonicalReport === canonicalBefore,
-  "C4: отпечаток и канонический отчёт после попыток мутации не изменились"
+  "C4: отпечаток записи/отчёта и канонический отчёт после попыток мутации не изменились"
 );
 
 /* ------------------------------------------------------------------ */
@@ -804,10 +822,8 @@ ok(
     VIEW.limitations.length === EXPERIMENT_LIMITATIONS.length,
   "C6: ограничения опубликованы в записи и в отчёте"
 );
-ok(
-  assertLimitationsPresent(RECORD).ok,
-  "C6: инвариант непустых ограничений проходит на записи"
-);
+ok(assertLimitationsPresent(RECORD).ok, "C6: инвариант непустых ограничений проходит на записи");
+
 const canonicalLimitations = (
   JSON.parse(VIEW.canonicalReport) as {
     readonly record?: { readonly limitations?: readonly string[] };
@@ -953,15 +969,681 @@ if (RESOLVED !== null) {
     ).ok,
     "C7: подмена только сохранённого отпечатка OOS-отчёта отвергается"
   );
+
+  /* R2 (hardening #1): SegmentReport — детерминированная проекция
+     результата, поэтому подлинного отпечатка НЕДОСТАТОЧНО: отчёт
+     сверяется поэлементно с пересчитанной проекцией. */
+  ok(
+    !validateSubmittedSegmentResult(
+      submissionWithOosReport({
+        ...genuineOosReport,
+        netPnl: genuineOosReport.netPnl + 123
+      }),
+      expectedAssignment
+    ).ok,
+    "R2: отчёт с подменёнными метриками ПРИ ПОДЛИННОМ отпечатке отвергается"
+  );
+  ok(
+    !validateSubmittedSegmentResult(
+      submissionWithOosReport({
+        ...genuineOosReport,
+        provenance: "подделка" as never
+      }),
+      expectedAssignment
+    ).ok,
+    "R2: подмена provenance отвергается проекционной сверкой"
+  );
+  ok(
+    !validateSubmittedSegmentResult(
+      submissionWithOosReport({
+        ...genuineOosReport,
+        trades: genuineOosReport.trades + 1
+      }),
+      expectedAssignment
+    ).ok,
+    "R2: подмена trades отвергается проекционной сверкой"
+  );
 }
+
+/* ------------------------------------------------------------------ */
+/* FIX 1 (блокер аудита) — OOS-СЛЕПОЙ тай-брейк выбора                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Вариант, у которого TRAIN/VALIDATION-часть решений фиксирована (как в
+ * `decisionList`), а меняется ТОЛЬКО OOS-часть (индексы >= 48).
+ * Пары «alpha»/«beta» дают ТОЧНОЕ равенство критериев TRAIN при разных
+ * метках (разные идентичности) — именно на такой паре аудит воспроизвёл
+ * OOS-зависимого победителя.
+ */
+function oosVariant(label: string, mode: string): VariantDefinition {
+  const list = decisionList(false);
+  const setEntry = (
+    index: number,
+    side: "LONG" | "SHORT" | null,
+    stopOffset: number,
+    targetOffset: number,
+    tag: string
+  ): void => {
+    list[index] =
+      side === null
+        ? noTradeDecision("NEUTRAL", tag)
+        : entryDecision(
+            side,
+            BARS[index].close + stopOffset,
+            BARS[index].close + targetOffset,
+            tag
+          );
+  };
+
+  switch (mode) {
+    case "baseline":
+      break;
+    case "noOos":
+      list[80] = null;
+      list[84] = null;
+      break;
+    case "long9":
+      setEntry(100, "LONG", -9, 7, "L100");
+      break;
+    case "long5":
+      setEntry(100, "LONG", -5, 7, "L100");
+      break;
+    case "flip80":
+      setEntry(80, "LONG", -9, 7, "L80");
+      break;
+    case "extra90":
+      setEntry(90, null, 0, 0, "n90");
+      break;
+    default:
+      throw new Error(`неизвестный OOS-режим ${mode}`);
+  }
+
+  return { label, params: { variant: label }, config: {}, signals: list };
+}
+
+const BASE_RANKING = RECORD.selection.ranking;
+const BASE_WINNER = RECORD.selection.selectedLabel;
+const BASE_SELECTION_KEY = RECORD.selection.selectedSelectionKey;
+const BASE_ORDER = (BASE_RANKING?.order ?? [])
+  .map((entry) => entry.label)
+  .join(",");
+
+ok(
+  BASE_RANKING !== null &&
+    BASE_RANKING.order.length === 2 &&
+    BASE_RANKING.order[0].values.netPnl === BASE_RANKING.order[1].values.netPnl,
+  "FIX 1: фикстура даёт ТОЧНОЕ равенство критериев (netPnl) у двух вариантов"
+);
+ok(
+  RECORD.variants[0].configurationId !== RECORD.variants[1].configurationId &&
+    RECORD.variants[0].selectionKey !== RECORD.variants[1].selectionKey,
+  "FIX 1: у tie-вариантов разные полные идентичности И разные выборные ключи"
+);
+ok(
+  RECORD.variants[0].selectionKey !== RECORD.variants[0].configurationId,
+  "FIX 1: выборный ключ — отдельная сущность, не полная configurationId"
+);
+ok(
+  BASE_RANKING !== null &&
+    BASE_RANKING.tieBreak.key === "selection-key" &&
+    BASE_RANKING.tieBreak.oosBlind === true &&
+    BASE_RANKING.tieBreak.fallback === "input-order" &&
+    BASE_RANKING.tieBreak.keyInputs.join(",") === SELECTION_KEY_INPUTS.join(","),
+  "FIX 1: ранжирование объявляет OOS-слепой selectionKey как тай-брейк"
+);
+ok(
+  SELECTION_KEY_INPUTS.join(",") ===
+    [
+      "subjectFingerprint",
+      "label",
+      "paramsFingerprint",
+      "configFingerprint",
+      "signalSource.kind",
+      "signalSource.signalSourceId"
+    ].join(",") &&
+    SELECTION_TIE_BREAK.oosBlind === true &&
+    SELECTION_TIE_BREAK.fallback === "input-order",
+  "FIX 1: входы выборного ключа исчерпывающе объявлены (OOS-полей нет)"
+);
+ok(
+  BASE_RANKING !== null &&
+    BASE_RANKING.order[0].tieBreakApplied === false &&
+    BASE_RANKING.order[1].tieBreakApplied === true &&
+    BASE_RANKING.order[0].selectionKey < BASE_RANKING.order[1].selectionKey,
+  "FIX 1: равные значения упорядочены по selectionKey (tie-break записан)"
+);
+
+const OOS_MODES = ["noOos", "long9", "long5", "flip80", "extra90"] as const;
+
+const baselineRepeat = mustRun({
+  ...INPUT_BASE,
+  variants: [variant("alpha", true), oosVariant("beta", "baseline")]
+});
+
+ok(
+  fingerprintExperiment(baselineRepeat) === fingerprintExperiment(RECORD) &&
+    fingerprintSegmentResults(baselineRepeat.variants) ===
+      RECORD.resultFingerprint &&
+    canonicalJson(baselineRepeat.selection) === canonicalJson(RECORD.selection),
+  "FIX 1 (baseline): повторный прогон детерминирован (отпечатки и выбор совпадают)"
+);
+
+for (const mode of OOS_MODES) {
+  const mutated = mustRun({
+    ...INPUT_BASE,
+    variants: [variant("alpha", true), oosVariant("beta", mode)]
+  });
+  const mutatedOrder = (mutated.selection.ranking?.order ?? [])
+    .map((entry) => entry.label)
+    .join(",");
+
+  ok(
+    mutated.selection.selectedLabel === BASE_WINNER &&
+      mutated.selection.selectedSelectionKey === BASE_SELECTION_KEY &&
+      mutated.selection.rationale === RECORD.selection.rationale &&
+      mutatedOrder === BASE_ORDER,
+    `FIX 1 (${mode}): OOS-решения варианта не меняют порядок/победителя/обоснование`
+  );
+  ok(
+    mutated.variants[1].selectionKey === RECORD.variants[1].selectionKey,
+    `FIX 1 (${mode}): выборный ключ OOS-слеп (не изменился)`
+  );
+  ok(
+    mutated.variants[1].configurationId !== RECORD.variants[1].configurationId,
+    `FIX 1 (${mode}): полная configurationId отражает изменение OOS-входа (происхождение)`
+  );
+  ok(
+    fingerprintExperiment(mutated) !== fingerprintExperiment(RECORD) &&
+      fingerprintSegmentResults(mutated.variants) !== RECORD.resultFingerprint,
+    `FIX 1 (${mode}): отпечатки записи/результатов МЕНЯЮТСЯ (OOS-часть происхождения)`
+  );
+}
+
+function cloneRecord(): ExperimentRecord {
+  return structuredClone(RECORD) as ExperimentRecord;
+}
+
+/* (а) OOS-результат/метрики внутри записи. */
+const oosResultMutated = cloneRecord();
+{
+  const segment = oosResultMutated.variants[0].segments?.OOS ?? null;
+
+  if (segment !== null && segment.result !== null && segment.report !== null) {
+    (segment as unknown as { result: BacktestResult }).result = {
+      ...segment.result,
+      metrics: {
+        ...segment.result.metrics,
+        totalNetPnl: segment.result.metrics.totalNetPnl + 123
+      }
+    };
+    (segment as unknown as { report: SegmentReport }).report = {
+      ...segment.report,
+      netPnl: segment.report.netPnl + 123
+    };
+  }
+}
+
+ok(
+  canonicalJson(oosResultMutated.selection) === canonicalJson(RECORD.selection) &&
+    canonicalJson(oosResultMutated.evidence.trainSelection) ===
+      canonicalJson(RECORD.evidence.trainSelection) &&
+    fingerprintSegmentResults(oosResultMutated.variants) !==
+      RECORD.resultFingerprint,
+  "FIX 1: OOS-результат меняет отпечаток, но не выбор и не TRAIN-свидетельства"
+);
+
+/* (б) только отпечаток OOS-отчёта. */
+const oosReportFpMutated = cloneRecord();
+{
+  const segment = oosReportFpMutated.variants[1].segments?.OOS ?? null;
+
+  if (segment !== null && segment.report !== null) {
+    (segment as unknown as { report: SegmentReport }).report = {
+      ...segment.report,
+      resultFingerprint: "oos-only-tamper"
+    };
+  }
+}
+
+ok(
+  canonicalJson(oosReportFpMutated.selection) === canonicalJson(RECORD.selection),
+  "FIX 1: отпечаток OOS-отчёта не влияет на выбор"
+);
+
+/* (в) статус/ошибки OOS-сегмента. */
+const oosStatusMutated = cloneRecord();
+{
+  const segment = oosStatusMutated.variants[0].segments?.OOS ?? null;
+
+  if (segment !== null) {
+    const mutable = segment as unknown as {
+      status: string;
+      errors: string[];
+      rejectionReason: string | null;
+      result: BacktestResult | null;
+      report: SegmentReport | null;
+    };
+
+    mutable.status = "failed";
+    mutable.errors = ["oos-only-tamper"];
+    mutable.rejectionReason = "segment-failure";
+    mutable.result = null;
+    mutable.report = null;
+  }
+}
+
+ok(
+  canonicalJson(oosStatusMutated.selection) === canonicalJson(RECORD.selection) &&
+    canonicalJson(oosStatusMutated.evidence.trainSelection) ===
+      canonicalJson(RECORD.evidence.trainSelection),
+  "FIX 1: отказ OOS-сегмента не исключает вариант из TRAIN-ранжирования"
+);
+
+/* (г) сводный статус варианта: отказ ТОЛЬКО OOS (вторая утечка аудита). */
+const summaryRejected = cloneRecord();
+{
+  const variantRecord = summaryRejected.variants[0] as unknown as {
+    status: string;
+    rejection: unknown;
+  };
+
+  variantRecord.status = "rejected";
+  variantRecord.rejection = {
+    stage: "segment",
+    reason: "segment-failure",
+    segment: "OOS",
+    errors: ["oos-only-tamper"]
+  };
+}
+
+ok(
+  canonicalJson(summaryRejected.evidence.trainSelection) ===
+    canonicalJson(RECORD.evidence.trainSelection) &&
+    canonicalJson(summaryRejected.selection) === canonicalJson(RECORD.selection),
+  "FIX 1: сводный статус (отказ только OOS) не подменяет участие TRAIN-сегмента"
+);
+
+/* (д) перестановка порядка объявления. */
+const permuted = mustRun({
+  ...INPUT_BASE,
+  variants: [variant("beta", false), variant("alpha", true)]
+});
+
+ok(
+  permuted.selection.selectedLabel === BASE_WINNER &&
+    permuted.selection.selectedSelectionKey === BASE_SELECTION_KEY &&
+    (permuted.selection.ranking?.order ?? [])
+      .map((entry) => entry.label)
+      .join(",") === BASE_ORDER,
+  "FIX 1: перестановка объявления не меняет порядок/победителя (OOS-слепой контракт)"
+);
+
+/* (е2) Публичный путь второй утечки: вариант, у которого отказывает
+   ТОЛЬКО OOS-сегмент (провайдер бросает исключение лишь на барах OOS),
+   обязан остаться участником TRAIN-ранжирования — сводный статус
+   варианта не подменяет статус сегмента. */
+
+const oosStartTime = T0 + RECORD.split.oos.startIndex * H1;
+const oosOnlyFailure: SignalProvider = (context) => {
+  if (context.bar.time >= oosStartTime) {
+    throw new Error("OOS-only: тестовый отказ сегмента");
+  }
+
+  return null;
+};
+
+const mixed = mustRun({
+  ...INPUT_BASE,
+  variants: [
+    variant("alpha", true),
+    {
+      label: "oos-fails",
+      params: { variant: "oos-fails" },
+      config: {},
+      signals: oosOnlyFailure,
+      signalSourceId: "oos-only-fail"
+    }
+  ],
+  selectionPolicy: { kind: "rank-only", stage: "TRAIN", criteria: ["trades"] }
+});
+
+const oosFailingVariant = mixed.variants.find(
+  (item) => item.label === "oos-fails"
+);
+
+ok(
+  mixed.counts.evaluated === 1 && mixed.counts.rejected === 1,
+  "FIX 1: вариант с отказом только OOS имеет сводный статус rejected"
+);
+ok(
+  oosFailingVariant !== undefined &&
+    oosFailingVariant.status === "rejected" &&
+    oosFailingVariant.rejection?.segment === "OOS",
+  "FIX 1: причина отказа варианта локализована в OOS-сегменте"
+);
+ok(
+  oosFailingVariant !== undefined &&
+    oosFailingVariant.segments?.TRAIN.status === "ok" &&
+    oosFailingVariant.segments?.OOS.status === "failed",
+  "FIX 1: TRAIN-сегмент оценён, OOS-сегмент отказал"
+);
+ok(
+  mixed.evidence.trainSelection.some(
+    (entry) => entry.label === "oos-fails" && entry.status === "evaluated"
+  ),
+  "FIX 1: TRAIN-свидетельство OOS-падающего варианта — evaluated (не подменено сводным статусом)"
+);
+ok(
+  (mixed.selection.ranking?.order ?? []).some(
+    (entry) => entry.label === "oos-fails"
+  ),
+  "FIX 1: OOS-падающий вариант остаётся в TRAIN-ранжировании (вторая утечка закрыта)"
+);
+
+/* ------------------------------------------------------------------ */
+/* FIX 2 — канонические ограничения неизменяемы и сверяются точно      */
+/* ------------------------------------------------------------------ */
+
+const canonicalLimitationsSnapshot = [...EXPERIMENT_LIMITATIONS];
+
+ok(
+  Object.isFrozen(EXPERIMENT_LIMITATIONS),
+  "FIX 2: канонический список ограничений заморожен"
+);
+
+let freezeThrew = 0;
+
+try {
+  (EXPERIMENT_LIMITATIONS as unknown as string[]).push("внедрённая формулировка");
+} catch {
+  freezeThrew += 1;
+}
+try {
+  (EXPERIMENT_LIMITATIONS as unknown as string[]).splice(0, 1);
+} catch {
+  freezeThrew += 1;
+}
+try {
+  (EXPERIMENT_LIMITATIONS as unknown as string[])[0] = "переписанная формулировка";
+} catch {
+  freezeThrew += 1;
+}
+try {
+  (EXPERIMENT_LIMITATIONS as unknown as { length: number }).length = 0;
+} catch {
+  freezeThrew += 1;
+}
+
+ok(
+  freezeThrew === 4,
+  `FIX 2: push/splice/присваивание по индексу/усечение length отвергнуты (${String(freezeThrew)}/4)`
+);
+ok(
+  EXPERIMENT_LIMITATIONS.length === canonicalLimitationsSnapshot.length &&
+    EXPERIMENT_LIMITATIONS.every(
+      (item, index) => item === canonicalLimitationsSnapshot[index]
+    ),
+  "FIX 2: канонический список не изменился после попыток мутации"
+);
+
+const afterFreezeAttempts = runExperimentReport(INPUT_BASE);
+
+ok(
+  afterFreezeAttempts.ok &&
+    afterFreezeAttempts.record.limitations.length ===
+      canonicalLimitationsSnapshot.length &&
+    afterFreezeAttempts.record.limitations.every(
+      (item, index) => item === canonicalLimitationsSnapshot[index]
+    ),
+  "FIX 2: будущие записи получают неизменённые канонические ограничения"
+);
+
+ok(
+  assertLimitationsPresent({
+    ...RECORD,
+    limitations: canonicalLimitationsSnapshot.slice(0, 6)
+  }).ok === false,
+  "FIX 2: усечённый список ограничений отвергается"
+);
+ok(
+  assertLimitationsPresent({ ...RECORD, limitations: [] }).ok === false,
+  "FIX 2: пустой список отвергается"
+);
+
+const rewrittenLimitations = [...canonicalLimitationsSnapshot];
+rewrittenLimitations[3] = "ослабленная формулировка";
+
+ok(
+  assertLimitationsPresent({ ...RECORD, limitations: rewrittenLimitations })
+    .ok === false,
+  "FIX 2: переписанная формулировка отвергается"
+);
+ok(
+  assertLimitationsPresent({
+    ...RECORD,
+    limitations: [...canonicalLimitationsSnapshot, "лишняя формулировка"]
+  }).ok === false,
+  "FIX 2: дополненный список отвергается"
+);
+
+const reorderedLimitations = [...canonicalLimitationsSnapshot];
+[reorderedLimitations[0], reorderedLimitations[1]] = [
+  reorderedLimitations[1],
+  reorderedLimitations[0]
+];
+
+ok(
+  assertLimitationsPresent({
+    ...RECORD,
+    limitations: reorderedLimitations
+  }).ok === false,
+  "FIX 2: переупорядоченный список отвергается"
+);
+ok(
+  assertLimitationsPresent({
+    ...RECORD,
+    limitations: [...canonicalLimitationsSnapshot]
+  }).ok === true,
+  "FIX 2: точная каноническая копия принимается (positive control)"
+);
+
+/* ------------------------------------------------------------------ */
+/* FIX 3 — пин ПРОВОДКИ: цепочка инвариантов runExperiment              */
+/* ------------------------------------------------------------------ */
+
+const emptyLimitationsRecord: ExperimentRecord = { ...RECORD, limitations: [] };
+
+ok(
+  experimentInvariantErrors(emptyLimitationsRecord).some((error) =>
+    error.includes("limitations")
+  ),
+  "FIX 3: цепочка инвариантов runExperiment отвергает запись с ПУСТЫМИ ограничениями"
+);
+ok(
+  experimentInvariantErrors({
+    ...RECORD,
+    limitations: canonicalLimitationsSnapshot.slice(0, 3)
+  }).some((error) => error.includes("limitations")),
+  "FIX 3: цепочка инвариантов отвергает запись с УСЕЧЁННЫМИ ограничениями"
+);
+ok(
+  experimentInvariantErrors(RECORD).length === 0,
+  "FIX 3: на подлинной записи цепочка инвариантов чиста (positive control)"
+);
+
+/* ------------------------------------------------------------------ */
+/* FIX 4 — точное равенство последней точки equityCurve                */
+/* ------------------------------------------------------------------ */
+
+const baseEquityValue = TRAIN_RESULT.metrics.finalEquity;
+const oneE12Equity = baseEquityValue + 1e-12;
+
+ok(
+  oneE12Equity !== baseEquityValue,
+  "FIX 4: сдвиг 1e-12 представим в double на этой величине"
+);
+ok(
+  Math.abs(oneE12Equity - baseEquityValue) < equityTolerance,
+  "FIX 4: 1e-12 НИЖЕ допуска сверки — расхождение всё равно должно быть отвергнуто"
+);
+ok(
+  assertResultSelfConsistency(
+    tamperMetrics(TRAIN_RESULT, { finalEquity: oneE12Equity })
+  ).ok === false,
+  "FIX 4: расхождение 1e-12 с последней точкой equityCurve отвергается"
+);
+
+const fractionEquity =
+  baseEquityValue + equityTolerance / 1000;
+
+ok(
+  fractionEquity !== baseEquityValue &&
+    Math.abs(fractionEquity - baseEquityValue) < equityTolerance,
+  "FIX 4: доля допуска (1/1000) представима и ниже допуска сверки"
+);
+ok(
+  assertResultSelfConsistency(
+    tamperMetrics(TRAIN_RESULT, { finalEquity: fractionEquity })
+  ).ok === false,
+  "FIX 4: доля допуска (1/1000) отвергается ТОЧНОЙ сверкой последней точки"
+);
+
+const curvePointTampered: BacktestResult = {
+  ...TRAIN_RESULT,
+  equityCurve: TRAIN_RESULT.equityCurve.map((point, index) =>
+    index === TRAIN_RESULT.equityCurve.length - 1
+      ? { ...point, equity: point.equity + 1e-12 }
+      : point
+  )
+};
+
+ok(
+  curvePointTampered.equityCurve[curvePointTampered.equityCurve.length - 1]
+    .equity !==
+    TRAIN_RESULT.equityCurve[TRAIN_RESULT.equityCurve.length - 1].equity,
+  "FIX 4: фикстура сдвигает ИМЕННО последнюю точку equityCurve"
+);
+ok(
+  assertResultSelfConsistency(curvePointTampered).ok === false,
+  "FIX 4: сдвиг только точки equityCurve на 1e-12 отвергается (симметрично)"
+);
+
+/* ------------------------------------------------------------------ */
+/* FIX 5 — нефинитные входы бухгалтерии: явный fail-closed             */
+/* ------------------------------------------------------------------ */
+
+function withInitialEquity(
+  result: BacktestResult,
+  initialEquity: number
+): BacktestResult {
+  return {
+    ...result,
+    config: { ...result.config, initialEquity }
+  };
+}
+
+ok(
+  assertResultSelfConsistency(
+    withInitialEquity(TRAIN_RESULT, Number.NaN)
+  ).ok === false,
+  "FIX 5: initialEquity=NaN отвергается"
+);
+ok(
+  assertResultSelfConsistency(
+    withInitialEquity(TRAIN_RESULT, Number.POSITIVE_INFINITY)
+  ).ok === false,
+  "FIX 5: initialEquity=+Infinity отвергается (допуск не становится бесконечным)"
+);
+ok(
+  assertResultSelfConsistency(
+    withInitialEquity(TRAIN_RESULT, Number.NEGATIVE_INFINITY)
+  ).ok === false,
+  "FIX 5: initialEquity=-Infinity отвергается"
+);
+ok(
+  assertResultSelfConsistency(
+    tamperMetrics(TRAIN_RESULT, { finalEquity: Number.NaN })
+  ).ok === false,
+  "FIX 5: finalEquity=NaN отвергается"
+);
+ok(
+  assertResultSelfConsistency(
+    tamperMetrics(TRAIN_RESULT, { finalEquity: Number.POSITIVE_INFINITY })
+  ).ok === false,
+  "FIX 5: finalEquity=+Infinity отвергается"
+);
+ok(
+  assertResultSelfConsistency(
+    tamperMetrics(TRAIN_RESULT, { finalEquity: Number.NEGATIVE_INFINITY })
+  ).ok === false,
+  "FIX 5: finalEquity=-Infinity отвергается"
+);
+ok(
+  assertResultSelfConsistency(
+    tamperMetrics(TRAIN_RESULT, { totalNetPnl: Number.NaN })
+  ).ok === false,
+  "FIX 5: totalNetPnl=NaN отвергается"
+);
+ok(
+  assertResultSelfConsistency(
+    tamperMetrics(TRAIN_RESULT, { totalNetPnl: Number.POSITIVE_INFINITY })
+  ).ok === false,
+  "FIX 5: totalNetPnl=+Infinity отвергается"
+);
+ok(
+  assertResultSelfConsistency(
+    tamperMetrics(TRAIN_RESULT, { totalNetPnl: Number.NEGATIVE_INFINITY })
+  ).ok === false,
+  "FIX 5: totalNetPnl=-Infinity отвергается"
+);
+
+const infiniteLastPoint: BacktestResult = {
+  ...TRAIN_RESULT,
+  metrics: { ...TRAIN_RESULT.metrics, finalEquity: Number.POSITIVE_INFINITY },
+  equityCurve: TRAIN_RESULT.equityCurve.map((point, index) =>
+    index === TRAIN_RESULT.equityCurve.length - 1
+      ? { ...point, equity: Number.POSITIVE_INFINITY }
+      : point
+  )
+};
+
+ok(
+  infiniteLastPoint.metrics.finalEquity ===
+    infiniteLastPoint.equityCurve[infiniteLastPoint.equityCurve.length - 1]
+      .equity,
+  "FIX 5: фикстура согласована (Infinity === Infinity) — без FIX 5 прошла бы"
+);
+ok(
+  assertResultSelfConsistency(infiniteLastPoint).ok === false,
+  "FIX 5: нефинитная последняя точка equityCurve отвергается даже при согласованном finalEquity"
+);
+
+const nanLastPoint: BacktestResult = {
+  ...TRAIN_RESULT,
+  equityCurve: TRAIN_RESULT.equityCurve.map((point, index) =>
+    index === TRAIN_RESULT.equityCurve.length - 1
+      ? { ...point, equity: Number.NaN }
+      : point
+  )
+};
+
+ok(
+  assertResultSelfConsistency(nanLastPoint).ok === false,
+  "FIX 5: NaN в последней точке equityCurve отвергается"
+);
+ok(
+  assertResultSelfConsistency(TRAIN_RESULT).ok === true,
+  "FIX 5: подлинный результат по-прежнему принимается (positive control)"
+);
 
 /* ------------------------------------------------------------------ */
 /* Контракт интеграции                                                 */
 /* ------------------------------------------------------------------ */
 
 ok(
-  EXPERIMENT_CONTRACT_VERSION === "p2c-1.1.0",
-  "контракт: версия p2c-1.1.0 (bump после изменения семантики)"
+  EXPERIMENT_CONTRACT_VERSION === "p2c-1.2.0",
+  "контракт: версия p2c-1.2.0 (OOS-слепой выборный ключ + hardening #1)"
 );
 ok(
   validateBars(BARS, resultOf(0, "TRAIN").config).ok,

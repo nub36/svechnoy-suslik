@@ -54,7 +54,11 @@
  *         `EvidenceEntry[]` из блока TRAIN (selection evidence) или
  *         VALIDATION (confirmation evidence). Тип `SelectionStage`
  *         физически не содержит "OOS", поэтому передать OOS в
- *         ранжирование нельзя без явного приведения типов;
+ *         ранжирование нельзя без явного приведения типов. Статус
+ *         участника блока определяется сегментом САМОГО блока, а не
+ *         сводным статусом варианта: отказ OOS-сегмента не может
+ *         исключить конфигурацию из TRAIN/VALIDATION-ранжирования
+ *         (пункт 22в);
  *      b) ПОЛИТИКОЙ: `selectionPolicy.stage === "OOS"` — ошибка
  *         валидации конфига эксперимента;
  *      c) ПРОВЕРКОЙ: `assertRankingIndependentOfOos` ПЕРЕСЧИТЫВАЕТ
@@ -72,7 +76,10 @@
  *    передать 10 конфигураций и получить только лучшую невозможно.
  *    Вариант считается `evaluated` только если ВСЕ ТРИ сегмента
  *    отработали и прошли проверку утечки; иначе `rejected` с указанием
- *    конкретного сегмента.
+ *    конкретного сегмента. Сводный статус варианта — это СВОДКА
+ *    происхождения (и она честно показывает отказ любого сегмента), но
+ *    НЕ критерий участия в ранжировании: участие определяется статусом
+ *    сегмента, по которому строится ранжирование (пункт 22в).
  *
  * 7. ПОРЯДОК ПРЕДСТАВЛЕНИЯ — детерминированный и НЕ зависимый от
  *    результата: `"input-order"` (порядок переданного массива, ДЕФОЛТ)
@@ -91,22 +98,34 @@
  *    — по возрастанию), а не выбирается «как удобнее». `null`
  *    (отсутствие свидетельства, например PF при нуле убытков)-sortируется
  *    ПОСЛЕ любого числа при любом направлении. Полный порядок
- *    обеспечивается детерминированным tie-break по `configurationId`.
+ *    обеспечивается детерминированным tie-break: сначала по OOS-слепому
+ *    `selectionKey` (объявленная идентичность, пункт 22), затем по
+ *    порядку объявления `inputOrder`. Тай-брейк НЕ использует полную
+ *    `configurationId` (она включает отпечаток всего списка решений,
+ *    включая OOS-окно) и НЕ использует `presentationOrder` (при
+ *    `orderPolicy="configuration-id"` он производен от полной
+ *    идентичности) — иначе OOS-изменение могло бы менять победителя.
  *    Ранжирование ≠ выбор: `select-by-rank` требует отдельной явной
- *    политики. Варианты со статусом `rejected` в ранжировании не
- *    участвуют, но остаются в списке `rejectedFromRanking` с причиной.
+ *    политики. В ранжировании участвуют только те конфигурации, у
+ *    которых ОЦЕНЁН сегмент, по которому строится ранжирование;
+ *    остальные перечисляются с причиной (для отказа — причина отказа
+ *    именно этого сегмента).
  *
  * 9. ИДЕНТИЧНОСТЬ. `configurationId` = sha256 канонической формы
  *    {subjectFingerprint, label, paramsFingerprint, configFingerprint
  *    (P2-A), signalSource}. Включение subject привязывает конфигурацию
  *    к рынку/таймфрейму/диапазону данных, поэтому результат одного
- *    рынка нельзя выдать за результат другого. Функция-провайдер
- *    несериализуема, поэтому для provider-формы ОБЯЗАТЕЛЕН явный
- *    `signalSourceId` (иначе идентичность двух разных провайдеров
- *    совпала бы) — его отсутствие есть ошибка валидации варианта.
- *    Дубликат `configurationId` внутри эксперимента: первый экземпляр
- *    оценивается, последующие — `rejected` с причиной
- *    `duplicate-configuration-id`, и все остаются в отчёте.
+ *    рынка нельзя выдать за результат другого. Для list-формы
+ *    `signalSource.fingerprint` — отпечаток ВСЕГО списка решений, то
+ *    есть включая решения OOS-окна (это часть объявленного входа и
+ *    часть происхождения). Функция-провайдер несериализуема, поэтому
+ *    для provider-формы ОБЯЗАТЕЛЕН явный `signalSourceId` (иначе
+ *    идентичность двух разных провайдеров совпала бы) — его отсутствие
+ *    есть ошибка валидации варианта. Дубликат `configurationId` внутри
+ *    эксперимента: первый экземпляр оценивается, последующие —
+ *    `rejected` с причиной `duplicate-configuration-id`, и все остаются
+ *    в отчёте. Полная `configurationId` НЕ используется для тай-брейка
+ *    выбора — см. пункт 22.
  *
  * 10. ОТПЕЧАТКИ. `inputFingerprint` = sha256 канонической формы
  *    {subject, split, orderPolicy, selectionPolicy, упорядоченный
@@ -191,12 +210,44 @@
  *     структурная гарантия — только по каналу контекста. Отчёт не
  *     является заявлением о доходности.
  *
- * 21. ОТПЕЧАТОК ПОДАННОГО РЕЗУЛЬТАТА (C7). Для принятых извне сегментных
- *     результатов проверяется
- *     `report.resultFingerprint === fingerprintResult(result)`:
- *     изменение только OOS-отчёта отвергается валидацией, а изменение
- *     только OOS-результата меняет общий/отчётный отпечаток, но НЕ
- *     меняет выбор/ранжирование по TRAIN/VALIDATION.
+ * 21. ОТПЕЧАТОК ПОДАННОГО РЕЗУЛЬТАТА (C7). `SegmentReport` — ДЕТЕРМИНИРОВАННАЯ
+ *     проекция `BacktestResult` (пункт 1), поэтому принятый извне результат
+ *     проверяется ДВУМЯ сверками: `report.resultFingerprint ===
+ *     fingerprintResult(result)` И поэлементным равенством отчёта
+ *     пересчитанной проекции `projectSegmentReport(result, segment, window)`.
+ *     Подмена метрик сохранённого отчёта при подлинном отпечатке
+ *     отвергается. Изменение только OOS-результата меняет
+ *     общий/отчётный отпечаток, но НЕ меняет выбор/ранжирование по
+ *     TRAIN/VALIDATION.
+ *
+ * 22. ПОЛНАЯ ИДЕНТИЧНОСТЬ ≠ ВЫБОРНАЯ ИДЕНТИЧНОСТЬ (C7, hardening #1).
+ *     (а) ПОЛНАЯ идентичность `configurationId` — отпечаток всего
+ *     объявленного входа: subjectFingerprint, label, paramsFingerprint,
+ *     configFingerprint и `signalSource`; для list-формы сюда входит
+ *     отпечаток ВСЕГО списка решений, включая решения OOS-окна. Она
+ *     нужна для происхождения, дедупликации и отпечатков записи/отчёта и
+ *     МЕНЯЕТСЯ при изменении только OOS-решений — это ожидаемо.
+ *     (б) ВЫБОРНЫЙ ключ `selectionKey` (SELECTION_KEY_SCOPE,
+ *     SELECTION_KEY_INPUTS) строится ТОЛЬКО из объявленной идентичности,
+ *     известной до OOS: subjectFingerprint, label, paramsFingerprint,
+ *     configFingerprint, `signalSource.kind` и (только для
+ *     provider-формы) `signalSource.signalSourceId`. Содержимое списка
+ *     решений в выборный ключ НЕ входит: оно включает OOS-окно и потому
+ *     для выбора непригодно. Выборный ключ OOS-слеп по построению:
+ *     решения/результаты/метрики/отчёт/отпечаток/статус/ошибки OOS не
+ *     являются его входами, поэтому при изменении только OOS выборный
+ *     ключ НЕ меняется.
+ *     (в) СТАТУС УЧАСТИЯ в ранжировании берётся из сегмента, по которому
+ *     строится ранжирование (TRAIN или VALIDATION), а не из сводного
+ *     статуса варианта: отказ OOS-сегмента не исключает конфигурацию из
+ *     TRAIN/VALIDATION-ранжирования и не может сменить победителя.
+ *     (г) ЧТО МЕНЯЕТСЯ при изменении только OOS: полная идентичность и
+ *     отпечатки (записи/результата/отчёта) — да, когда изменение входит
+ *     в объявленный вход (OOS-решения) или в OOS-результат; порядок и
+ *     состав ранжирования, победитель и `rationale` выбора — нет.
+ *     (д) Коллизия `selectionKey` (одинаковая объявленная идентичность
+ *     при разных списках решений) разрешается `inputOrder` — порядком
+ *     объявления; он также не зависит от результатов.
  * ══════════════════════════════════════════════════════════════════
  */
 
@@ -218,7 +269,7 @@ import {
 } from "../backtest/contract";
 
 /** Версия контракта P2-C: меняется при любом изменении семантики. */
-export const EXPERIMENT_CONTRACT_VERSION = "p2c-1.1.0";
+export const EXPERIMENT_CONTRACT_VERSION = "p2c-1.2.0";
 
 /** Имя слоя в метаданных (детерминированная константа). */
 export const EXPERIMENT_LAYER_NAME = "suslik-experiment";
@@ -230,8 +281,14 @@ export const METRICS_PROVENANCE = "p2a-metrics-verbatim";
  * Границы честности эксперимента (C6). Непустой список публикуется в
  * записи эксперимента и в отчёте; формулировки фиксированы контрактом,
  * чтобы отчётность нельзя было пересказать сильнее, чем она есть.
+ *
+ * Массив ЗАМОРОЖЕН (`Object.freeze`): это каноническое значение, и
+ * внешняя мутация (push/splice/присваивание по индексу) невозможна —
+ * инвариант непустых ограничений нельзя ослабить извне. `validate.ts`
+ * дополнительно сверяет опубликованные ограничения с собственной
+ * неизменяемой копией формулировок, а не только с «непустотой».
  */
-export const EXPERIMENT_LIMITATIONS: readonly string[] = [
+export const EXPERIMENT_LIMITATIONS: readonly string[] = Object.freeze([
   "OOS структурно исключён из входов выбора и ранжирования: тип SelectionStage не содержит \"OOS\", а блоки свидетельств разделены (trainSelection / validationConfirmation / oosFinal).",
   "SignalContext не содержит метки сегмента (TRAIN/VALIDATION/OOS): торговое решение не знает стадии, на которой его прогоняют.",
   "Это НЕ доказательство того, что произвольный JS стратегии не может использовать замыкание/глобальную информацию о будущем: структурная гарантия — только по каналу контекста.",
@@ -239,7 +296,54 @@ export const EXPERIMENT_LIMITATIONS: readonly string[] = [
   "Структурная гарантия изоляции — только по каналу контекста (SignalContext); иные каналы (замыкания, глобальные объекты) ею не покрываются.",
   "Отчёт P2-C не является заявлением о доходности: из него не следуют выводы о прибыльности.",
   "Историческая реконструкция eligibility (rank/quoteVolume) невозможна; текущие значения не подставляются вместо исторических."
-];
+]);
+
+/**
+ * Область отпечатка ВЫБОРНОГО ключа. Отдельная от
+ * `experiment-configuration`: полная идентичность и выборный ключ —
+ * разные сущности (см. пункт 22 политики контракта).
+ */
+export const SELECTION_KEY_SCOPE = "experiment-selection-key-oos-blind-v1";
+
+/**
+ * ИСЧЕРПЫВАЮЩИЙ список входов выборного ключа (OOS-слепой по
+ * построению). Ни одно поле, производное от OOS-решений, OOS-результатов,
+ * OOS-метрик, OOS-отчёта/отпечатка, OOS-статуса или OOS-ошибок, в ключ не
+ * входит. Проверяется тестом «выборный ключ неизменен при OOS-мутации».
+ */
+export const SELECTION_KEY_INPUTS: readonly string[] = Object.freeze([
+  "subjectFingerprint",
+  "label",
+  "paramsFingerprint",
+  "configFingerprint",
+  "signalSource.kind",
+  "signalSource.signalSourceId"
+]);
+
+/**
+ * Механика полного порядка при полном равенстве критериев
+ * ранжирования (машиночитаемое объявление контракта тай-брейка).
+ *
+ * Ключ — `selectionKey` (см. SELECTION_KEY_INPUTS): объявленная
+ * идентичность конфигурации, известная ДО OOS. Коллизия ключа
+ * разрешается порядком объявления (`inputOrder`) — он также не зависит
+ * от результатов. `presentationOrder` здесь намеренно НЕ используется:
+ * при `orderPolicy=\"configuration-id\"` он сам производен от полной
+ * `configurationId`, то есть от OOS-отпечатка списка решений.
+ */
+export interface SelectionTieBreakContract {
+  readonly key: "selection-key";
+  readonly keyInputs: readonly string[];
+  readonly fallback: "input-order";
+  readonly oosBlind: true;
+}
+
+export const SELECTION_TIE_BREAK: SelectionTieBreakContract = Object.freeze({
+  key: "selection-key",
+  keyInputs: SELECTION_KEY_INPUTS,
+  fallback: "input-order",
+  oosBlind: true
+});
 
 /* ------------------------------------------------------------------ */
 /* Идентичность субъекта эксперимента                                   */
@@ -329,7 +433,13 @@ export interface ResolvedVariant {
   readonly configFingerprint: string;
   readonly paramsFingerprint: string;
   readonly signalSource: SignalSourceDescriptor;
+  /** Полная идентичность (включая OOS-часть объявленного входа). */
   readonly configurationId: string;
+  /**
+   * OOS-слепой выборный ключ (пункт 22): только объявленная
+   * идентичность, известная до OOS. Используется как tie-break.
+   */
+  readonly selectionKey: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -597,6 +707,13 @@ export interface SegmentRecord {
   readonly window: SegmentWindow;
   readonly status: "ok" | "failed";
   readonly errors: readonly string[];
+  /**
+   * СЕГМЕНТ-ЛОКАЛЬНЫЙ код причины отказа (null при status="ok").
+   * Именно он — а не первая причина по варианту — определяет причину
+   * исключения из ранжирования по этому сегменту (пункт 22в), поэтому
+   * отказ OOS-сегмента не может выдать себя за отказ TRAIN.
+   */
+  readonly rejectionReason: VariantRejection["reason"] | null;
   readonly leakageOk: boolean;
   readonly leakageErrors: readonly string[];
   /** P2-A результат КАК ЕСТЬ (source of truth); null при отказе. */
@@ -612,7 +729,10 @@ export interface VariantSegments {
 }
 
 export interface VariantRecord {
+  /** Полная идентичность (происхождение, дедупликация, отпечатки). */
   readonly configurationId: string;
+  /** OOS-слепой выборный ключ (пункт 22б) — вход тай-брейка. */
+  readonly selectionKey: string;
   readonly label: string;
   readonly inputOrder: number;
   readonly presentationOrder: number;
@@ -627,10 +747,18 @@ export interface VariantRecord {
 
 export interface EvidenceEntry {
   readonly configurationId: string;
+  /** OOS-слепой выборный ключ (пункт 22б). */
+  readonly selectionKey: string;
   readonly label: string;
   readonly inputOrder: number;
   readonly presentationOrder: number;
+  /**
+   * Статус УЧАСТИЯ в блоке: определяется сегментом САМОГО блока
+   * (пункт 22в), а не сводным статусом варианта. Поэтому отказ
+   * OOS-сегмента не превращает TRAIN-свидетельство в «rejected».
+   */
   readonly status: VariantStatus;
+  /** Причина отказа сегмента этого блока (null, если сегмент оценён). */
   readonly rejectionReason: VariantRejection["reason"] | null;
   readonly metrics: EvidenceMetrics | null;
 }
@@ -646,14 +774,21 @@ export interface EvidenceBlocks {
 
 export interface RankingEntry {
   readonly rank: number;
+  /** Полная идентичность (происхождение). */
   readonly configurationId: string;
+  /** OOS-слепой ключ, которым определён порядок при равенстве критериев. */
+  readonly selectionKey: string;
   readonly label: string;
   /**
    * Значения ЗАПРОШЕННЫХ критериев, по которым строился порядок
    * (для проверяемости: порядок можно пересчитать из этих чисел).
    */
   readonly values: Readonly<Partial<Record<RankingCriterion, number | null>>>;
-  /** True, если порядок определил tie-break по configurationId. */
+  /**
+   * True, если порядок в этой позиции определил тай-брейк
+   * (`selectionKey`, а при его коллизии — `inputOrder`), а не значения
+   * критериев. Никогда не означает «порядок по полной configurationId».
+   */
   readonly tieBreakApplied: boolean;
 }
 
@@ -667,6 +802,8 @@ export interface RankingRecord {
   readonly criteria: readonly RankingCriterion[];
   /** Констатно false: OOS не читался (пункт 5 политики). */
   readonly oosConsulted: false;
+  /** Машиночитаемая механика тай-брейка (пункт 8/22). */
+  readonly tieBreak: SelectionTieBreakContract;
   readonly order: readonly RankingEntry[];
   readonly excludedFromRanking: readonly {
     readonly configurationId: string;
@@ -677,7 +814,10 @@ export interface RankingRecord {
 export interface SelectionRecord {
   readonly policy: SelectionPolicy;
   readonly performed: boolean;
+  /** Полная идентичность победителя (происхождение). */
   readonly selectedConfigurationId: string | null;
+  /** OOS-слепой ключ победителя (предмет выбора). */
+  readonly selectedSelectionKey: string | null;
   readonly selectedLabel: string | null;
   readonly rationale: string;
   readonly oosConsulted: false;
@@ -706,6 +846,8 @@ export interface ComparisonRow {
   readonly presentationOrder: number;
   readonly inputOrder: number;
   readonly configurationId: string;
+  /** OOS-слепой выборный ключ (пункт 22б) — виден в отчёте сравнения. */
+  readonly selectionKey: string;
   readonly label: string;
   readonly status: VariantStatus;
   readonly rejectionReason: VariantRejection["reason"] | null;

@@ -24,6 +24,7 @@ import {
   RANKING_CRITERIA,
   RANKING_CRITERION_DIRECTION,
   SELECTION_STAGES,
+  SELECTION_TIE_BREAK,
   type EvidenceEntry,
   type EvidenceMetrics,
   type RankingCriterion,
@@ -209,12 +210,20 @@ function compareByCriteria(
         : 1;
   }
 
-  // Полный порядок: детерминированный tie-break по идентичности.
-  if (a.configurationId === b.configurationId) {
-    return a.presentationOrder - b.presentationOrder;
+  // Полный порядок (пункт 8/22): tie-break по OOS-СЛЕПОМУ выборному
+  // ключу, а при его коллизии — по порядку объявления.
+  //
+  // Полная `configurationId` здесь НЕ используется: для list-формы она
+  // включает отпечаток всего списка решений, в том числе OOS-окна, и
+  // изменение только OOS-решений меняло бы порядок и победителя.
+  // `presentationOrder` здесь тоже НЕ используется: при
+  // `orderPolicy="configuration-id"` он производен от полной
+  // `configurationId` — то есть от того же OOS-отпечатка.
+  if (a.selectionKey !== b.selectionKey) {
+    return a.selectionKey < b.selectionKey ? -1 : 1;
   }
 
-  return a.configurationId < b.configurationId ? -1 : 1;
+  return a.inputOrder - b.inputOrder;
 }
 
 function sameValues(
@@ -285,6 +294,7 @@ export function rankEvidence(
     return {
       rank: index,
       configurationId: entry.configurationId,
+      selectionKey: entry.selectionKey,
       label: entry.label,
       values: Object.freeze(values),
       tieBreakApplied: previous !== null && sameValues(previous, entry, criteria)
@@ -295,6 +305,7 @@ export function rankEvidence(
     stage,
     criteria: [...criteria],
     oosConsulted: false,
+    tieBreak: SELECTION_TIE_BREAK,
     order: Object.freeze(order),
     excludedFromRanking: Object.freeze([...excludedFromRanking])
   });
@@ -368,6 +379,7 @@ export function buildSelectionRecord(
       policy,
       performed: false,
       selectedConfigurationId: null,
+      selectedSelectionKey: null,
       selectedLabel: null,
       rationale: NO_SELECTION_RATIONALE,
       oosConsulted: false,
@@ -397,6 +409,7 @@ export function buildSelectionRecord(
     policy,
     performed,
     selectedConfigurationId: performed && top !== null ? top.configurationId : null,
+    selectedSelectionKey: performed && top !== null ? top.selectionKey : null,
     selectedLabel: performed && top !== null ? top.label : null,
     rationale,
     oosConsulted: false,

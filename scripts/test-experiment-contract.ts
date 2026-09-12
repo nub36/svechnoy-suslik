@@ -215,7 +215,7 @@ const VIEW = buildComparison(RECORD);
 /* ------------------------------------------------------------------ */
 
 ok(
-  EXPERIMENT_CONTRACT_VERSION === "p2c-1.1.0",
+  EXPERIMENT_CONTRACT_VERSION === "p2c-1.2.0",
   "контракт: версия P2-C фиксирована"
 );
 ok(
@@ -697,6 +697,8 @@ const bestLabel = expectedOrderBy(
   inputOrderPolicy.variants.map((item) => ({
     label: item.label,
     configurationId: item.configurationId,
+    selectionKey: item.selectionKey,
+    inputOrder: item.inputOrder,
     value: item.segments?.TRAIN.report?.netPnl ?? null
   }))
 )[0];
@@ -906,21 +908,37 @@ ok(
 );
 
 /**
- * Независимая формулировка ожидаемого порядка: netPnl по убыванию,
- * null — всегда последний, при равенстве — лексикографика
- * configurationId. Тест задаёт правило сам, а не копирует реализацию.
+ * Независимая формулировка ожидаемого порядка: значение по убыванию,
+ * null — всегда последний, при равенстве — лексикографика OOS-СЛЕПОГО
+ * selectionKey, при коллизии ключа — порядок объявления (inputOrder).
+ * Полная configurationId (включает OOS-часть объявленного входа) и
+ * presentationOrder тай-брейком не являются. Тест задаёт правило сам,
+ * а не копирует реализацию.
  */
+function tieBreakLessThen(
+  a: { selectionKey: string; inputOrder: number },
+  b: { selectionKey: string; inputOrder: number }
+): number {
+  if (a.selectionKey !== b.selectionKey) {
+    return a.selectionKey < b.selectionKey ? -1 : 1;
+  }
+
+  return a.inputOrder - b.inputOrder;
+}
+
 function expectedOrderBy(
   variants: readonly {
     label: string;
     configurationId: string;
+    selectionKey: string;
+    inputOrder: number;
     value: number | null;
   }[]
 ): string[] {
   return [...variants]
     .sort((a, b) => {
       if (a.value === null && b.value === null) {
-        return a.configurationId < b.configurationId ? -1 : 1;
+        return tieBreakLessThen(a, b);
       }
 
       if (a.value === null) {
@@ -935,7 +953,7 @@ function expectedOrderBy(
         return b.value - a.value;
       }
 
-      return a.configurationId < b.configurationId ? -1 : 1;
+      return tieBreakLessThen(a, b);
     })
     .map((item) => item.label);
 }
@@ -944,6 +962,8 @@ const expectedOrder = expectedOrderBy(
   ranked.variants.map((item) => ({
     label: item.label,
     configurationId: item.configurationId,
+    selectionKey: item.selectionKey,
+    inputOrder: item.inputOrder,
     value: item.segments?.TRAIN.report?.netPnl ?? null
   }))
 );
@@ -1062,6 +1082,8 @@ const validationBest = expectedOrderBy(
   validationSelected.variants.map((item) => ({
     label: item.label,
     configurationId: item.configurationId,
+    selectionKey: item.selectionKey,
+    inputOrder: item.inputOrder,
     value: item.segments?.VALIDATION.report?.netPnl ?? null
   }))
 )[0];
@@ -1150,8 +1172,17 @@ ok(
 );
 ok(
   tieRanking !== null &&
-    tieRanking.order[0].configurationId < tieRanking.order[1].configurationId,
-  "tie-break: равные значения упорядочены по configurationId"
+    tieRanking.order[0].selectionKey < tieRanking.order[1].selectionKey,
+  "tie-break: равные значения упорядочены по OOS-слепому selectionKey"
+);
+ok(
+  tieRanking !== null &&
+    tieRanking.order[0].selectionKey !==
+      tieRanking.order[0].configurationId &&
+    tieRanking.tieBreak.key === "selection-key" &&
+    tieRanking.tieBreak.oosBlind === true &&
+    tieRanking.tieBreak.fallback === "input-order",
+  "tie-break: контракт тай-брейка объявлен машиночитаемо (selection-key, OOS-слепой)"
 );
 ok(
   mustRun(
@@ -1164,8 +1195,8 @@ ok(
         selectionPolicy: { kind: "rank-only", stage: "TRAIN", criteria: ["trades"] }
       })
     )
-  ).selection.ranking?.order.map((entry) => entry.configurationId).join(",") ===
-    (tieRanking?.order.map((entry) => entry.configurationId).join(",") ?? ""),
+  ).selection.ranking?.order.map((entry) => entry.selectionKey).join(",") ===
+    (tieRanking?.order.map((entry) => entry.selectionKey).join(",") ?? ""),
   "tie-break: порядок не зависит от порядка объявления при равенстве"
 );
 

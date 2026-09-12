@@ -152,13 +152,17 @@ function failedRecord(
   segment: SplitName,
   window: SegmentWindow,
   errors: readonly string[],
-  leakageErrors: readonly string[] = []
+  leakageErrors: readonly string[] = [],
+  rejectionReason: VariantRejection["reason"] | null = null
 ): SegmentRecord {
   return {
     segment,
     window,
     status: "failed",
     errors: [...errors],
+    // СЕГМЕНТ-ЛОКАЛЬНАЯ причина: ранжирование по другому сегменту не
+    // должно видеть отказ этого сегмента (пункт 22в контракта).
+    rejectionReason,
     leakageOk: false,
     leakageErrors: [...leakageErrors],
     result: null,
@@ -191,11 +195,15 @@ function runSegment(args: {
     const rejection = mapBacktestFailure(outcome.stage, segment);
 
     return {
-      record: {
-        ...failedRecord(segment, window, outcome.errors),
-        // Ошибки P2-A переносим без изменений: причина отказа сегмента
+      record: failedRecord(
+        segment,
+        window,
+        // Ошибки P2-A переносим БЕЗ изменений: причина отказа сегмента
         // должна быть читаема в отчёте.
-      },
+        outcome.errors,
+        [],
+        rejection.reason
+      ),
       rejection: { ...rejection, errors: [...outcome.errors] }
     };
   }
@@ -215,7 +223,13 @@ function runSegment(args: {
 
   if (!identity.ok) {
     return {
-      record: failedRecord(segment, window, identity.errors),
+      record: failedRecord(
+        segment,
+        window,
+        identity.errors,
+        [],
+        "identity-mismatch"
+      ),
       rejection: {
         stage: "segment",
         reason: "identity-mismatch",
@@ -229,7 +243,13 @@ function runSegment(args: {
 
   if (!leakage.ok) {
     return {
-      record: failedRecord(segment, window, leakage.errors, leakage.errors),
+      record: failedRecord(
+        segment,
+        window,
+        leakage.errors,
+        leakage.errors,
+        "leakage-detected"
+      ),
       rejection: {
         stage: "leakage",
         reason: "leakage-detected",
@@ -245,6 +265,7 @@ function runSegment(args: {
       window,
       status: "ok",
       errors: [],
+      rejectionReason: null,
       leakageOk: true,
       leakageErrors: [],
       result,
@@ -254,6 +275,43 @@ function runSegment(args: {
     },
     rejection: null
   };
+}
+
+/**
+ * ЕДИНАЯ цепочка самопроверок записи эксперимента (hardening #1, FIX 3).
+ *
+ * Экспортируется, чтобы тест проверял ПРОВОДКУ, а не изолированный
+ * валидатор: тест прогоняет через ЭТУ ЖЕ цепочку запись, у которой
+ * нарушены канонические ограничения честности, и требует, чтобы
+ * нарушение было обнаружено. Удаление звена сверки ограничений из
+ * цепочки ломает этот пин, хотя на корректных входах (где запись всегда
+ * получает канонический список) поведение не меняется — именно такой
+ * мутант (MC6/M4) выживал в авторских прогонах до hardening #1.
+ *
+ * Цепочка не выполняет никакой OOS-зависимой логики: `selection.ranking`
+ * уже построен без OOS, а `assertRankingIndependentOfOos` только
+ * пересчитывает порядок из TRAIN/VALIDATION-свидетельств.
+ */
+export function experimentInvariantErrors(
+  record: ExperimentRecord
+): readonly string[] {
+  const rankingIndependence =
+    record.selection.ranking === null
+      ? { ok: true, errors: [] as readonly string[] }
+      : assertRankingIndependentOfOos(record.selection.ranking, {
+          trainSelection: record.evidence.trainSelection,
+          validationConfirmation: record.evidence.validationConfirmation
+        });
+
+  return [
+    ...rankingIndependence.errors,
+    ...assertLimitationsPresent(record).errors,
+    ...assertOosIsolation(record).errors,
+    ...assertNoCherryPicking(
+      record,
+      record.variants.map((variant) => variant.configurationId)
+    ).errors
+  ];
 }
 
 /**
@@ -409,6 +467,7 @@ export function runExperiment(input: ExperimentInput): ExperimentOutcome {
 
     variantRecords.push({
       configurationId: resolved.configurationId,
+      selectionKey: resolved.selectionKey,
       label: resolved.label,
       inputOrder: resolved.inputOrder,
       presentationOrder: resolved.inputOrder,
@@ -484,15 +543,8 @@ export function runExperiment(input: ExperimentInput): ExperimentOutcome {
 
   /* ---------- самопроверка инвариантов до возврата ---------- */
 
-  const invariantErrors: string[] = [
-    ...rankingIndependence.errors,
-    ...assertLimitationsPresent(record).errors,
-    ...assertOosIsolation(record).errors,
-    ...assertNoCherryPicking(
-      record,
-      ordered.map((variant) => variant.configurationId)
-    ).errors
-  ];
+  const invariantErrors: readonly string[] =
+    experimentInvariantErrors(record);
 
   if (invariantErrors.length > 0) {
     return { ok: false, stage: "invariant", errors: invariantErrors };
@@ -557,9 +609,17 @@ function unresolvedVariantRecord(args: {
     args.duplicateOfConfigurationId === null
       ? `unresolved:${String(args.inputOrder)}`
       : `${args.duplicateOfConfigurationId}#duplicate:${String(args.inputOrder)}`;
+  // Для неразрешённых вариантов выборный ключ — тоже ЯВНАЯ метка
+  // (валидная объявленная идентичность не установлена). В него намеренно
+  // не попадает `duplicateOfConfigurationId`: это ПОЛНАЯ идентичность,
+  // включающая OOS-часть объявленного входа, а поле `selectionKey` обязано
+  // оставаться OOS-слепым. Отклонённые варианты в ранжировании не
+  // участвуют (пункт 22в).
+  const selectionKey = `unresolved-selection:${String(args.inputOrder)}`;
 
   return {
     configurationId,
+    selectionKey,
     label,
     inputOrder: args.inputOrder,
     presentationOrder: args.inputOrder,

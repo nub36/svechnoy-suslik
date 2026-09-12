@@ -26,7 +26,11 @@ import {
   type SegmentWindow,
   type SplitName
 } from "../backtest/contract";
-import { fingerprintConfig, fingerprintResult } from "../backtest/serialize";
+import {
+  canonicalJson,
+  fingerprintConfig,
+  fingerprintResult
+} from "../backtest/serialize";
 import { SPLIT_NAMES, assertNoSegmentLeakage } from "../backtest/splits";
 import {
   EXPERIMENT_LIMITATIONS,
@@ -36,8 +40,22 @@ import {
   type ResolvedVariant,
   type SegmentReport
 } from "./contract";
-import { projectEvidence } from "./report";
+import { projectEvidence, projectSegmentReport } from "./report";
 import { assertRankingIndependentOfOos } from "./selection";
+
+/**
+ * Каноническая КОПИЯ ограничений честности (hardening #1, FIX 2).
+ *
+ * Источник истины — замороженный `EXPERIMENT_LIMITATIONS` контракта; копия
+ * снимается ОДИН раз при загрузке модуля, тоже замораживается и служит
+ * защитой от подмены/мутации экспортированного массива. Сверка ниже
+ * сравнивает опубликованный список с этой копией ПОЭЛЕМЕНТНО (длина +
+ * порядок + точный текст), а не только на «непустоту» и `includes`:
+ * усечённый, пустой или переписанный список отвергается.
+ */
+const CANONICAL_LIMITATIONS: readonly string[] = Object.freeze([
+  ...EXPERIMENT_LIMITATIONS
+]);
 
 export interface ValidationReport {
   readonly ok: boolean;
@@ -201,19 +219,57 @@ export function assertResultSelfConsistency(
     }
   }
 
-  // C0: finalEquity обязан ТОЧНО совпасть с последней точкой equityCurve.
+  // FIX 5 (hardening #1): нефинитные входы бухгалтерии — ЯВНЫЙ fail-closed,
+  // без опоры на вызвавшего. NaN/±Infinity в initialEquity/finalEquity/
+  // totalNetPnl или в точке equityCurve не должны ни проходить, ни
+  // ослаблять допуск (1e-9 * |Infinity| = Infinity «принимает» всё).
+  const accountingInputs: readonly (readonly [string, number])[] = [
+    ["config.initialEquity", result.config.initialEquity],
+    ["metrics.finalEquity", result.metrics.finalEquity],
+    ["metrics.totalNetPnl", result.metrics.totalNetPnl]
+  ];
+
+  for (const [name, value] of accountingInputs) {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      errors.push(
+        `result: нефинитное значение ${name}=${String(value)} (NaN/±Infinity; сверка эквити fail-closed)`
+      );
+    }
+  }
+
+  for (let index = 0; index < result.equityCurve.length; index += 1) {
+    const equity = result.equityCurve[index].equity;
+
+    if (typeof equity !== "number" || !Number.isFinite(equity)) {
+      errors.push(
+        `result: нефинитная точка equityCurve[${String(index)}].equity=${String(equity)} (NaN/±Infinity; сверка эквити fail-closed)`
+      );
+
+      break;
+    }
+  }
+
+  // C0 (FIX 4, hardening #1): finalEquity обязан ТОЧНО совпасть с
+  // последней точкой equityCurve. Допуск накопления сюда НЕ применяется:
+  // любое ПРЕДСТАВИМОЕ ненулевое расхождение (в том числе 1e-12 и доли
+  // допуска сверки ниже) отвергается.
   const lastEquityPoint =
     result.equityCurve.length === 0
       ? null
       : result.equityCurve[result.equityCurve.length - 1];
 
-  if (
-    lastEquityPoint === null ||
-    result.metrics.finalEquity !== lastEquityPoint.equity
-  ) {
-    errors.push(
-      "result: finalEquity не совпадает с последней точкой equityCurve"
+  if (lastEquityPoint === null) {
+    errors.push("result: equityCurve пуст — finalEquity не с чем сверить");
+  } else {
+    const curveDelta = Math.abs(
+      result.metrics.finalEquity - lastEquityPoint.equity
     );
+
+    if (curveDelta !== 0) {
+      errors.push(
+        `result: finalEquity=${String(result.metrics.finalEquity)} ≠ последней точке equityCurve=${String(lastEquityPoint.equity)} (расхождение ${String(curveDelta)}); допуск накопления на эту сверку НЕ распространяется`
+      );
+    }
   }
 
   // C0: сверка с initialEquity + totalNetPnl — с допуском ТОЛЬКО на
@@ -226,7 +282,11 @@ export function assertResultSelfConsistency(
   const equityTolerance =
     1e-9 * Math.max(1, Math.abs(result.config.initialEquity));
 
-  if (!(equityReconciliation <= equityTolerance)) {
+  if (!Number.isFinite(equityTolerance)) {
+    errors.push(
+      `result: допуск сверки нефинитен (${String(equityTolerance)}) — initialEquity обязан быть конечным (fail-closed)`
+    );
+  } else if (!(equityReconciliation <= equityTolerance)) {
     errors.push(
       `result: finalEquity расходится с initialEquity + totalNetPnl на ${String(equityReconciliation)} (допуск ${String(equityTolerance)}; C0 — только накопление плавающей точки)`
     );
@@ -285,13 +345,27 @@ export function assertLimitationsPresent(
 
   if (!Array.isArray(published) || published.length === 0) {
     errors.push("limitations: список границ честности пуст");
-  } else {
-    for (const required of EXPERIMENT_LIMITATIONS) {
-      if (!published.includes(required)) {
-        errors.push(
-          `limitations: отсутствует обязательная формулировка «${required.slice(0, 72)}…»`
-        );
-      }
+
+    return report(errors);
+  }
+
+  // FIX 2 (hardening #1): сверка с НЕИЗМЕНЯЕМОЙ канонической копией —
+  // поэлементно (длина + порядок + точный текст). `includes` недостаточно:
+  // усечённый/дополненный/переписанный список должен отвергаться, а не
+  // «проходить по одному совпадению».
+  if (published.length !== CANONICAL_LIMITATIONS.length) {
+    errors.push(
+      `limitations: число формулировок ${String(published.length)} ≠ каноническому ${String(CANONICAL_LIMITATIONS.length)} — усечение/дополнение списка запрещено`
+    );
+  }
+
+  const common = Math.min(published.length, CANONICAL_LIMITATIONS.length);
+
+  for (let index = 0; index < common; index += 1) {
+    if (published[index] !== CANONICAL_LIMITATIONS[index]) {
+      errors.push(
+        `limitations: формулировка #${String(index)} не совпадает с канонической «${CANONICAL_LIMITATIONS[index].slice(0, 72)}…»`
+      );
     }
   }
 
@@ -467,6 +541,57 @@ export function validateSubmittedSegmentResult(
       errors.push(
         `submission.report.resultFingerprint=${String(submission.report.resultFingerprint)} ≠ fingerprintResult(result)=${actualFingerprint} — подмена сохранённого сегментного отчёта`
       );
+    }
+
+    // R2 (hardening #1): `SegmentReport` — ДЕТЕРМИНИРОВАННАЯ проекция
+    // `BacktestResult` (пункт 21 контракта), поэтому подлинного
+    // `resultFingerprint` НЕДОСТАТОЧНО: отчёт сверяется ПОЭЛЕМЕНТНО с
+    // пересчитанной проекцией. Отчёт с подменёнными метриками при
+    // подлинном отпечатке отвергается.
+    const expectedReport = projectSegmentReport(
+      submission.result,
+      submission.segment,
+      expectedWindow
+    );
+    const reportRecord = submission.report as unknown as Readonly<
+      Record<string, unknown>
+    >;
+    const expectedRecord = expectedReport as unknown as Readonly<
+      Record<string, unknown>
+    >;
+
+    const canonicalField = (value: unknown): string => {
+      try {
+        return (
+          (canonicalJson(value) as string | undefined) ??
+          `undefined:${String(value)}`
+        );
+      } catch {
+        return `unrepresentable:${String(value)}`;
+      }
+    };
+    const briefField = (value: unknown): string => {
+      const text = canonicalField(value);
+
+      return text.length > 160 ? `${text.slice(0, 160)}…` : text;
+    };
+
+    for (const field of Object.keys(expectedRecord)) {
+      if (
+        canonicalField(reportRecord[field]) !== canonicalField(expectedRecord[field])
+      ) {
+        errors.push(
+          `submission.report.${field}=${briefField(reportRecord[field])} ≠ пересчитанной проекции ${briefField(expectedRecord[field])} — отчёт обязан быть детерминированной проекцией результата (R2)`
+        );
+      }
+    }
+
+    for (const field of Object.keys(reportRecord)) {
+      if (!Object.prototype.hasOwnProperty.call(expectedRecord, field)) {
+        errors.push(
+          `submission.report.${field} отсутствует в пересчитанной проекции результата (R2)`
+        );
+      }
     }
 
     errors.push(

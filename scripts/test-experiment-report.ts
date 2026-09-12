@@ -1026,7 +1026,7 @@ ok(
 /* 8. Семантика отчёта сравнения                                       */
 /* ------------------------------------------------------------------ */
 
-ok(VIEW.contractVersion === "p2c-1.1.0", "сравнение: версия контракта в отчёте");
+ok(VIEW.contractVersion === "p2c-1.2.0", "сравнение: версия контракта в отчёте");
 ok(VIEW.layer === "suslik-experiment", "сравнение: имя слоя в отчёте");
 ok(VIEW.orderPolicy === "input-order", "сравнение: политика порядка в отчёте");
 ok(
@@ -1129,7 +1129,7 @@ ok(
 
 const text = formatExperimentReport(VIEW);
 
-ok(text.includes("EXPERIMENT p2c-1.1.0"), "текст: заголовок с версией контракта");
+ok(text.includes("EXPERIMENT p2c-1.2.0"), "текст: заголовок с версией контракта");
 ok(
   text.includes("suslik-smc@1.4.0") && text.includes("BTCUSDT"),
   "текст: идентичность стратегии и рынка"

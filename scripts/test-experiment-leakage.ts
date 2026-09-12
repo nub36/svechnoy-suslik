@@ -435,7 +435,8 @@ ok(
       configFingerprint: VARIANT_A.configFingerprint,
       paramsFingerprint: VARIANT_A.paramsFingerprint,
       signalSource: VARIANT_A.signalSource ?? { kind: "list", length: 0, fingerprint: "" },
-      configurationId: VARIANT_A.configurationId
+      configurationId: VARIANT_A.configurationId,
+      selectionKey: VARIANT_A.selectionKey
     }
   }).ok,
   "warmup: идентичность сегмента с разогревом подтверждается"
