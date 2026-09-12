@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState
 } from "react";
@@ -38,6 +39,19 @@ import {
   CHART_TIMEFRAMES,
   parseChartUrlState
 } from "@/lib/chart/url-state";
+import {
+  SMC_NETWORK_ERROR_MESSAGE,
+  SmartMoneyPanel,
+  buildSmcPanelViewModel,
+  createSmcControllerState,
+  isSmcAbortError,
+  reduceSmcState,
+  type SmcControllerState,
+  type SmcEvent,
+  type SmcPanelState,
+  type SmcPanelViewModel,
+  type SmcTransition
+} from "@/components/chart/SmartMoneyPanel";
 
 /**
  * Свечной график на lightweight-charts.
@@ -50,6 +64,17 @@ import {
  *
  * Тема берётся из CSS-переменных проекта и обновляется
  * автоматически при переключении dark/light.
+ *
+ * P1-C: toggle «Смарт Мани» — ТОЛЬКО UI-state. Он подключает
+ * read-only панель (components/chart/SmartMoneyPanel.tsx) к
+ * существующему GET /api/chart/smc с ТЕКУЩИМИ symbol/timeframe
+ * графика и НЕ трогает Strategy.enabled/status, admin API,
+ * PostgreSQL, Signal и worker'ы. Свечи при этом остаются
+ * данными ВЫБРАННОЙ биржи, а Smart Money — asset-level
+ * мультибиржевая оценка (агрегат + per-exchange сводки),
+ * поэтому exchange в SMC-запрос не передаётся. Отрисовка
+ * SMC-примитивов поверх свечей — следующий этап P1-D, здесь
+ * её нет.
  */
 
 type SymbolInfo = {
@@ -1741,6 +1766,138 @@ export default function CandleChart({
     applyVisibility();
   }, [applyVisibility]);
 
+  /* ---------- Smart Money (P1-C): UI-only toggle + read-only fetch ---------- */
+
+  // Состояние SMC-запроса живёт в ref (машина состояний
+  // components/chart/SmartMoneyPanel.tsx), а в React-стейте —
+  // только то, что нужно для рендера: enabled и панель.
+  // Это ТОТ ЖЕ подход, что и у свечей: AbortController +
+  // requestId-identity, поэтому устаревший ответ не может
+  // перезаписать новый state.
+  const smcControllerRef = useRef<SmcControllerState>(
+    createSmcControllerState()
+  );
+  const smcAbortRef = useRef<AbortController | null>(null);
+
+  const [smcEnabled, setSmcEnabled] = useState(false);
+  const [smcPanel, setSmcPanel] = useState<SmcPanelState>(
+    { status: "off" }
+  );
+
+  // Применяет переход машины состояний: отмена предыдущего
+  // in-flight запроса, затем ref + React-state. No-op переход
+  // (устаревший ответ, aborted, параметры при OFF) state не пишет —
+  // в том числе после размонтирования.
+  const commitSmc = useCallback(
+    (transition: SmcTransition) => {
+      if (transition.abortPrevious) {
+        smcAbortRef.current?.abort();
+        smcAbortRef.current = null;
+      }
+
+      if (!transition.changed) {
+        return;
+      }
+
+      smcControllerRef.current = transition.state;
+      setSmcEnabled(transition.state.enabled);
+      setSmcPanel(transition.state.panel);
+    },
+    []
+  );
+
+  const dispatchSmc = useCallback(
+    (event: SmcEvent) => {
+      const transition = reduceSmcState(
+        smcControllerRef.current,
+        event
+      );
+
+      commitSmc(transition);
+
+      if (transition.fetch === null) {
+        return;
+      }
+
+      const { requestId, url } = transition.fetch;
+
+      const controller = new AbortController();
+
+      smcAbortRef.current = controller;
+
+      // Ответ/ошибка возвращаются в ту же машину состояний:
+      // событие принимается, только если панель всё ещё
+      // включена И requestId совпал с активным. Отмена
+      // (abort) не меняет ничего — stale-панель не остаётся.
+      void (async () => {
+        try {
+          const response = await fetch(url, {
+            signal: controller.signal
+          });
+
+          const body: unknown = await response
+            .json()
+            .catch(() => null);
+
+          commitSmc(
+            reduceSmcState(smcControllerRef.current, {
+              type: "http-response",
+              requestId,
+              ok: response.ok,
+              httpStatus: response.status,
+              body
+            })
+          );
+        } catch (error) {
+          if (isSmcAbortError(error)) {
+            commitSmc(
+              reduceSmcState(smcControllerRef.current, {
+                type: "aborted",
+                requestId
+              })
+            );
+
+            return;
+          }
+
+          // Ошибка Smart Money изолирована: status/errorMessage
+          // свечного графика здесь НЕ трогаются.
+          commitSmc(
+            reduceSmcState(smcControllerRef.current, {
+              type: "network-error",
+              requestId,
+              message: SMC_NETWORK_ERROR_MESSAGE
+            })
+          );
+        }
+      })();
+    },
+    [commitSmc]
+  );
+
+  // Смена symbol/timeframe при включённом Smart Money — новый
+  // запрос (старый отменяется). Смена exchange запрос НЕ создаёт:
+  // Smart Money — asset-level, а не данные выбранной биржи.
+  useEffect(() => {
+    dispatchSmc({ type: "params", symbol, timeframe });
+  }, [symbol, timeframe, dispatchSmc]);
+
+  // Unmount: тот же путь машины состояний — in-flight SMC-запрос
+  // отменяется, панель гасится (как у свечей в cleanup эффекта).
+  useEffect(() => {
+    return () => {
+      dispatchSmc({ type: "unmount" });
+    };
+  }, [dispatchSmc]);
+
+  const smcViewModel = useMemo<SmcPanelViewModel | null>(
+    () =>
+      smcPanel.status === "ready"
+        ? buildSmcPanelViewModel(smcPanel.projection, exchange)
+        : null,
+    [smcPanel, exchange]
+  );
+
   /* ---------- UI ---------- */
 
   const selectedMarket = markets.find(
@@ -1961,6 +2118,36 @@ export default function CandleChart({
             MACD
           </label>
         </fieldset>
+
+        <fieldset className="chartToggles">
+          <legend className="muted">
+            Смарт Мани
+          </legend>
+
+          <label
+            title={
+              "Показывает агрегированную Smart Money оценку. " +
+              "Только отображение: настройки стратегии и база " +
+              "данных не меняются"
+            }
+          >
+            <input
+              type="checkbox"
+              checked={smcEnabled}
+              disabled={!symbol}
+              onChange={(e) =>
+                dispatchSmc({
+                  type: "toggle",
+                  enabled: e.target.checked,
+                  symbol,
+                  timeframe
+                })
+              }
+            />
+            Смарт Мани:{" "}
+            {smcEnabled ? "Вкл" : "Выкл"}
+          </label>
+        </fieldset>
       </div>
 
       {status === "error" ? (
@@ -2066,6 +2253,16 @@ export default function CandleChart({
           </button>
         </div>
       )}
+
+      {/* P1-C: read-only панель Smart Money. Рендерится независимо от
+          статуса свечей (ошибка свечей не прячет Smart Money, ошибка
+          Smart Money не ломает свечи); при toggle OFF компонент
+          возвращает null. */}
+      <SmartMoneyPanel
+        panel={smcPanel}
+        viewModel={smcViewModel}
+        timeframeLabelOf={timeframeLabel}
+      />
 
       {status === "ok" && (
         <div className="chartNote muted">

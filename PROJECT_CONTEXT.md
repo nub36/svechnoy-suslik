@@ -2061,6 +2061,125 @@ deterministic повторный результат.
 
 ЯВНО: UI к графику ЕЩЁ НЕ подключён (кнопка «Смарт Мани» — позже,
 только UI-state); Signal Engine НЕ входит (остаётся будущим P5).
+(UI подключён ПОЗЖЕ в P1-C — см. §31j.)
+
+---
+
+## §31j. P1-C — read-only UI integration Smart Money в CandleChart (12.09.2026)
+
+Цепочка: CandleChart → GET /api/chart/smc → существующий P1-A
+SmcChartProjection → Smart Money summary / WHY panel. Это этап
+data/UI-интеграции, НЕ этап рисования SMC-примитивов поверх свечей.
+
+UI-ONLY TOGGLE:
+- components/chart/CandleChart.tsx: toggle «Смарт Мани: Вкл / Выкл» —
+  обычный React local state. НЕ читает и НЕ меняет Strategy.enabled/
+  status, не обращается к admin API, не пишет в PostgreSQL, не создаёт
+  Signal, не запускает worker'ы. Persistence после reload не нужна и
+  не добавлялась (нет localStorage/URL-параметра).
+- components/chart/SmartMoneyPanel.tsx — новый typed модуль: чистая
+  машина состояний запроса (reduceSmcState), построитель URL, сужение
+  HTTP-ответа до принятого DTO, view-model и презентационный компонент
+  (без собственного state/fetch). Второго DTO/view-контракта с другой
+  semantics нет: типы — type-only импорт lib/chart/smc-contract.ts,
+  значения — фактические поля SmcChartProjection.
+
+FETCH / REQUEST LIFECYCLE:
+- GET /api/chart/smc?symbol=<текущий symbol>&timeframe=<текущий
+  timeframe> — реальные текущие параметры CandleChart, оба
+  encodeURIComponent. API P1-B не менялся.
+- exchange в SMC-запрос СОЗНАТЕЛЬНО не передаётся: основной график
+  показывает выбранную биржу, а Smart Money DTO — asset-level
+  мультибиржевая оценка; смешивать эти понятия нельзя. Поэтому смена
+  exchange новый SMC-запрос не создаёт.
+- паттерн тот же, что у свечей: AbortController + requestId-identity.
+  Новый requestId — на toggle ON и на смену symbol/timeframe,
+  предыдущий запрос отменяется (abortPrevious).
+- ответ принимается, только если панель включена И requestId ===
+  activeRequestId: устаревший ответ/ошибка игнорируются целиком,
+  старый response не может overwrite новый state.
+- toggle OFF и unmount: панель { status: "off" } + abort, поэтому
+  pending-запрос отменяется и stale-результат не остаётся видимым;
+  событие "aborted" — no-op.
+- ошибка SMC изолирована от свечей: status/errorMessage графика не
+  трогаются, loadCandles/loadOlder/applyData не вызываются.
+
+СОСТОЯНИЯ (строго различаются):
+- off / loading / http-error (HTTP-статус + русское сообщение из
+  { error } P1-B; сетевая ошибка — httpStatus null) / ready; битый 200
+  (тело не соответствует DTO) трактуется как http-error, не как данные.
+- внутри ready verdict: long | short | neutral | cannot-evaluate.
+  cannot-evaluate — при unusable либо не-ok горизонте, evaluatedCount
+  0, gateAllowed false (unsafe alignment / anchor / horizon) и при
+  direction null либо CANNOT_EVALUATE. NEUTRAL — только когда оценка
+  реально выполнена. cannot-evaluate ≠ NEUTRAL и в verdict, и в
+  подписях, и в бейдже.
+- при отказе gate направление/confirmation/голоса не показываются
+  (этих данных в DTO нет), зато показываются statusReason и
+  gateRefusalReasons: отказ агрегации не выглядит успешным агрегатом.
+
+SELECTED EXCHANGE VS AGGREGATE:
+- панель явно подписывает скоупы: свечи — одна выбранная биржа;
+  Smart Money — агрегированная оценка, участников participantCount.
+- per-exchange результаты — отдельный список (aggregate.perExchange,
+  обогащённый reasons/statusReason из overlay того же marketId);
+  выбранная биржа помечается бейджем «биржа свечей на графике» и НЕ
+  выдаётся за агрегат (verdict берётся только из aggregate.direction).
+- если выбранная биржа отсечена eligibility (aggregate.exchangeExcluded
+  — например BINGX для 1d), это показывается отдельной подписью;
+  special-case в UI НЕ реализован, всё берётся из DTO. Число бирж,
+  список бирж и confirmation никогда не хардкодятся.
+
+WHY:
+- раздел «Почему» по каждой бирже из существующих reasons DTO: label,
+  code, longPoints/shortPoints/maxPoints, value. Ничего не добавляется
+  и не выдумывается; если причин нет — так и пишется.
+- score называется баллами («баллы LONG / SHORT»); формулировок
+  «вероятность», «шанс роста», процентов в UI нет.
+- factIds — passthrough без реконструкции/мутации (OB_FVG_CONFLUENCE
+  всегда [], exact OB/FVG ключи сохраняются) и в UI не показываются:
+  они понадобятся в P1-D для highlighting.
+
+ГРАНИЦЫ:
+- P1-D НЕ реализован: поверх свечей ничего не рисуется (swing high/low,
+  BOS, CHoCH/MSS, liquidity, sweep, FVG/Order Block прямоугольники,
+  dealing range, premium/equilibrium/discount shading, custom canvas,
+  fancy-canvas primitives).
+- Не менялись: lib/chart/smc-contract.ts, smc-projection.ts,
+  smc-api-service.ts, app/api/chart/smc/route.ts, lib/smc/*,
+  lib/strategies/*, prisma/*, package.json, package-lock.json.
+- БД не мутировалась (нет db push/migration/seed/Strategy update/
+  Signal write/Candle write), worker'ы не запускались.
+- Signal Engine отсутствует (будущий P5): lib/signals, signal-worker,
+  test-signal-engine, Signal Prisma schema и Signal writes не
+  добавлялись; edf3732 не является предком P1-C commit.
+
+TESTS: scripts/test-smc-panel.ts — 2083 проверки, 0 провалов.
+Статика (read-only/no-DB/no-Signal/no-admin, отсутствие P1-D
+примитивов, отсутствие хардкода числа бирж и BINGX/1d special-case,
+изоляция от status/errorMessage свечей), URL (symbol+timeframe,
+encoding hostile-значений, без exchange), машина состояний (toggle
+OFF/ON, смена timeframe/symbol, stale response, abort, unmount,
+network error, битый 200), view-model и рендер на РЕАЛЬНЫХ проекциях
+принятого P1-B сервиса: LONG 75/10, зеркальный SHORT 10/75, evaluated
+NEUTRAL на 5 биржах, 2 биржи, конфликт BINANCE LONG + BYBIT SHORT →
+агрегат NEUTRAL, cannot-evaluate с реальным alignment-отказом gate,
+no_participants, 1d Option A с исключением BINGX; factIds passthrough;
+отсутствие вероятностных формуливок в тексте и в исходнике. Рендер —
+через существующий react-dom/server (renderToStaticMarkup): новых
+test-зависимостей нет, DOM-фреймворк не добавлялся. Проверено
+mutation-тестированием (9 преднамеренных поломок логики ловятся).
+Регрессия без изменений: test-smc-api-service 111, test-smc-projection
+206, chart history 50 / params 37 / url-state 18, common horizon 227,
+eligibility 96, lookahead 13, evaluate 31, smart-money 62,
+phase3c-fix 59, smc core (scoring 75, fvg 37, order-blocks 63,
+liquidity 48, pivots 24, range 50, fsm 62, displacement 23,
+phase3d-config 70), strategy-runtime --self-test 56 и
+--check-validation 32. npx tsc --noEmit — exit 0, git diff --check —
+чисто. npm run build в песочнице не проходит на стадии «Collecting
+page data» из-за непрогенерированного @prisma/client (binaries.prisma.sh
+недоступен в изолированном окружении) — идентично падает и нетронутый
+baseline 642ebf1, то есть причина environment-only, а не P1-C.
 
 
 ==================================================
@@ -2109,15 +2228,23 @@ HEAD: `9085d55936b20d54add3ab6a1534515be2d3480b` (RANGE_POSITION CLOSED/UNDERSTO
 - Финальная приёмка Smart Money (read-only → staged → enabled)
 
 **P1 — SuslikChart / визуализация стратегии**
-- P1-A (11.09.2026): чистая подготовка Smart Money overlays —
+- P1-A (11.09.2026, **accepted**): чистая подготовка Smart Money overlays —
   lib/chart/smc-contract.ts + lib/chart/smc-projection.ts +
   scripts/test-smc-projection.ts; per-exchange overlays и aggregate
   summary строго разделены; кнопка «Смарт Мани Вкл/Выкл» — только
   UI overlays, НЕ global Strategy.enabled
-- P1-B (11.09.2026): read-only API boundary GET /api/chart/smc —
+- P1-B (11.09.2026, **accepted**): read-only API boundary GET /api/chart/smc —
   тонкий сервис над P1-A проекцией (lib/chart/smc-api-service.ts),
   PostgreSQL CLOSED-свечи через существующий bounded loader,
   Strategy из БД без engineering-fallback; UI ещё не подключён
+- P1-C (12.09.2026, **implemented**): read-only UI integration —
+  toggle «Смарт Мани» в CandleChart (только UI-state) + GET
+  /api/chart/smc с текущими symbol/timeframe + summary/WHY панель из
+  принятого DTO; AbortController/requestId race-safety; cannot-evaluate
+  ≠ NEUTRAL; агрегат ≠ выбранная биржа; см. §31j
+- P1-D (**next**): визуальные SMC-примитивы поверх свечей (swing/BOS/
+  CHoCH, liquidity/sweep, FVG/Order Block, dealing range,
+  premium/equilibrium/discount) с использованием factIds из P1-A
 - Собственный график на PostgreSQL-свечах, оверлеи SMC, объяснение `WHY` сигнала
 
 **P2 — Backtest Engine / тестер стратегий**
