@@ -264,11 +264,46 @@
  *     список фактов КОПИРУЮТСЯ в отложенный вход, поэтому последующая
  *     мутация объекта решения вызывающим кодом не может изменить уже
  *     запланированную сделку.
+ *
+ * 23. ОДИНОЧНОЕ ЧТЕНИЕ РЕШЕНИЯ (анти-TOCTOU). Возвращённое источником
+ *     решений значение читается в plain-снимок ДО любой семантической
+ *     проверки, и КАЖДОЕ поле читается РОВНО ОДИН РАЗ
+ *     (`captureSignalDecision`): kind, stopLoss, takeProfit, label,
+ *     facts (массив копируется поэлементно один раз и замораживается).
+ *     Проверяется СНИМОК, и вся дальнейшая логика (отбраковка уровней,
+ *     обрамление опорной цены, отложенный вход, запись сделки)
+ *     потребляет ТОЛЬКО его. Поэтому геттер или Proxy, возвращающий
+ *     другое значение при повторном обращении, не может подменить
+ *     исполненные уровни после проверки: вариант «проверили 90,
+ *     исполнили −5» исключён конструкцией. Число чтений поля покрыто
+ *     тестом (по одному на поле). Прочие собственные поля решения
+ *     движком не используются и перечисляются в `extraKeys` снимка.
+ *
+ * 24. КОНТЕЙНЕР `signals` КЛАССИФИЦИРУЕТСЯ СТРОГО (fail closed).
+ *     Допустимы РОВНО три формы: (A) настоящий Array решений,
+ *     (B) функция-провайдер, (C) валидный SignalAdapter. Всё остальное
+ *     (`{}`, число, boolean, Map, Set, Date, null, undefined,
+ *     array-like объект `{0: decision, length: 1}`, «адаптер» без
+ *     `decide` или с опечаткой `Decide`) — структурированный отказ:
+ *     stage `"signals"` для недопустимого контейнера и stage `"adapter"`
+ *     для объекта, похожего на адаптер, но невалидного. Объект,
+ *     похожий на массив, массивом НЕ считается. Молчаливое
+ *     превращение мусора в «стратегия не дала ни одного сигнала»
+ *     (ok:true, 0 сделок) запрещено.
  * ══════════════════════════════════════════════════════════════════
  */
 
 /**
  * Версия контракта: меняется при любом изменении семантики.
+ *
+ * p2a-1.2.0 — hardening #2 по итогам повторного независимого аудита
+ * `f87d6f9` (PASS WITH RISKS): решение источника сигналов читается
+ * РОВНО ОДИН РАЗ в неизменяемый plain-снимок до валидации
+ * (анти-TOCTOU, пункт 23), контейнер `signals` классифицируется строго
+ * и больше не проваливается в «пустой список» (пункт 24, новая стадия
+ * отказа `"signals"`), `deepFreeze` и скан конечности защищены от
+ * циклических ссылок. Семантика исполнения ВАЛИДНЫХ прогонов не
+ * изменилась; отпечатки меняются из-за версии контракта.
  *
  * p2a-1.1.0 — hardening по итогам независимого adversarial-аудита
  * `096e13d`: гэповый вход БОЛЬШЕ НЕ отклоняется (исполнение по open
@@ -280,7 +315,7 @@
  * `visibleBars` считается от `firstVisibleIndex`, неизвестные ключи
  * конфига отклоняются.
  */
-export const BACKTEST_CONTRACT_VERSION = "p2a-1.1.0";
+export const BACKTEST_CONTRACT_VERSION = "p2a-1.2.0";
 
 /** Имя движка в метаданных (детерминированная константа). */
 export const BACKTEST_ENGINE_NAME = "suslik-backtest";
@@ -356,6 +391,190 @@ export function isNoTradeDecision(
   decision: SignalDecision
 ): decision is NoTradeDecision {
   return !isEntryDecision(decision);
+}
+
+/**
+ * Детерминированное короткое описание значения для текстов ошибок.
+ *
+ * Намеренно НЕ вызывает пользовательский `toString`/`Symbol.toPrimitive`
+ * объекта: hostile-значение не должно ни бросать исключение, ни
+ * подставлять произвольный текст. Для объектов используется
+ * `Object.prototype.toString` («[object Map]», «[object Date]», …).
+ */
+export function describeValue(value: unknown): string {
+  if (value === null) {
+    return "null";
+  }
+
+  const kind = typeof value;
+
+  if (kind === "undefined") {
+    return "undefined";
+  }
+
+  if (kind === "string") {
+    const text = value as string;
+
+    return `строка "${text.length > 40 ? `${text.slice(0, 40)}…` : text}"`;
+  }
+
+  if (kind === "number") {
+    return `число ${String(value as number)}`;
+  }
+
+  if (kind === "boolean") {
+    return `булево ${String(value as boolean)}`;
+  }
+
+  if (kind === "bigint") {
+    return `bigint ${String(value as bigint)}`;
+  }
+
+  if (kind === "function") {
+    return "функция";
+  }
+
+  if (kind === "symbol") {
+    return "symbol";
+  }
+
+  return Object.prototype.toString.call(value);
+}
+
+/** Поля решения, которые движок читает и использует. */
+export const DECISION_FIELDS: readonly string[] = Object.freeze([
+  "kind",
+  "stopLoss",
+  "takeProfit",
+  "label",
+  "facts"
+]);
+
+/**
+ * Plain-снимок решения источника сигналов (пункт 23 политики).
+ *
+ * Значения скопированы из возвращённого объекта РОВНО ПО ОДНОМУ ЧТЕНИЮ
+ * на поле, поэтому повторные вызовы геттеров/ловушек Proxy не могут
+ * изменить уже принятое решение. `stopLoss`/`takeProfit` хранятся КАК
+ * ПРОЧИТАНЫ (unknown): их семантическую проверку выполняет
+ * `validateEntryDecisionShape`, и она тоже работает только со снимком.
+ */
+export interface CapturedDecision {
+  readonly kind: SignalDecisionKind;
+  readonly stopLoss: unknown;
+  readonly takeProfit: unknown;
+  readonly label: string;
+  readonly facts: readonly string[];
+  /** Собственные поля решения, которые движок НЕ использует. */
+  readonly extraKeys: readonly string[];
+}
+
+export type DecisionCapture =
+  | { readonly ok: true; readonly decision: CapturedDecision }
+  | { readonly ok: false; readonly errors: readonly string[] };
+
+/**
+ * Читает решение источника сигналов в неизменяемый снимок.
+ *
+ * Порядок обязателен: СНАЧАЛА одиночное чтение всех полей и
+ * структурные проверки (kind — один из четырёх литералов, label —
+ * строка, если задан, facts — настоящий массив строк, если задан),
+ * ЗАТЕМ (вне этой функции) семантическая проверка уровней по снимку.
+ * Исходный объект после вызова больше не читается никем в движке.
+ */
+export function captureSignalDecision(raw: unknown): DecisionCapture {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return {
+      ok: false,
+      errors: [
+        `решение должно быть объектом (получено ${describeValue(raw)})`
+      ]
+    };
+  }
+
+  const source = raw as Record<string, unknown>;
+  const errors: string[] = [];
+
+  /* ---- одиночные чтения (TOCTOU-барьер) ---- */
+
+  const kindRaw = source.kind;
+  const stopLossRaw = source.stopLoss;
+  const takeProfitRaw = source.takeProfit;
+  const labelRaw = source.label;
+  const factsRaw = source.facts;
+  // Перечисление ключей геттеры не вызывает, но даёт список «чужих»
+  // полей для диагностики.
+  const ownKeys = Object.keys(source);
+
+  if (
+    kindRaw !== "LONG" &&
+    kindRaw !== "SHORT" &&
+    kindRaw !== "NEUTRAL" &&
+    kindRaw !== "CANNOT_EVALUATE"
+  ) {
+    errors.push(`неизвестный kind=${describeValue(kindRaw)}`);
+  }
+
+  let label = "";
+
+  if (labelRaw !== undefined) {
+    if (typeof labelRaw !== "string") {
+      errors.push(`label должен быть строкой (получено ${describeValue(labelRaw)})`);
+    } else {
+      label = labelRaw;
+    }
+  }
+
+  let facts: readonly string[] = Object.freeze([] as readonly string[]);
+
+  if (factsRaw !== undefined) {
+    if (!Array.isArray(factsRaw)) {
+      errors.push(
+        `facts должен быть НАСТОЯЩИМ массивом строк (получено ${describeValue(factsRaw)})`
+      );
+    } else {
+      // Копия создаётся ОДИН раз и поэлементно: чужой массив остаётся
+      // снаружи, а снимок замораживается.
+      const copy: string[] = [];
+      const items: readonly unknown[] = factsRaw as readonly unknown[];
+
+      for (let index = 0; index < items.length; index += 1) {
+        const item = items[index];
+
+        if (typeof item !== "string") {
+          errors.push(
+            `facts должен содержать только строки: facts[${String(index)}] = ${describeValue(item)}`
+          );
+
+          break;
+        }
+
+        copy.push(item);
+      }
+
+      if (errors.length === 0) {
+        facts = Object.freeze(copy);
+      }
+    }
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
+  return {
+    ok: true,
+    decision: Object.freeze({
+      kind: kindRaw as SignalDecisionKind,
+      stopLoss: stopLossRaw,
+      takeProfit: takeProfitRaw,
+      label,
+      facts,
+      extraKeys: Object.freeze(
+        ownKeys.filter((key) => !DECISION_FIELDS.includes(key))
+      )
+    })
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -856,13 +1075,29 @@ export type BacktestOutcome =
   | { readonly ok: true; readonly result: BacktestResult }
   | {
       readonly ok: false;
-      readonly stage: "config" | "adapter" | "bars" | "provider" | "arithmetic";
+      /**
+       * Стадия отказа. `"signals"` — контейнер источника решений не
+       * является ни массивом решений, ни функцией, ни валидным
+       * адаптером (пункт 24 политики); `"adapter"` — объект похож на
+       * адаптер, но невалиден.
+       */
+      readonly stage:
+        | "config"
+        | "adapter"
+        | "signals"
+        | "bars"
+        | "provider"
+        | "arithmetic";
       readonly errors: readonly string[];
     };
 
 export interface BacktestInput {
   readonly bars: readonly BacktestBar[];
-  /** Провайдер, список решений по индексам либо адаптер стратегии. */
+  /**
+   * Провайдер-функция, список решений (настоящий Array) либо адаптер
+   * стратегии. Классификация строгая: любой другой контейнер —
+   * отказ stage `"signals"` (пункт 24 политики).
+   */
   readonly signals: SignalSource;
   readonly config?: BacktestConfig;
   /** Сегментный прогон (границы включаются в метаданные и политику). */
@@ -952,19 +1187,30 @@ export const BACKTEST_CONFIG_KEYS: readonly string[] = [
  * Глубокая заморозка (пункт 18 политики): вложенные объекты конфига и
  * результата больше не мутируются, поэтому отпечаток конфига не может
  * разойтись с metadata.configFingerprint постфактум.
+ *
+ * `visited` — защита от циклических ссылок: без неё объект, ссылающийся
+ * сам на себя, дал бы бесконечную рекурсию (RangeError). Функция
+ * публичная, поэтому вход не предполагается «заведомо древовидным».
  */
-export function deepFreeze<T>(value: T): T {
+export function deepFreeze<T>(value: T, visited?: WeakSet<object>): T {
   if (value === null || typeof value !== "object") {
     return value;
   }
 
+  const seen = visited ?? new WeakSet<object>();
   const target = value as unknown as Record<string, unknown>;
+
+  if (seen.has(target)) {
+    return value;
+  }
+
+  seen.add(target);
 
   for (const key of Object.keys(target)) {
     const nested = target[key];
 
     if (nested !== null && typeof nested === "object" && !Object.isFrozen(nested)) {
-      deepFreeze(nested);
+      deepFreeze(nested, seen);
     }
   }
 

@@ -73,23 +73,21 @@ import {
   type SignalAdapter,
   type SignalContext,
   type SignalDecision,
+  type DecisionCapture,
   type SignalProvider,
   type SkippedSignal,
+  captureSignalDecision,
   deepFreeze,
-  isEntryDecision,
-  isSignalAdapter,
-  resolveBacktestConfig,
-  signalProviderFromList
+  resolveBacktestConfig
 } from "./contract";
 import { computeBacktestMetrics } from "./metrics";
 import { fingerprintBars, fingerprintConfig } from "./serialize";
 import {
+  classifySignalSource,
   findNonFiniteNumbers,
   validateBars,
-  validateDecisionObject,
   validateEntryDecisionShape,
-  validateSegmentWindow,
-  validateSignalAdapter
+  validateSegmentWindow
 } from "./validate";
 
 /**
@@ -228,32 +226,29 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
 
   /* ---------- источник решений: провайдер / список / адаптер ---------- */
 
-  const adapter: SignalAdapter | null = isSignalAdapter(input.signals)
-    ? input.signals
-    : null;
+  /**
+   * Пункт 24 политики: контейнер `signals` классифицируется СТРОГО до
+   * исполнения. Допустимы только настоящий Array решений,
+   * функция-провайдер и валидный SignalAdapter; всё остальное —
+   * структурированный отказ (stage `"signals"` для мусорного контейнера,
+   * stage `"adapter"` для объекта, похожего на адаптер, но невалидного).
+   * «Объектного» fallback больше нет: недопустимый вход НЕ превращается
+   * в успешный прогон с нулём сделок.
+   *
+   * Для адаптера берётся его ЗАМОРОЖЕННЫЙ СНИМОК (поля прочитаны по
+   * одному разу): движок не перечитывает чужой объект, поэтому геттер не
+   * может подменить `decide` или `requiredLookbackBars` после проверки.
+   */
+  const sourceCheck = classifySignalSource(input.signals);
 
-  if (adapter !== null) {
-    const adapterErrors = validateSignalAdapter(adapter);
-
-    if (adapterErrors.length > 0) {
-      return { ok: false, stage: "adapter", errors: adapterErrors };
-    }
+  if (!sourceCheck.ok) {
+    return { ok: false, stage: sourceCheck.stage, errors: sourceCheck.errors };
   }
 
-  const signalSource = input.signals;
-  const provider: SignalProvider = isSignalAdapter(signalSource)
-    ? signalSource.decide
-    : typeof signalSource === "function"
-      ? signalSource
-      : signalProviderFromList(signalSource);
-
-  const signalSourceKind: "adapter" | "provider" | "list" = isSignalAdapter(
-    signalSource
-  )
-    ? "adapter"
-    : typeof signalSource === "function"
-      ? "provider"
-      : "list";
+  const adapter: SignalAdapter | null =
+    sourceCheck.kind === "adapter" ? sourceCheck.adapter : null;
+  const provider: SignalProvider = sourceCheck.provider;
+  const signalSourceKind: "adapter" | "provider" | "list" = sourceCheck.kind;
 
   /**
    * Требуемая каузальная история (пункт 19 политики): адаптер обязан
@@ -288,8 +283,13 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
     reason: RejectReason,
     detail: string,
     referencePrice: number,
-    stopLoss: number,
-    takeProfit: number,
+    /**
+     * Уровень ИЗ СНИМКА решения (тип unknown: до структурной проверки
+     * значение может быть чем угодно). В записи отказа неконечные
+     * значения нормализуются в null, поэтому тип сужается здесь.
+     */
+    stopLoss: unknown,
+    takeProfit: unknown,
     entryIndex: number | null = null,
     entryTime: number | null = null
   ): void => {
@@ -306,8 +306,8 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
         referencePrice: Number.isFinite(referencePrice)
           ? referencePrice
           : null,
-        stopLoss: Number.isFinite(stopLoss) ? stopLoss : null,
-        takeProfit: Number.isFinite(takeProfit) ? takeProfit : null,
+        stopLoss: Number.isFinite(stopLoss) ? (stopLoss as number) : null,
+        takeProfit: Number.isFinite(takeProfit) ? (takeProfit as number) : null,
         entryIndex,
         entryTime
       })
@@ -604,34 +604,56 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
       continue;
     }
 
-    if (
-      decision.kind !== "LONG" &&
-      decision.kind !== "SHORT" &&
-      decision.kind !== "NEUTRAL" &&
-      decision.kind !== "CANNOT_EVALUATE"
-    ) {
+    /**
+     * Пункт 23 политики (анти-TOCTOU): возвращённое решение читается
+     * РОВНО ОДИН РАЗ в неизменяемый plain-снимок, и ПРОВЕРЯЕТСЯ СНИМОК.
+     * Исходный объект (`decision`) после этой строки больше не читается
+     * нигде в движке: ни для валидации, ни для обрамления опорной цены,
+     * ни для отложенного входа, ни для записи сделки. Поэтому геттер или
+     * Proxy, меняющий значение при повторном обращении, не может
+     * подменить исполненные уровни («проверили 90 — исполнили −5»
+     * конструкционно невозможно).
+     *
+     * Снимок уже содержит: kind (один из четырёх литералов), label
+     * (строка; по умолчанию ""), facts (настоящий массив строк, копия,
+     * заморожена) и stopLoss/takeProfit КАК ПРОЧИТАНЫ (их семантическую
+     * проверку делает validateEntryDecisionShape — тоже по снимку).
+     */
+    let capture: DecisionCapture;
+
+    try {
+      capture = captureSignalDecision(decision);
+    } catch (error) {
+      // Геттер/ловушка Proxy, которая БРОСАЕТ при чтении поля, — это
+      // ошибка источника решений, а не падение движка: отказ остаётся
+      // структурированным (stage "provider").
       providerErrors.push(
-        `signals на баре ${String(i)}: неизвестный kind=${String(decision.kind)}`
+        `signals на баре ${String(i)} (time=${String(bar.time)}): решение не читается — ${
+          error instanceof Error ? error.message : String(error)
+        }`
       );
 
       break;
     }
 
-    // Любое решение проверяется в момент принятия: скаляры конечны,
-    // label — строка (если задан), facts — массив строк (если задан).
-    const objectShape = validateDecisionObject(decision);
-
-    if (!objectShape.ok) {
+    if (!capture.ok) {
       providerErrors.push(
-        `signals на баре ${String(i)} (time=${String(bar.time)}): ${objectShape.detail}`
+        `signals на баре ${String(i)} (time=${String(bar.time)}): ${capture.errors.join("; ")}`
       );
 
       break;
     }
 
-    decisionCounts[decision.kind] += 1;
+    const captured = capture.decision;
 
-    if (!isEntryDecision(decision)) {
+    decisionCounts[captured.kind] += 1;
+
+    const direction: Direction | null =
+      captured.kind === "LONG" || captured.kind === "SHORT"
+        ? captured.kind
+        : null;
+
+    if (direction === null) {
       // NEUTRAL и CANNOT_EVALUATE: сделки нет (считаются раздельно).
       continue;
     }
@@ -642,7 +664,7 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
         Object.freeze({
           index: i,
           time: bar.time,
-          kind: decision.kind,
+          kind: direction,
           reason: "position-open"
         })
       );
@@ -650,37 +672,42 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
       continue;
     }
 
-    // Согласованность уровней относительно close бара СИГНАЛА: если
-    // они не обрамляют close, решение внутренне противоречиво.
-    const shape = validateEntryDecisionShape(decision);
+    // Структурная проверка уровней ПО СНИМКУ: при успехе возвращает
+    // проверенные ЧИСЛА, и дальше движок использует только их.
+    const shape = validateEntryDecisionShape(captured);
 
     if (!shape.ok) {
       reject(
         i,
         bar.time,
-        decision.kind,
+        direction,
         "invalid-levels",
         shape.detail,
         bar.close,
-        decision.stopLoss,
-        decision.takeProfit
+        captured.stopLoss,
+        captured.takeProfit
       );
 
       continue;
     }
 
-    if (!levelsBracket(decision.kind, bar.close, decision.stopLoss, decision.takeProfit)) {
+    const stopLoss: number = shape.stopLoss;
+    const takeProfit: number = shape.takeProfit;
+
+    // Согласованность уровней относительно close бара СИГНАЛА: если
+    // они не обрамляют close, решение внутренне противоречиво.
+    if (!levelsBracket(direction, bar.close, stopLoss, takeProfit)) {
       reject(
         i,
         bar.time,
-        decision.kind,
+        direction,
         "levels-on-wrong-side",
-        decision.kind === "LONG"
-          ? `для LONG требуется sl < close < tp, есть sl=${String(decision.stopLoss)} close=${String(bar.close)} tp=${String(decision.takeProfit)}`
-          : `для SHORT требуется tp < close < sl, есть tp=${String(decision.takeProfit)} close=${String(bar.close)} sl=${String(decision.stopLoss)}`,
+        direction === "LONG"
+          ? `для LONG требуется sl < close < tp, есть sl=${String(stopLoss)} close=${String(bar.close)} tp=${String(takeProfit)}`
+          : `для SHORT требуется tp < close < sl, есть tp=${String(takeProfit)} close=${String(bar.close)} sl=${String(stopLoss)}`,
         bar.close,
-        decision.stopLoss,
-        decision.takeProfit
+        stopLoss,
+        takeProfit
       );
 
       continue;
@@ -692,7 +719,7 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
         Object.freeze({
           index: i,
           time: bar.time,
-          kind: decision.kind,
+          kind: direction,
           reason: segment === null ? "no-next-bar" : "segment-boundary"
         })
       );
@@ -704,13 +731,14 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
       signalIndex: i,
       signalTime: bar.time,
       entryIndex: i + 1,
-      // Снэшот плановых скаляров: опорная цена = close бара сигнала.
+      // Снимок плановых скаляров: опорная цена = close бара сигнала,
+      // уровни — ПРОВЕРЕННЫЕ числа из снимка решения (единственное чтение).
       plannedEntryReference: bar.close,
-      direction: decision.kind,
-      stopLoss: decision.stopLoss,
-      takeProfit: decision.takeProfit,
-      label: decision.label ?? "",
-      facts: Object.freeze([...(decision.facts ?? [])])
+      direction,
+      stopLoss,
+      takeProfit,
+      label: captured.label,
+      facts: captured.facts
     };
   }
 

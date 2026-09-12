@@ -9,7 +9,13 @@
  *  - все цены конечны и > 0, OHLC-инварианты соблюдены;
  *  - уровни сделки проверяются ДВУЖДЫ: структурно (конечность, > 0,
  *    sl ≠ tp) при принятии решения и по стороне/пробою — относительно
- *    open бара входа (это делает engine.ts).
+ *    open бара входа (это делает engine.ts);
+ *  - решение источника сигналов проверяется ПО СНИМКУ
+ *    (`captureSignalDecision`, contract.ts п. 23): этот модуль читает
+ *    уровни как `unknown` и никогда не обращается к исходному объекту;
+ *  - контейнер `signals` классифицируется СТРОГО (п. 24): Array
+ *    решений, функция-провайдер или валидный SignalAdapter — всё
+ *    остальное отказ, а не «пустой список сигналов».
  *
  * Никаких «починок» данных: честный бэктест не начинается с молчаливой
  * нормализации входа.
@@ -17,11 +23,14 @@
 
 import {
   type BacktestBar,
-  type EntryDecision,
   type ResolvedBacktestConfig,
   type SignalAdapter,
-  type SignalDecision,
-  isFiniteNumber
+  type SignalDecisionList,
+  type SignalProvider,
+  type SignalSource,
+  describeValue,
+  isFiniteNumber,
+  signalProviderFromList
 } from "./contract";
 
 export interface BarsValidation {
@@ -316,103 +325,307 @@ function timeOfOrNull(bar: unknown): number | null {
 }
 
 export type DecisionShapeCheck =
-  | { readonly ok: true }
+  | {
+      readonly ok: true;
+      /** Проверенные уровни — числа; движок обязан брать ИХ, а не сырое решение. */
+      readonly stopLoss: number;
+      readonly takeProfit: number;
+    }
   | { readonly ok: false; readonly reason: "invalid-decision"; readonly detail: string };
 
 /**
- * Проверка ЛЮБОГО решения (LONG/SHORT/NEUTRAL/CANNOT_EVALUATE) на баре
- * сигнала: скаляры конечны, label — строка (если задан), facts — массив
- * строк (если задан). Пункт 22 политики: решение проверяется и
- * снэпшотится в момент принятия, поэтому późнейшая мутация объекта
- * вызывающим кодом не меняет запланированную сделку.
+ * Структурная проверка ПОЛЯ решения, прочитанных ОДИН раз
+ * (`captureSignalDecision`, contract.ts п. 23): kind — один из четырёх
+ * литералов, label — строка (если задан), facts — настоящий массив
+ * строк (если задан) — выполняются на этапе снимка, а не здесь, потому
+ * что там они читаются из исходного объекта ровно по одному разу.
+ *
+ * `validateDecisionObject` из p2a-1.1.0 УДАЛЁН: он дублировал эти
+ * проверки и читал поля повторно (TOCTOU-окно). Единственная точка
+ * входа — снимок.
  */
-export function validateDecisionObject(
-  decision: SignalDecision
-): DecisionShapeCheck {
-  if (decision === null || typeof decision !== "object") {
-    return {
-      ok: false,
-      reason: "invalid-decision",
-      detail: "решение должно быть объектом"
-    };
-  }
-
-  const candidate = decision as { label?: unknown; facts?: unknown };
-
-  if (candidate.label !== undefined && typeof candidate.label !== "string") {
-    return {
-      ok: false,
-      reason: "invalid-decision",
-      detail: `label должен быть строкой (получено ${typeof candidate.label})`
-    };
-  }
-
-  if (candidate.facts !== undefined) {
-    if (!Array.isArray(candidate.facts)) {
-      return {
-        ok: false,
-        reason: "invalid-decision",
-        detail: `facts должен быть массивом строк (получено ${typeof candidate.facts})`
-      };
-    }
-
-    for (const fact of candidate.facts as unknown[]) {
-      if (typeof fact !== "string") {
-        return {
-          ok: false,
-          reason: "invalid-decision",
-          detail: `facts должен содержать только строки (получено ${typeof fact})`
-        };
-      }
-    }
-  }
-
-  return { ok: true };
-}
 
 /**
  * Проверка адаптера источника решений (пункт 19 политики): идентичность
  * объявлена, требуемая история — целое ≥ 1, решающая функция на месте.
  */
-export function validateSignalAdapter(adapter: SignalAdapter): readonly string[] {
+/** Ключи, которые обязан иметь адаптер (и только их). */
+const ADAPTER_KEYS: readonly string[] = Object.freeze([
+  "adapterId",
+  "version",
+  "requiredLookbackBars",
+  "decide"
+]);
+
+export type AdapterCheck =
+  | { readonly ok: true; readonly adapter: SignalAdapter }
+  | { readonly ok: false; readonly errors: readonly string[] };
+
+/**
+ * Читает адаптер источника решений в замороженный plain-снимок.
+ *
+ * Пункт 23 политики применяется и к адаптеру: каждое поле читается
+ * РОВНО ОДИН РАЗ, поэтому геттер не может пройти валидацию одной
+ * функцией `decide`, а движку отдать другую, и `requiredLookbackBars`
+ * не может «подрасти» после проверки (warmup считается по снимку).
+ * Тексты ошибок совпадают с прежней `validateSignalAdapter`.
+ */
+export function captureSignalAdapter(raw: unknown): AdapterCheck {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, errors: ["adapter: ожидается объект"] };
+  }
+
+  const source = raw as Record<string, unknown>;
   const errors: string[] = [];
 
-  if (adapter === null || typeof adapter !== "object" || Array.isArray(adapter)) {
-    return ["adapter: ожидается объект"];
+  /* ---- одиночные чтения ---- */
+
+  const adapterId: unknown = source.adapterId;
+  const version: unknown = source.version;
+  const requiredLookbackBars: unknown = source.requiredLookbackBars;
+  const decide: unknown = source.decide;
+  const ownKeys = Object.keys(source);
+
+  if (typeof adapterId !== "string" || adapterId.trim().length === 0) {
+    errors.push(
+      "adapter.adapterId: непустая строка (идентичность источника решений)"
+    );
   }
 
-  if (typeof adapter.adapterId !== "string" || adapter.adapterId.trim().length === 0) {
-    errors.push("adapter.adapterId: непустая строка (идентичность источника решений)");
-  }
-
-  if (typeof adapter.version !== "string" || adapter.version.trim().length === 0) {
+  if (typeof version !== "string" || version.trim().length === 0) {
     errors.push("adapter.version: непустая строка");
   }
 
   if (
-    !Number.isInteger(adapter.requiredLookbackBars) ||
-    adapter.requiredLookbackBars < 1
+    !Number.isInteger(requiredLookbackBars) ||
+    (requiredLookbackBars as number) < 1
   ) {
     errors.push(
       "adapter.requiredLookbackBars: целое ≥ 1 (1 — только текущий бар; требование истории ОБЯЗАНО быть явным)"
     );
   }
 
-  if (typeof adapter.decide !== "function") {
+  if (typeof decide !== "function") {
     errors.push("adapter.decide: функция (context) → решение");
   }
 
-  const known = ["adapterId", "version", "requiredLookbackBars", "decide"];
-
-  for (const key of Object.keys(adapter)) {
-    if (!known.includes(key)) {
+  for (const key of ownKeys) {
+    if (!ADAPTER_KEYS.includes(key)) {
       errors.push(
-        `adapter: неизвестный ключ "${key}" (допустимы: ${known.join(", ")})`
+        `adapter: неизвестный ключ "${key}" (допустимы: ${ADAPTER_KEYS.join(", ")})`
       );
     }
   }
 
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
+  return {
+    ok: true,
+    adapter: Object.freeze({
+      adapterId: adapterId as string,
+      version: version as string,
+      requiredLookbackBars: requiredLookbackBars as number,
+      decide: decide as SignalProvider
+    })
+  };
+}
+
+/**
+ * Структурная проверка адаптера (пункт 19 политики) — тонкая обёртка над
+ * `captureSignalAdapter`: сообщения об ошибках живут в одном месте.
+ * Возвращает список ошибок (пустой = валиден).
+ */
+export function validateSignalAdapter(adapter: SignalAdapter): readonly string[] {
+  const check = captureSignalAdapter(adapter);
+
+  return check.ok ? [] : check.errors;
+}
+
+/* ------------------------------------------------------------------ */
+/* Строгая классификация контейнера решений (пункт 24 политики)         */
+/* ------------------------------------------------------------------ */
+
+export type SignalSourceCheck =
+  | {
+      readonly ok: true;
+      readonly kind: "adapter";
+      /** Замороженный снимок адаптера (поля прочитаны по одному разу). */
+      readonly adapter: SignalAdapter;
+      readonly provider: SignalProvider;
+    }
+  | { readonly ok: true; readonly kind: "provider"; readonly provider: SignalProvider }
+  | {
+      readonly ok: true;
+      readonly kind: "list";
+      readonly decisions: SignalDecisionList;
+      readonly provider: SignalProvider;
+    }
+  | {
+      readonly ok: false;
+      /**
+       * `"signals"` — контейнер не является ни массивом, ни функцией, ни
+       * объектом, похожим на адаптер; `"adapter"` — похож на адаптер, но
+       * невалиден (в том числе опечатка `Decide`).
+       */
+      readonly stage: "signals" | "adapter";
+      readonly errors: readonly string[];
+    };
+
+/**
+ * Ключи собственного набора объекта, по которым он «похож на адаптер».
+ *
+ * Перечисление ключей геттеры не вызывает. Ключ, отличающийся от
+ * `decide` только регистром (`Decide`, `DECIDE`), считается ОПЕЧАТКОЙ
+ * адаптера: такой объект обязан упасть как невалидный адаптер
+ * (stage `"adapter"`), а не как «неизвестный контейнер».
+ */
+function adapterHintKeys(source: object): {
+  readonly adapterLike: boolean;
+  readonly typoKeys: readonly string[];
+} {
+  let keys: readonly (string | symbol)[];
+
+  try {
+    keys = Reflect.ownKeys(source);
+  } catch (_error) {
+    // hostile ownKeys-ловушка: объект не похож на адаптер и будет
+    // отклонён как недопустимый контейнер.
+    keys = [];
+  }
+
+  const own = keys.filter((key): key is string => typeof key === "string");
+  const typoKeys = own.filter(
+    (key) => key !== "decide" && key.toLowerCase() === "decide"
+  );
+
+  /**
+   * Ключи адаптера ищутся и в прототипе (`in` не вызывает геттеры):
+   * класс-стратегия с методом `decide` в прототипе обязана упасть как
+   * НЕВАЛИДНЫЙ АДАПТЕР (stage "adapter"), а не как «неизвестный
+   * контейнер». Map/Set/Date ни одного из этих ключей не имеют.
+   */
+  const inherited = ADAPTER_KEYS.filter((key) => {
+    try {
+      return key in source;
+    } catch (_error) {
+      return false;
+    }
+  });
+
+  return {
+    adapterLike: inherited.length > 0 || typoKeys.length > 0,
+    typoKeys
+  };
+}
+
+/** Признаки «объекта, похожего на массив» — только для текста ошибки. */
+function looksArrayLike(source: object): boolean {
+  const record = source as Record<string, unknown>;
+
+  if (typeof record.length === "number") {
+    return true;
+  }
+
+  try {
+    return Object.keys(source).some((key) => /^(0|[1-9][0-9]*)$/.test(key));
+  } catch (_error) {
+    return false;
+  }
+}
+
+function containerError(source: unknown): readonly string[] {
+  const errors: string[] = [
+    `signals: недопустимый контейнер источника решений (${describeValue(
+      source
+    )}) — допустимы ТОЛЬКО настоящий Array решений, функция-провайдер (context) → решение либо валидный SignalAdapter { adapterId, version, requiredLookbackBars, decide }`
+  ];
+
+  if (source !== null && typeof source === "object") {
+    if (looksArrayLike(source as object)) {
+      errors.push(
+        "signals: объект, ПОХОЖИЙ на массив (length/числовые ключи), массивом не считается — передайте настоящий Array"
+      );
+    }
+
+    if (source instanceof Map || source instanceof Set) {
+      errors.push(
+        "signals: Map/Set не являются допустимым контейнером решений — передайте Array.from(...) решений, функцию-провайдер или адаптер"
+      );
+    }
+  }
+
+  errors.push(
+    "signals: молчаливое превращение недопустимого контейнера в «сигналов нет» (ok:true, 0 сделок) запрещено"
+  );
+
   return errors;
+}
+
+/**
+ * СТРОГАЯ классификация контейнера `signals` (пункт 24 политики).
+ *
+ * Допустимы ровно три формы: (A) настоящий `Array` решений, (B)
+ * функция-провайдер, (C) валидный `SignalAdapter`. Всё остальное —
+ * структурированный отказ: недопустимый контейнер даёт stage
+ * `"signals"`, объект, похожий на адаптер, но невалидный (нет `decide`,
+ * опечатка `Decide`, мусорные поля) — stage `"adapter"`. Никакого
+ * «общего объектного» fallback и никакого превращения мусора в пустой
+ * список решений больше нет.
+ */
+export function classifySignalSource(source: unknown): SignalSourceCheck {
+  // (B) функция-провайдер.
+  if (typeof source === "function") {
+    return { ok: true, kind: "provider", provider: source as SignalProvider };
+  }
+
+  // (A) НАСТОЯЩИЙ массив решений (содержимое проверяется по bar-ам).
+  if (Array.isArray(source)) {
+    const decisions = source as SignalDecisionList;
+
+    return {
+      ok: true,
+      kind: "list",
+      decisions,
+      provider: signalProviderFromList(decisions)
+    };
+  }
+
+  if (source === null || typeof source !== "object") {
+    return { ok: false, stage: "signals", errors: containerError(source) };
+  }
+
+  const candidate = source as object;
+  const hint = adapterHintKeys(candidate);
+
+  // (C) объект, похожий на адаптер: снимок + строгая валидация.
+  if (hint.adapterLike) {
+    const check = captureSignalAdapter(candidate);
+
+    if (!check.ok) {
+      const errors = [...check.errors];
+
+      if (hint.typoKeys.length > 0) {
+        errors.push(
+          `adapter: ключ ${hint.typoKeys
+            .map((key) => `"${key}"`)
+            .join(", ")} не является "decide" (регистр имеет значение)`
+        );
+      }
+
+      return { ok: false, stage: "adapter", errors };
+    }
+
+    return {
+      ok: true,
+      kind: "adapter",
+      adapter: check.adapter,
+      provider: check.adapter.decide
+    };
+  }
+
+  return { ok: false, stage: "signals", errors: containerError(source) };
 }
 
 /**
@@ -430,12 +643,25 @@ export function validateSignalAdapter(adapter: SignalAdapter): readonly string[]
 export function findNonFiniteNumbers(
   value: unknown,
   path = "result",
-  limit = 20
+  limit = 20,
+  visited?: WeakSet<object>
 ): readonly string[] {
   const found: string[] = [];
+  const seen = visited ?? new WeakSet<object>();
 
-  const walk = (node: unknown, nodePath: string, depth: number): void => {
-    if (found.length >= limit || depth > 8) {
+  /**
+   * Рекурсия БЕЙЗ ограничителя глубины: срез `depth > 8` (p2a-1.1.0)
+   * означал, что неконечное число глубже 8 уровней не находилось, то
+   * есть проверка конечности результата была неполной. Циклические
+   * ссылки вместо этого отсекаются через `seen` (каждый объект
+   * посещается один раз), поэтому обход конечен для любого конечного
+   * графа, а полнота не зависит от вложенности. Единственное
+   * ограничение — `limit` на число СООБЩЕНИЙ (не на обход).
+   */
+  const walk = (node: unknown, nodePath: string): void => {
+    if (found.length >= limit) {
+      // Сообщений достаточно: любое найденное значение уже означает
+      // отказ, поэтому полный обход дальше не нужен.
       return;
     }
 
@@ -451,62 +677,76 @@ export function findNonFiniteNumbers(
       return;
     }
 
+    const target = node as object;
+
+    if (seen.has(target)) {
+      return;
+    }
+
+    seen.add(target);
+
     if (Array.isArray(node)) {
       for (let i = 0; i < node.length; i += 1) {
-        walk(node[i], `${nodePath}[${String(i)}]`, depth + 1);
+        walk(node[i], `${nodePath}[${String(i)}]`);
       }
 
       return;
     }
 
     for (const key of Object.keys(node as Record<string, unknown>)) {
-      walk(
-        (node as Record<string, unknown>)[key],
-        `${nodePath}.${key}`,
-        depth + 1
-      );
+      walk((node as Record<string, unknown>)[key], `${nodePath}.${key}`);
     }
   };
 
-  walk(value, path, 0);
+  walk(value, path);
 
   return found;
+}
+
+/** Уровни, уже прочитанные в снимок решения (значения — как прочитаны). */
+export interface CapturedLevels {
+  readonly stopLoss: unknown;
+  readonly takeProfit: unknown;
 }
 
 /**
  * Структурная проверка LONG/SHORT-решения: конечные положительные цены,
  * sl ≠ tp. Проверка СТОРОНЫ выполняется отдельно — относительно open
  * бара входа (engine.ts), потому что на момент решения open ещё неизвестен.
+ *
+ * Принимает СНИМОК уровней (п. 23 политики): типы полей `unknown`,
+ * поэтому сюда нельзя передать «сырой» объект решения с геттерами, не
+ * потеряв тип. При успехе возвращает ПРОВЕРЕННЫЕ ЧИСЛА — движок обязан
+ * исполнять именно их, а не перечитывать решение.
  */
 export function validateEntryDecisionShape(
-  decision: EntryDecision
+  levels: CapturedLevels
 ): DecisionShapeCheck {
-  const common = validateDecisionObject(decision);
+  // Локальные копии: единственное чтение каждого поля уже произошло при
+  // создании снимка, здесь перечитывания не добавляются.
+  const stopLoss: unknown = levels.stopLoss;
+  const takeProfit: unknown = levels.takeProfit;
 
-  if (!common.ok) {
-    return common;
-  }
-
-  if (!isFiniteNumber(decision.stopLoss) || decision.stopLoss <= 0) {
+  if (!isFiniteNumber(stopLoss) || stopLoss <= 0) {
     return {
       ok: false,
       reason: "invalid-decision",
       // Значение приводится в тексте: в записи отказа неконечные уровни
       // нормализуются в null (пункт 17), поэтому причина обязана быть
       // видна здесь.
-      detail: `stopLoss должен быть конечным числом > 0 (получено ${String(decision.stopLoss)})`
+      detail: `stopLoss должен быть конечным числом > 0 (получено ${describeValue(stopLoss)})`
     };
   }
 
-  if (!isFiniteNumber(decision.takeProfit) || decision.takeProfit <= 0) {
+  if (!isFiniteNumber(takeProfit) || takeProfit <= 0) {
     return {
       ok: false,
       reason: "invalid-decision",
-      detail: `takeProfit должен быть конечным числом > 0 (получено ${String(decision.takeProfit)})`
+      detail: `takeProfit должен быть конечным числом > 0 (получено ${describeValue(takeProfit)})`
     };
   }
 
-  if (decision.stopLoss === decision.takeProfit) {
+  if (stopLoss === takeProfit) {
     return {
       ok: false,
       reason: "invalid-decision",
@@ -514,7 +754,7 @@ export function validateEntryDecisionShape(
     };
   }
 
-  return { ok: true };
+  return { ok: true, stopLoss, takeProfit };
 }
 
 /** Проверка границ сегмента относительно набора баров. */

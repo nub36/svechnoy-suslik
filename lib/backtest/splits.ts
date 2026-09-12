@@ -31,6 +31,7 @@ import {
   type BacktestBar,
   type BacktestInput,
   type BacktestMetrics,
+  type BacktestOutcome,
   type BacktestResult,
   type BacktestTrade,
   type ChronologicalSplit,
@@ -40,11 +41,10 @@ import {
   type SignalSource,
   type SplitName,
   BACKTEST_SPLIT_DEFAULTS,
-  isSignalAdapter,
   resolveBacktestConfig
 } from "./contract";
 import { runBacktest } from "./engine";
-import { validateSignalAdapter } from "./validate";
+import { classifySignalSource } from "./validate";
 
 export const SPLIT_NAMES: readonly SplitName[] = ["TRAIN", "VALIDATION", "OOS"];
 
@@ -257,13 +257,16 @@ export function assertNoSegmentLeakage(
 /* Сегментный прогон                                                    */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Стадии сегментного отказа: стадии внутренних прогонов НАСЛЕДУЮТСЯ из
+ * контракта движка (поэтому новая стадия `"signals"` — недопустимый
+ * контейнер источника решений — распространяется автоматически, без
+ * второго списка, который может разойтись), плюс собственные стадии
+ * сплита и проверки утечек.
+ */
 type SegmentedFailureStage =
-  | "config"
-  | "adapter"
-  | "bars"
+  | Exclude<BacktestOutcome, { readonly ok: true }>["stage"]
   | "split"
-  | "provider"
-  | "arithmetic"
   | "leakage";
 
 export type SegmentedBacktestOutcome =
@@ -272,20 +275,13 @@ export type SegmentedBacktestOutcome =
       readonly ok: false;
       /**
        * Стадия отказа. Стадии внутренних прогонов (config / adapter /
-       * bars / provider / arithmetic) сохраняются как есть; если
-       * сегменты упали на РАЗНЫХ стадиях, сообщается стадия ПЕРВОГО
-       * упавшего сегмента в порядке TRAIN → VALIDATION → OOS, а стадии
-       * остальных видны в errors (префикс `[stage=…]`). Схлопывания в
-       * одну стадию больше нет.
+       * signals / bars / provider / arithmetic) сохраняются как есть;
+       * если сегменты упали на РАЗНЫХ стадиях, сообщается стадия
+       * ПЕРВОГО упавшего сегмента в порядке TRAIN → VALIDATION → OOS, а
+       * стадии остальных видны в errors (префикс `[stage=…]`).
+       * Схлопывания в одну стадию больше нет.
        */
-      readonly stage:
-        | "config"
-        | "adapter"
-        | "bars"
-        | "split"
-        | "provider"
-        | "arithmetic"
-        | "leakage";
+      readonly stage: SegmentedFailureStage;
       readonly errors: readonly string[];
     };
 
@@ -326,15 +322,23 @@ export function runSegmentedBacktest(
     return { ok: false, stage: "config", errors: resolved.errors };
   }
 
-  const adapter = isSignalAdapter(input.signals) ? input.signals : null;
+  /**
+   * Пункт 24 политики: контейнер `signals` классифицируется СТРОГО до
+   * сплита и до прогонов. Недопустимый контейнер (`{}`, число, Map,
+   * array-like, «адаптер» без `decide`) даёт отказ stage `"signals"`
+   * либо `"adapter"`, а НЕ три успешных сегмента с нулём сделок.
+   * Адаптер берётся замороженным снимком: все три сегмента получают ОДИН
+   * и тот же объект с прочитанными по одному разу полями.
+   */
+  const sourceCheck = classifySignalSource(input.signals);
 
-  if (adapter !== null) {
-    const adapterErrors = validateSignalAdapter(adapter);
-
-    if (adapterErrors.length > 0) {
-      return { ok: false, stage: "adapter", errors: adapterErrors };
-    }
+  if (!sourceCheck.ok) {
+    return { ok: false, stage: sourceCheck.stage, errors: sourceCheck.errors };
   }
+
+  const adapter = sourceCheck.kind === "adapter" ? sourceCheck.adapter : null;
+  const segmentInput: SegmentedBacktestInput =
+    adapter === null ? input : { ...input, signals: adapter };
 
   /**
    * Требуемая история источника решений. Для провайдера/списка —
@@ -363,13 +367,13 @@ export function runSegmentedBacktest(
   }
 
   const split = splitCheck.split;
-  const train = runSegment(split.train, split.warmupStart.TRAIN, input);
+  const train = runSegment(split.train, split.warmupStart.TRAIN, segmentInput);
   const validation = runSegment(
     split.validation,
     split.warmupStart.VALIDATION,
-    input
+    segmentInput
   );
-  const oos = runSegment(split.oos, split.warmupStart.OOS, input);
+  const oos = runSegment(split.oos, split.warmupStart.OOS, segmentInput);
 
   const runs: readonly SegmentRun[] = [train, validation, oos];
   const errors: string[] = [];

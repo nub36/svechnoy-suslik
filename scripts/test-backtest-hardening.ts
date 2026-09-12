@@ -30,6 +30,27 @@
  * open-proximity tie-break по «сырому» open, finalEquity = последняя
  * точка эквити, all-breakeven PF, отставка гэповых кодов отказов.
  *
+ * ПОВТОРНЫЙ аудит f87d6f9 (вердикт PASS WITH RISKS) добавил два
+ * замечания MEDIUM, закрытые секциями 14-16 этого файла:
+ *   NEW-1 — TOCTOU решения: источник мог вернуть объект с геттерами или
+ *           Proxy, и движок читал stopLoss/takeProfit/label/facts
+ *           несколько раз (валидация → обрамление → снимок), поэтому
+ *           «проверили 90 — исполнили −5» было возможно. Теперь решение
+ *           читается РОВНО ОДИН РАЗ в неизменяемый снимок ДО валидации
+ *           (секция 14: счётчики чтений по каждому полю, геттеры с
+ *           подменой и с исключением на втором чтении, Proxy,
+ *           детерминизм повтора, снимок адаптера);
+ *   NEW-2 — fail-open контейнера `signals`: `{}`, 42, true, Map, Set,
+ *           Date, null, undefined и array-like объект молча
+ *           интерпретировались как «пустой список решений» и давали
+ *           ok:true с нулём сделок. Теперь контейнер классифицируется
+ *           строго: Array | функция | валидный SignalAdapter, иначе
+ *           структурированный отказ stage "signals"/"adapter"
+ *           (секция 15, включая сегментный прогон и диагностику).
+ *   Секция 16 — побочные дешёвые hardening-пункты: защита deepFreeze и
+ *           скана конечности от циклических ссылок, снятие среза
+ *           глубины (NaN глубже 8 уровней больше не пропускается).
+ *
  * Никакой финансовой интерпретации: тесты проверяют СЕМАНТИКУ движка, а
  * не прибыльность. Всё детерминировано (без Date.now/random/env/сети).
  */
@@ -38,7 +59,9 @@ import {
   BACKTEST_CONTRACT_VERSION,
   BACKTEST_DEFAULTS,
   RETIRED_REJECT_REASONS,
+  captureSignalDecision,
   deepFreeze,
+  describeValue,
   entryDecision,
   isSignalAdapter,
   noTradeDecision,
@@ -52,7 +75,8 @@ import {
   type SignalAdapter,
   type SignalContext,
   type SignalDecision,
-  type SignalProvider
+  type SignalProvider,
+  type SignalSource
 } from "../lib/backtest/contract";
 import { runBacktest } from "../lib/backtest/engine";
 import {
@@ -69,6 +93,8 @@ import {
 import { fingerprintConfig, serializeResult } from "../lib/backtest/serialize";
 import { chronologicalSplit, runSegmentedBacktest } from "../lib/backtest/splits";
 import {
+  captureSignalAdapter,
+  classifySignalSource,
   findNonFiniteNumbers,
   validateBars,
   validateSignalAdapter
@@ -1767,8 +1793,8 @@ for (const item of stageMatrix) {
 }
 
 ok(
-  BACKTEST_CONTRACT_VERSION === "p2a-1.1.0",
-  `версия контракта поднята до p2a-1.1.0 (${BACKTEST_CONTRACT_VERSION})`
+  BACKTEST_CONTRACT_VERSION === "p2a-1.2.0",
+  `версия контракта поднята до p2a-1.2.0 (${BACKTEST_CONTRACT_VERSION})`
 );
 
 /* ================================================================== */
@@ -2486,6 +2512,1094 @@ ok(
     (bar) => bar.high >= Math.max(bar.open, bar.close) && bar.low <= Math.min(bar.open, bar.close)
   ),
   "poison: OHLC-инварианты сохранены (подмена валидна)"
+);
+
+/* ================================================================== */
+/* 14. NEW-1 (MEDIUM): TOCTOU — решение читается РОВНО ОДИН РАЗ         */
+/* ================================================================== */
+
+section("14. NEW-1: TOCTOU — одиночное чтение решения в неизменяемый снимок");
+
+/**
+ * Решение с геттерами и счётчиком чтений.
+ *
+ * `sequence` — значения по номеру чтения: первое чтение получает
+ * sequence[0], второе — sequence[1] (последнее значение «залипает»).
+ * `throwFrom` — номер чтения (1-based), начиная с которого геттер бросает
+ * исключение: если движок перечитывает поле, прогон падает, а не «молча
+ * исполняет» другое значение.
+ */
+function countingDecision(
+  spec: {
+    readonly kind?: readonly unknown[];
+    readonly stopLoss?: readonly unknown[];
+    readonly takeProfit?: readonly unknown[];
+    readonly label?: readonly unknown[];
+    readonly facts?: readonly unknown[];
+    readonly throwFrom?: Partial<Record<string, number>>;
+  },
+  counts: Record<string, number>
+): SignalDecision {
+  const target: Record<string, unknown> = {};
+
+  const define = (
+    key: string,
+    sequence: readonly unknown[] | undefined,
+    fallback: unknown
+  ): void => {
+    Object.defineProperty(target, key, {
+      enumerable: true,
+      configurable: true,
+      get(): unknown {
+        counts[key] = (counts[key] ?? 0) + 1;
+
+        const from = spec.throwFrom === undefined ? undefined : spec.throwFrom[key];
+
+        if (from !== undefined && counts[key] >= from) {
+          throw new Error(`повторное чтение поля "${key}" — TOCTOU`);
+        }
+
+        if (sequence === undefined || sequence.length === 0) {
+          return fallback;
+        }
+
+        return sequence[Math.min(counts[key] - 1, sequence.length - 1)];
+      }
+    });
+  };
+
+  define("kind", spec.kind, "LONG");
+  define("stopLoss", spec.stopLoss, 90);
+  define("takeProfit", spec.takeProfit, 110);
+  define("label", spec.label, "hostile");
+  define("facts", spec.facts, Object.freeze(["hostile"]));
+
+  return target as unknown as SignalDecision;
+}
+
+/** Список решений: все null, кроме одного индекса. */
+function onlyAt(
+  index: number,
+  decision: unknown,
+  length = 60
+): (SignalDecision | null)[] {
+  const list: (SignalDecision | null)[] = new Array(length).fill(null);
+
+  list[index] = decision as SignalDecision;
+
+  return list;
+}
+
+/* ---------- 14.1 сценарий аудитора: stopLoss 90 → −5 ---------- */
+
+const countsSl: Record<string, number> = {};
+const slRun = run(
+  BARS_60,
+  onlyAt(10, countingDecision({ stopLoss: [90, -5] }, countsSl)),
+  ZERO
+);
+const slTrade = tradeOf(slRun);
+
+ok(
+  slRun.ok === true,
+  `TOCTOU stopLoss: прогон успешен (${slRun.ok ? "ok" : slRun.errors.join("; ")})`
+);
+ok(
+  slTrade !== undefined && slTrade.stopLoss === 90,
+  `TOCTOU stopLoss: исполнен ПРОВЕРЕННЫЙ уровень 90, а не −5 (получено ${String(
+    slTrade === undefined ? "нет сделки" : slTrade.stopLoss
+  )})`
+);
+ok(
+  slTrade !== undefined && slTrade.stopLoss !== -5,
+  "TOCTOU stopLoss: подменённое значение −5 нигде не исполнено"
+);
+ok(
+  countsSl.stopLoss === 1,
+  `TOCTOU stopLoss: поле прочитано РОВНО один раз (прочтений ${String(countsSl.stopLoss)})`
+);
+near(
+  slTrade === undefined ? null : slTrade.plannedRisk,
+  slTrade === undefined
+    ? 0
+    : Math.abs(slTrade.plannedEntryReference - 90) * slTrade.quantity,
+  "TOCTOU stopLoss: плановый риск считается от исполненного уровня 90"
+);
+
+/* ---------- 14.2 takeProfit меняется при повторном чтении ---------- */
+
+const countsTp: Record<string, number> = {};
+const tpRun = run(
+  BARS_60,
+  onlyAt(10, countingDecision({ takeProfit: [110, 5] }, countsTp)),
+  ZERO
+);
+const tpTrade = tradeOf(tpRun);
+
+ok(
+  tpTrade !== undefined && tpTrade.takeProfit === 110,
+  `TOCTOU takeProfit: исполнено первое (проверенное) значение 110 (получено ${String(
+    tpTrade === undefined ? "нет сделки" : tpTrade.takeProfit
+  )})`
+);
+ok(
+  countsTp.takeProfit === 1,
+  `TOCTOU takeProfit: поле прочитано один раз (прочтений ${String(countsTp.takeProfit)})`
+);
+
+/* ---------- 14.3 label меняется при повторном чтении ---------- */
+
+const countsLabel: Record<string, number> = {};
+const labelRun = run(
+  BARS_60,
+  onlyAt(10, countingDecision({ label: ["первая", "вторая"] }, countsLabel)),
+  ZERO
+);
+const labelTrade = tradeOf(labelRun);
+
+ok(
+  labelTrade !== undefined && labelTrade.label === "первая",
+  `TOCTOU label: в сделке первое значение (${String(
+    labelTrade === undefined ? "нет сделки" : labelTrade.label
+  )})`
+);
+ok(
+  countsLabel.label === 1,
+  `TOCTOU label: поле прочитано один раз (прочтений ${String(countsLabel.label)})`
+);
+
+/* ---------- 14.4 facts меняется при повторном чтении ---------- */
+
+const sharedFacts: string[] = ["первый"];
+const countsFacts: Record<string, number> = {};
+const factsRun = run(
+  BARS_60,
+  onlyAt(
+    10,
+    countingDecision({ facts: [sharedFacts, ["второй"]] }, countsFacts)
+  ),
+  ZERO
+);
+const factsTrade = tradeOf(factsRun);
+
+ok(
+  factsTrade !== undefined && factsTrade.facts.join("|") === "первый",
+  `TOCTOU facts: в сделке копия первого массива (${String(
+    factsTrade === undefined ? "нет сделки" : factsTrade.facts.join("|")
+  )})`
+);
+ok(
+  countsFacts.facts === 1,
+  `TOCTOU facts: поле прочитано один раз (прочтений ${String(countsFacts.facts)})`
+);
+ok(
+  factsTrade !== undefined && (factsTrade.facts as unknown) !== (sharedFacts as unknown),
+  "TOCTOU facts: движок хранит КОПИЮ, а не ссылку на чужой массив"
+);
+ok(
+  factsTrade !== undefined && Object.isFrozen(factsTrade.facts),
+  "TOCTOU facts: копия заморожена"
+);
+
+const mutateFacts = attempt(() => {
+  sharedFacts.push("поздняя мутация");
+});
+
+ok(
+  !mutateFacts.threw &&
+    factsTrade !== undefined &&
+    factsTrade.facts.join("|") === "первый",
+  "TOCTOU facts: мутация исходного массива ПОСЛЕ прогона не меняет сделку"
+);
+
+/* ---------- 14.5 все поля: по одному чтению, повтор бросает ---------- */
+
+const countsThrow: Record<string, number> = {};
+const throwRun = run(
+  BARS_60,
+  onlyAt(
+    10,
+    countingDecision(
+      { throwFrom: { kind: 2, stopLoss: 2, takeProfit: 2, label: 2, facts: 2 } },
+      countsThrow
+    )
+  ),
+  ZERO
+);
+
+ok(
+  throwRun.ok === true,
+  `TOCTOU: геттеры бросают на ВТОРОМ чтении — прогон всё равно успешен, значит повторных чтений нет (${
+    throwRun.ok ? "ok" : throwRun.errors.join("; ")
+  })`
+);
+ok(
+  ["kind", "stopLoss", "takeProfit", "label", "facts"].every(
+    (key) => countsThrow[key] === 1
+  ),
+  `TOCTOU: каждое из пяти полей прочитано ровно один раз (${JSON.stringify(countsThrow)})`
+);
+
+/* ---------- 14.6 Proxy-backed решение ---------- */
+
+const proxyReads: Record<string, number> = {};
+let proxyFlip = false;
+
+const proxyDecision = new Proxy(
+  {
+    kind: "LONG",
+    stopLoss: 90,
+    takeProfit: 110,
+    label: "proxy",
+    facts: ["proxy"]
+  },
+  {
+    get(target, prop, receiver): unknown {
+      if (typeof prop !== "string") {
+        return Reflect.get(target, prop, receiver);
+      }
+
+      proxyReads[prop] = (proxyReads[prop] ?? 0) + 1;
+
+      if (prop === "stopLoss") {
+        proxyFlip = !proxyFlip;
+
+        return proxyFlip ? 90 : -5;
+      }
+
+      if (prop === "takeProfit") {
+        return proxyReads[prop] === 1 ? 110 : 5;
+      }
+
+      return Reflect.get(target, prop, receiver);
+    }
+  }
+) as unknown as SignalDecision;
+
+const proxyRun = run(BARS_60, onlyAt(10, proxyDecision), ZERO);
+const proxyTrade = tradeOf(proxyRun);
+
+ok(
+  proxyTrade !== undefined &&
+    proxyTrade.stopLoss === 90 &&
+    proxyTrade.takeProfit === 110,
+  `TOCTOU Proxy: исполнены первые прочитанные уровни (sl=${String(
+    proxyTrade === undefined ? "-" : proxyTrade.stopLoss
+  )}, tp=${String(proxyTrade === undefined ? "-" : proxyTrade.takeProfit)})`
+);
+ok(
+  ["kind", "stopLoss", "takeProfit", "label", "facts"].every(
+    (key) => proxyReads[key] === 1
+  ),
+  `TOCTOU Proxy: ловушка get вызвана по одному разу на поле (${JSON.stringify(proxyReads)})`
+);
+
+/* ---------- 14.7 детерминизм: одинаковые геттеры → одинаковый результат ---------- */
+
+function identicalHostileRun(): ReturnType<typeof runBacktest> {
+  const counts: Record<string, number> = {};
+
+  return run(
+    BARS_60,
+    onlyAt(
+      10,
+      countingDecision(
+        { stopLoss: [90, -5], takeProfit: [110, 5], label: ["a", "b"], facts: [["x"], ["y"]] },
+        counts
+      )
+    ),
+    ZERO
+  );
+}
+
+const firstHostile = identicalHostileRun();
+const secondHostile = identicalHostileRun();
+
+ok(
+  firstHostile.ok === true && secondHostile.ok === true,
+  "TOCTOU детерминизм: оба прогона с одинаковым поведением геттеров успешны"
+);
+ok(
+  firstHostile.ok &&
+    secondHostile.ok &&
+    serializeResult(firstHostile.result) === serializeResult(secondHostile.result),
+  "TOCTOU детерминизм: идентичное поведение геттеров даёт идентичный результат"
+);
+
+/* ---------- 14.8 первое чтение невалидно → отказ, а не «второй шанс» ---------- */
+
+const countsBadFirst: Record<string, number> = {};
+const badFirstRun = run(
+  BARS_60,
+  onlyAt(10, countingDecision({ stopLoss: [-5, 90] }, countsBadFirst)),
+  ZERO
+);
+const badFirstResult = resultOf(badFirstRun);
+const badFirstReject =
+  badFirstResult === null ? undefined : badFirstResult.rejectedSignals[0];
+
+ok(
+  badFirstRun.ok === true &&
+    badFirstResult !== null &&
+    badFirstResult.trades.length === 0,
+  "TOCTOU: невалидное ПЕРВОЕ значение уровня даёт отказ сигнала, а не сделку"
+);
+ok(
+  badFirstReject !== undefined && badFirstReject.reason === "invalid-levels",
+  `TOCTOU: причина отказа — invalid-levels (${String(
+    badFirstReject === undefined ? "нет записи" : badFirstReject.reason
+  )})`
+);
+ok(
+  badFirstReject !== undefined && badFirstReject.detail.includes("-5"),
+  "TOCTOU: в причине видно именно прочитанное значение −5"
+);
+ok(
+  badFirstReject !== undefined && badFirstReject.stopLoss === -5,
+  `TOCTOU: в записи отказа видно ПРОЧИТАННОЕ значение −5, а не 90 из второго чтения (${String(
+    badFirstReject === undefined ? "нет записи" : badFirstReject.stopLoss
+  )})`
+);
+ok(
+  countsBadFirst.stopLoss === 1,
+  `TOCTOU: после отказа поле НЕ перечитывается (прочтений ${String(countsBadFirst.stopLoss)})`
+);
+
+/* ---------- 14.8b геттер, который БРОСАЕТ, — отказ провайдера, не исключение ---------- */
+
+const throwingDecision = {
+  get kind(): string {
+    return "LONG";
+  },
+  get stopLoss(): number {
+    throw new Error("hostile getter stopLoss");
+  },
+  takeProfit: 110,
+  label: "x",
+  facts: ["x"]
+} as unknown as SignalDecision;
+
+const throwingAttempt = attempt(() => run(BARS_60, onlyAt(10, throwingDecision), ZERO));
+
+ok(
+  !throwingAttempt.threw,
+  `TOCTOU: бросающий геттер не роняет движок (${throwingAttempt.message})`
+);
+
+const throwingRun = run(BARS_60, onlyAt(10, throwingDecision), ZERO);
+
+ok(
+  throwingRun.ok === false && throwingRun.stage === "provider",
+  `TOCTOU: бросающий геттер → структурированный отказ stage="provider" (получено ${
+    throwingRun.ok ? "ok:true" : throwingRun.stage
+  })`
+);
+ok(
+  throwingRun.ok === false &&
+    throwingRun.errors.some((error) => error.includes("hostile getter stopLoss")),
+  "TOCTOU: причина исключения источника видна в ошибках"
+);
+
+/* ---------- 14.9 no-trade решение тоже читается один раз ---------- */
+
+const countsNoTrade: Record<string, number> = {};
+const noTradeRun = run(
+  BARS_60,
+  onlyAt(
+    10,
+    countingDecision(
+      { kind: ["CANNOT_EVALUATE"], stopLoss: [90, -5] },
+      countsNoTrade
+    )
+  ),
+  ZERO
+);
+const noTradeResult = resultOf(noTradeRun);
+
+ok(
+  noTradeResult !== null && noTradeResult.input.decisionCounts.CANNOT_EVALUATE === 1,
+  "TOCTOU: CANNOT_EVALUATE учтён отдельно от NEUTRAL"
+);
+ok(
+  countsNoTrade.kind === 1 &&
+    countsNoTrade.stopLoss === 1 &&
+    countsNoTrade.takeProfit === 1 &&
+    countsNoTrade.label === 1 &&
+    countsNoTrade.facts === 1,
+  `TOCTOU: no-trade решение тоже читается по одному разу на поле (${JSON.stringify(countsNoTrade)})`
+);
+
+/* ---------- 14.10 снимок адаптера: decide/requiredLookbackBars ---------- */
+
+const adapterCounts: Record<string, number> = {};
+let decideFlip = false;
+
+const firstDecide: SignalProvider = (context) =>
+  entryDecision("LONG", context.bar.low, context.bar.high + 1, "первый decide", [
+    "первый"
+  ]);
+const secondDecide: SignalProvider = (context) =>
+  entryDecision("LONG", context.bar.low, context.bar.high + 1, "второй decide", [
+    "второй"
+  ]);
+
+const hostileAdapter = {
+  get adapterId(): string {
+    adapterCounts.adapterId = (adapterCounts.adapterId ?? 0) + 1;
+
+    return adapterCounts.adapterId === 1 ? "hostile-adapter" : "подменённый";
+  },
+  get version(): string {
+    adapterCounts.version = (adapterCounts.version ?? 0) + 1;
+
+    return adapterCounts.version === 1 ? "1.0.0" : "9.9.9";
+  },
+  get requiredLookbackBars(): number {
+    adapterCounts.requiredLookbackBars =
+      (adapterCounts.requiredLookbackBars ?? 0) + 1;
+
+    return adapterCounts.requiredLookbackBars === 1 ? 1 : 25;
+  },
+  get decide(): SignalProvider {
+    adapterCounts.decide = (adapterCounts.decide ?? 0) + 1;
+    decideFlip = !decideFlip;
+
+    return decideFlip ? firstDecide : secondDecide;
+  }
+} as unknown as SignalAdapter;
+
+// Сегментное окно: warmupStartIndex виден в метаданных только при
+// segment !== null, а значит проверка «warmup по ПЕРВОМУ чтению
+// requiredLookbackBars» становится наблюдаемой (rlb=1 → warmup 0 баров,
+// rlb=25 → warmup 24 бара и warmupStartIndex уехал бы в 0).
+const hostileAdapterRun = run(BARS_60, hostileAdapter, ZERO, {
+  name: "VALIDATION",
+  startIndex: 20,
+  endIndexExclusive: 40
+});
+const hostileAdapterResult = resultOf(hostileAdapterRun);
+const hostileAdapterTrade = tradeOf(hostileAdapterRun);
+
+ok(
+  hostileAdapterRun.ok === true,
+  `TOCTOU адаптер: прогон успешен (${
+    hostileAdapterRun.ok ? "ok" : hostileAdapterRun.errors.join("; ")
+  })`
+);
+ok(
+  hostileAdapterResult !== null &&
+    hostileAdapterResult.metadata.adapterId === "hostile-adapter" &&
+    hostileAdapterResult.metadata.adapterVersion === "1.0.0",
+  "TOCTOU адаптер: в метаданных ПЕРВЫЕ прочитанные идентичность и версия"
+);
+ok(
+  hostileAdapterResult !== null &&
+    hostileAdapterResult.metadata.requiredLookbackBars === 1 &&
+    hostileAdapterResult.metadata.warmupStartIndex === 20,
+  `TOCTOU адаптер: warmup посчитан по ПЕРВОМУ requiredLookbackBars=1, а не по 25 (warmupStartIndex=${String(
+    hostileAdapterResult === null ? "-" : hostileAdapterResult.metadata.warmupStartIndex
+  )})`
+);
+ok(
+  hostileAdapterTrade !== undefined &&
+    hostileAdapterTrade.label === "первый decide",
+  `TOCTOU адаптер: исполнена ПЕРВАЯ прочитанная decide (${String(
+    hostileAdapterTrade === undefined ? "нет сделки" : hostileAdapterTrade.label
+  )})`
+);
+ok(
+  ["adapterId", "version", "requiredLookbackBars", "decide"].every(
+    (key) => adapterCounts[key] === 1
+  ),
+  `TOCTOU адаптер: каждое поле прочитано один раз (${JSON.stringify(adapterCounts)})`
+);
+
+/* ---------- 14.11 юнит: captureSignalDecision ---------- */
+
+const notObjects: readonly [string, unknown][] = [
+  ["null", null],
+  ["undefined", undefined],
+  ["число", 42],
+  ["строка", "LONG"],
+  ["массив", []],
+  ["функция", (): number => 1],
+  ["Map", new Map()],
+  ["Date", new Date(0)]
+];
+
+for (const [label, value] of notObjects) {
+  const capture = captureSignalDecision(value);
+
+  ok(
+    capture.ok === false && capture.errors.length > 0,
+    `снимок решения: ${label} — не объект решения → отказ (${
+      capture.ok ? "ok" : capture.errors.join("; ")
+    })`
+  );
+}
+
+const badKindCapture = captureSignalDecision({
+  kind: "BUY",
+  stopLoss: 90,
+  takeProfit: 110,
+  label: "x",
+  facts: []
+});
+
+ok(
+  badKindCapture.ok === false &&
+    badKindCapture.errors.some((error) => error.includes("неизвестный kind")),
+  "снимок решения: неизвестный kind отклонён"
+);
+
+const badLabelCapture = captureSignalDecision({
+  kind: "LONG",
+  stopLoss: 90,
+  takeProfit: 110,
+  label: 7,
+  facts: []
+});
+
+ok(
+  badLabelCapture.ok === false &&
+    badLabelCapture.errors.some((error) => error.includes("label")),
+  "снимок решения: label не-строка отклонён"
+);
+
+const badFactsCapture = captureSignalDecision({
+  kind: "LONG",
+  stopLoss: 90,
+  takeProfit: 110,
+  label: "x",
+  facts: "не массив"
+});
+
+ok(
+  badFactsCapture.ok === false &&
+    badFactsCapture.errors.some((error) => error.includes("массивом строк")),
+  "снимок решения: facts не-массив отклонён"
+);
+
+const badFactItemCapture = captureSignalDecision({
+  kind: "LONG",
+  stopLoss: 90,
+  takeProfit: 110,
+  label: "x",
+  facts: ["ok", 7]
+});
+
+ok(
+  badFactItemCapture.ok === false &&
+    badFactItemCapture.errors.some((error) => error.includes("только строки")),
+  "снимок решения: не-строка внутри facts отклонена"
+);
+
+const goodCapture = captureSignalDecision({
+  kind: "SHORT",
+  stopLoss: 105,
+  takeProfit: 95,
+  label: "setup",
+  facts: ["ob", "fvg"],
+  side: "buy",
+  note: "лишнее поле"
+});
+
+ok(goodCapture.ok === true, "снимок решения: валидное решение принято");
+ok(
+  goodCapture.ok &&
+    goodCapture.decision.kind === "SHORT" &&
+    goodCapture.decision.stopLoss === 105 &&
+    goodCapture.decision.takeProfit === 95 &&
+    goodCapture.decision.label === "setup" &&
+    goodCapture.decision.facts.join("|") === "ob|fvg",
+  "снимок решения: значения скопированы точно"
+);
+ok(
+  goodCapture.ok &&
+    goodCapture.decision.extraKeys.join("|") === "side|note",
+  "снимок решения: неиспользуемые собственные поля перечислены в extraKeys"
+);
+ok(
+  goodCapture.ok &&
+    Object.isFrozen(goodCapture.decision) &&
+    Object.isFrozen(goodCapture.decision.facts),
+  "снимок решения: снимок и facts заморожены"
+);
+
+const snapshotMutation = goodCapture.ok
+  ? attempt(() => {
+      (goodCapture.decision as unknown as { label: string }).label = "подмена";
+    })
+  : { threw: false, message: "" };
+
+ok(
+  goodCapture.ok && Object.isFrozen(goodCapture.decision),
+  "снимок решения: снимок заморожен"
+);
+ok(
+  goodCapture.ok &&
+    (snapshotMutation.threw || goodCapture.decision.label === "setup"),
+  "снимок решения: попытка мутировать снимок не меняет значение (frozen; в strict mode — TypeError)"
+);
+
+const defaultsCapture = captureSignalDecision({ kind: "NEUTRAL" });
+
+ok(
+  defaultsCapture.ok &&
+    defaultsCapture.decision.label === "" &&
+    defaultsCapture.decision.facts.length === 0,
+  "снимок решения: label/facts по умолчанию — пустая строка и пустой замороженный массив"
+);
+
+/* ---------- 14.12 юнит: describeValue не вызывает чужой toString ---------- */
+
+ok(describeValue(null) === "null", "describeValue: null");
+ok(describeValue(undefined) === "undefined", "describeValue: undefined");
+ok(describeValue(42) === "число 42", "describeValue: число");
+ok(describeValue(true) === "булево true", "describeValue: boolean");
+ok(describeValue("abc") === 'строка "abc"', "describeValue: строка");
+ok(describeValue(new Map()) === "[object Map]", "describeValue: Map");
+ok(describeValue(new Set()) === "[object Set]", "describeValue: Set");
+ok(describeValue(new Date(0)) === "[object Date]", "describeValue: Date");
+ok(describeValue([]) === "[object Array]", "describeValue: массив");
+ok(describeValue((): number => 1) === "функция", "describeValue: функция");
+
+const hostileToString = attempt(() =>
+  describeValue({
+    toString(): string {
+      throw new Error("hostile toString");
+    }
+  })
+);
+
+ok(
+  !hostileToString.threw,
+  "describeValue: чужой toString не вызывается (hostile-значение не роняет отказ)"
+);
+
+/* ================================================================== */
+/* 15. NEW-2 (MEDIUM): контейнер `signals` — строгая классификация      */
+/* ================================================================== */
+
+section("15. NEW-2: недопустимый контейнер signals больше не fail-open");
+
+const validListDecision = entryDecision("LONG", 90, 110, "список", ["список"]);
+
+const badContainers: readonly {
+  readonly label: string;
+  readonly value: unknown;
+  readonly stage: "signals" | "adapter";
+}[] = [
+  { label: "пустой объект {}", value: {}, stage: "signals" },
+  { label: "число 42", value: 42, stage: "signals" },
+  { label: "true", value: true, stage: "signals" },
+  { label: "false", value: false, stage: "signals" },
+  { label: "строка", value: "LONG", stage: "signals" },
+  { label: "new Map()", value: new Map(), stage: "signals" },
+  { label: "new Set()", value: new Set(), stage: "signals" },
+  { label: "new Date(0)", value: new Date(0), stage: "signals" },
+  { label: "null", value: null, stage: "signals" },
+  { label: "undefined", value: undefined, stage: "signals" },
+  {
+    label: "Map с решениями",
+    value: new Map<number, SignalDecision>([[10, validListDecision]]),
+    stage: "signals"
+  },
+  {
+    label: "array-like {0: decision, length: 1}",
+    value: { 0: validListDecision, length: 1 },
+    stage: "signals"
+  },
+  {
+    label: "объект с length без числовых ключей",
+    value: { length: 3 },
+    stage: "signals"
+  },
+  {
+    label: "класс-экземпляр без decide",
+    value: new (class Strategy {
+      decideLater(): number {
+        return 1;
+      }
+    })(),
+    stage: "signals"
+  },
+  {
+    label: "адаптер БЕЗ decide",
+    value: { adapterId: "a", version: "1.0.0", requiredLookbackBars: 1 },
+    stage: "adapter"
+  },
+  {
+    label: "адаптер с опечаткой Decide",
+    value: {
+      adapterId: "a",
+      version: "1.0.0",
+      requiredLookbackBars: 1,
+      Decide: (): null => null
+    },
+    stage: "adapter"
+  },
+  {
+    label: "адаптер с decide не-функция",
+    value: {
+      adapterId: "a",
+      version: "1.0.0",
+      requiredLookbackBars: 1,
+      decide: 42
+    },
+    stage: "adapter"
+  },
+  {
+    label: "адаптер с мусорным requiredLookbackBars",
+    value: {
+      adapterId: "a",
+      version: "1.0.0",
+      requiredLookbackBars: 0,
+      decide: (): null => null
+    },
+    stage: "adapter"
+  },
+  {
+    label: "адаптер без идентичности",
+    value: {
+      adapterId: "",
+      version: "1.0.0",
+      requiredLookbackBars: 1,
+      decide: (): null => null
+    },
+    stage: "adapter"
+  }
+];
+
+for (const item of badContainers) {
+  const outcome = run(BARS_60, item.value as SignalSource, ZERO);
+  const classified = classifySignalSource(item.value);
+
+  ok(
+    outcome.ok === false,
+    `контейнер ${item.label}: НЕ ok:true с нулём сделок (структурированный отказ)`
+  );
+  ok(
+    outcome.ok === false && outcome.stage === item.stage,
+    `контейнер ${item.label}: stage="${item.stage}" (получено ${
+      outcome.ok ? "ok:true" : outcome.stage
+    })`
+  );
+  ok(
+    outcome.ok === false && outcome.errors.length > 0,
+    `контейнер ${item.label}: ошибки непустые`
+  );
+  ok(
+    classified.ok === false && classified.stage === item.stage,
+    `контейнер ${item.label}: classifySignalSource согласован с движком`
+  );
+}
+
+const arrayLikeRun = run(
+  BARS_60,
+  { 0: validListDecision, length: 1 } as unknown as SignalSource,
+  ZERO
+);
+
+ok(
+  arrayLikeRun.ok === false &&
+    arrayLikeRun.errors.some((error) => error.includes("ПОХОЖИЙ на массив")),
+  "контейнер array-like: в отказе явно сказано, что объект, похожий на массив, массивом не считается"
+);
+
+const mapRun = run(BARS_60, new Map() as unknown as SignalSource, ZERO);
+
+ok(
+  mapRun.ok === false &&
+    mapRun.errors.some((error) => error.includes("Map/Set")),
+  "контейнер Map: в отказе есть подсказка про Map/Set"
+);
+
+const typoRun = run(
+  BARS_60,
+  {
+    adapterId: "a",
+    version: "1.0.0",
+    requiredLookbackBars: 1,
+    Decide: (): null => null
+  } as unknown as SignalSource,
+  ZERO
+);
+
+ok(
+  typoRun.ok === false &&
+    typoRun.stage === "adapter" &&
+    typoRun.errors.some((error) => error.includes("Decide")) &&
+    typoRun.errors.some((error) => error.includes("decide")),
+  "контейнер Decide (опечатка): отказ stage=adapter с указанием на регистр ключа"
+);
+
+/* ---------- допустимые формы по-прежнему работают ---------- */
+
+const emptyListRun = run(BARS_60, [], ZERO);
+const emptyListResult = resultOf(emptyListRun);
+
+ok(
+  emptyListRun.ok === true &&
+    emptyListResult !== null &&
+    emptyListResult.trades.length === 0 &&
+    emptyListResult.metadata.signalSourceKind === "list",
+  "валидный контейнер: пустой Array → ok:true, 0 сделок, kind=list"
+);
+
+const functionRun = run(BARS_60, (): null => null, ZERO);
+const functionResult = resultOf(functionRun);
+
+ok(
+  functionRun.ok === true &&
+    functionResult !== null &&
+    functionResult.metadata.signalSourceKind === "provider",
+  "валидный контейнер: функция-провайдер → ok:true, kind=provider"
+);
+
+const listRun = run(BARS_60, onlyAt(10, validListDecision), ZERO);
+
+ok(
+  listRun.ok === true && resultOf(listRun)?.trades.length === 1,
+  "валидный контейнер: Array с решением → сделка есть"
+);
+
+const goodAdapter: SignalAdapter = {
+  adapterId: "good-adapter",
+  version: "2.0.0",
+  requiredLookbackBars: 1,
+  decide: (): null => null
+};
+const adapterRun = run(BARS_60, goodAdapter, ZERO);
+const adapterResult = resultOf(adapterRun);
+
+ok(
+  adapterRun.ok === true &&
+    adapterResult !== null &&
+    adapterResult.metadata.signalSourceKind === "adapter" &&
+    adapterResult.metadata.adapterId === "good-adapter",
+  "валидный контейнер: SignalAdapter → ok:true, kind=adapter"
+);
+ok(
+  isSignalAdapter(goodAdapter),
+  "валидный контейнер: isSignalAdapter по-прежнему распознаёт адаптер"
+);
+ok(
+  validateSignalAdapter(goodAdapter).length === 0,
+  "валидный контейнер: validateSignalAdapter не сообщает ошибок"
+);
+
+/* ---------- сегментный прогон и диагностика: то же правило ---------- */
+
+const segmentedBad = runSegmentedBacktest({
+  bars: BARS_60,
+  signals: {} as SignalSource,
+  config: ZERO
+});
+
+ok(
+  segmentedBad.ok === false && segmentedBad.stage === "signals",
+  `сегментный прогон: {} → stage="signals" (получено ${
+    segmentedBad.ok ? "ok:true" : segmentedBad.stage
+  })`
+);
+
+const segmentedTypo = runSegmentedBacktest({
+  bars: BARS_60,
+  signals: {
+    adapterId: "a",
+    version: "1.0.0",
+    requiredLookbackBars: 1,
+    Decide: (): null => null
+  } as unknown as SignalSource,
+  config: ZERO
+});
+
+ok(
+  segmentedTypo.ok === false && segmentedTypo.stage === "adapter",
+  `сегментный прогон: опечатка Decide → stage="adapter" (получено ${
+    segmentedTypo.ok ? "ok:true" : segmentedTypo.stage
+  })`
+);
+
+const segmentedArrayLike = runSegmentedBacktest({
+  bars: BARS_60,
+  signals: { 0: validListDecision, length: 1 } as unknown as SignalSource,
+  config: ZERO
+});
+
+ok(
+  segmentedArrayLike.ok === false && segmentedArrayLike.stage === "signals",
+  "сегментный прогон: array-like → stage=\"signals\" (не три сегмента с нулём сделок)"
+);
+
+const segmentedGood = runSegmentedBacktest({
+  bars: BARS_60,
+  signals: [],
+  config: ZERO
+});
+
+ok(
+  segmentedGood.ok === true,
+  `сегментный прогон: валидный пустой Array → ok (${
+    segmentedGood.ok ? "ok" : segmentedGood.errors.join("; ")
+  })`
+);
+
+const probeBad = probeProvider({
+  bars: BARS_60,
+  provider: {} as SignalSource,
+  config: ZERO
+});
+
+ok(
+  probeBad.ok === false &&
+    probeBad.outcome.ok === false &&
+    probeBad.outcome.stage === "signals" &&
+    probeBad.errors.some((error) => error.includes("недопустимый контейнер")),
+  "диагностика probeProvider: недопустимый контейнер → ok:false и stage=signals"
+);
+
+const probeGood = probeProvider({
+  bars: BARS_60,
+  provider: honestProvider,
+  config: ZERO
+});
+
+ok(probeGood.ok, `диагностика probeProvider: валидный провайдер по-прежнему зелёный (${probeGood.errors.join("; ")})`);
+
+/* ---------- юнит: снимок адаптера ---------- */
+
+const adapterSnapshotCounts: Record<string, number> = {};
+const snapshotSource = {
+  get adapterId(): string {
+    adapterSnapshotCounts.adapterId = (adapterSnapshotCounts.adapterId ?? 0) + 1;
+
+    return adapterSnapshotCounts.adapterId === 1 ? "snapshot" : "подмена";
+  },
+  version: "3.0.0",
+  requiredLookbackBars: 2,
+  decide: (): null => null
+};
+
+const adapterSnapshot = captureSignalAdapter(snapshotSource);
+
+ok(adapterSnapshot.ok === true, "снимок адаптера: валидный адаптер принят");
+ok(
+  adapterSnapshot.ok &&
+    adapterSnapshot.adapter.adapterId === "snapshot" &&
+    adapterSnapshotCounts.adapterId === 1,
+  "снимок адаптера: adapterId прочитан один раз и сохранён первым значением"
+);
+ok(
+  adapterSnapshot.ok && Object.isFrozen(adapterSnapshot.adapter),
+  "снимок адаптера: снимок заморожен"
+);
+ok(
+  validateSignalAdapter(snapshotSource as unknown as SignalAdapter).length === 0,
+  "снимок адаптера: validateSignalAdapter совместим со снимком"
+);
+ok(
+  captureSignalAdapter({ adapterId: "a" }).ok === false,
+  "снимок адаптера: неполный адаптер отклонён"
+);
+
+/* ================================================================== */
+/* 16. Дешёвый hardening: циклы в deepFreeze и в скане конечности       */
+/* ================================================================== */
+
+section("16. deepFreeze/скан конечности: циклы и снятый срез глубины");
+
+const cyclic: Record<string, unknown> = { value: 1 };
+
+cyclic.self = cyclic;
+
+const cyclicFreeze = attempt(() => {
+  deepFreeze(cyclic);
+});
+
+ok(!cyclicFreeze.threw, `deepFreeze: самоцикл не роняет (${cyclicFreeze.message})`);
+ok(Object.isFrozen(cyclic), "deepFreeze: самоцикл заморожен");
+
+const nodeA: Record<string, unknown> = { name: "a" };
+const nodeB: Record<string, unknown> = { name: "b", a: nodeA };
+
+nodeA.b = nodeB;
+
+const mutualFreeze = attempt(() => {
+  deepFreeze(nodeA);
+});
+
+ok(
+  !mutualFreeze.threw && Object.isFrozen(nodeA) && Object.isFrozen(nodeB),
+  "deepFreeze: взаимный цикл a↔b заморожен без RangeError"
+);
+
+const cyclicArray: unknown[] = [1];
+
+cyclicArray.push(cyclicArray);
+
+const cyclicArrayFreeze = attempt(() => {
+  deepFreeze(cyclicArray);
+});
+
+ok(
+  !cyclicArrayFreeze.threw && Object.isFrozen(cyclicArray),
+  "deepFreeze: циклический массив заморожен"
+);
+
+/* ---------- скан конечности: глубина больше не срезается ---------- */
+
+let deepNode: Record<string, unknown> = { leaf: Number.NaN };
+
+for (let level = 0; level < 14; level += 1) {
+  deepNode = { [`level${String(level)}`]: deepNode };
+}
+
+const deepFound = findNonFiniteNumbers(deepNode, "deep");
+
+ok(
+  deepFound.length === 1 && deepFound[0].startsWith("deep.level13"),
+  `скан конечности: NaN на глубине 15 найден (прежний срез depth>8 его пропускал): ${deepFound.join("; ")}`
+);
+ok(
+  deepFound[0].endsWith(".leaf = NaN"),
+  "скан конечности: путь до значения сохранён целиком"
+);
+
+/* ---------- скан конечности: циклическая структура ---------- */
+
+const cyclicNumbers: Record<string, unknown> = { a: 1 };
+
+cyclicNumbers.self = cyclicNumbers;
+cyclicNumbers.bad = Number.POSITIVE_INFINITY;
+
+const cyclicFound = findNonFiniteNumbers(cyclicNumbers, "res");
+
+ok(
+  cyclicFound.length === 1 && cyclicFound[0] === "res.bad = Infinity",
+  `скан конечности: цикл не зацикливает обход и не маскирует Infinity (${cyclicFound.join("; ")})`
+);
+
+/* ---------- скан конечности: limit ограничивает СООБЩЕНИЯ ---------- */
+
+const manyNaN: Record<string, number> = {};
+
+for (let index = 0; index < 25; index += 1) {
+  manyNaN[`n${String(index)}`] = Number.NaN;
+}
+
+ok(
+  findNonFiniteNumbers(manyNaN, "r", 20).length === 20,
+  "скан конечности: limit=20 ограничивает число сообщений"
+);
+ok(
+  findNonFiniteNumbers(manyNaN, "r", 100).length === 25,
+  "скан конечности: limit=100 находит все 25 значений"
+);
+ok(
+  findNonFiniteNumbers({ a: 1, b: "x", c: null }, "r").length === 0,
+  "скан конечности: конечная структура — ноль находок"
 );
 
 /* ---------- итог ---------- */

@@ -51,11 +51,10 @@ import {
   type SignalProvider,
   type SignalSource,
   type SplitName,
-  isSignalAdapter,
-  signalProviderFromList
+  isFiniteNumber
 } from "./contract";
 import { runBacktest } from "./engine";
-import { validateSignalAdapter } from "./validate";
+import { captureSignalAdapter, classifySignalSource } from "./validate";
 
 /* ------------------------------------------------------------------ */
 /* Гарантия A: структурная проба                                        */
@@ -123,15 +122,34 @@ function decisionOf(
     return { kind: "NO_SIGNAL", stopLoss: null, takeProfit: null };
   }
 
-  if (decision.kind === "LONG" || decision.kind === "SHORT") {
+  /**
+   * Пункт 23 политики распространяется и на диагностику: каждое поле
+   * читается РОВНО ОДИН РАЗ, поэтому записанное решение не может
+   * разойтись само с собой из-за геттера или Proxy, а сравнение двух
+   * прогонов (детерминизм, lookback, инвариантность) остаётся честным.
+   */
+  const record = decision as {
+    kind?: unknown;
+    stopLoss?: unknown;
+    takeProfit?: unknown;
+  };
+  const kind: unknown = record.kind;
+  const stopLoss: unknown = record.stopLoss;
+  const takeProfit: unknown = record.takeProfit;
+
+  if (kind === "LONG" || kind === "SHORT") {
     return {
-      kind: decision.kind,
-      stopLoss: decision.stopLoss,
-      takeProfit: decision.takeProfit
+      kind,
+      stopLoss: isFiniteNumber(stopLoss) ? stopLoss : null,
+      takeProfit: isFiniteNumber(takeProfit) ? takeProfit : null
     };
   }
 
-  return { kind: decision.kind, stopLoss: null, takeProfit: null };
+  return {
+    kind: kind as RecordedDecision["kind"],
+    stopLoss: null,
+    takeProfit: null
+  };
 }
 
 function sameBar(a: BacktestBar, b: BacktestBar): boolean {
@@ -162,18 +180,24 @@ export function probeProvider(args: {
   readonly config?: BacktestInput["config"];
   readonly segment?: BacktestInput["segment"];
 }): LookaheadProbe {
-  const probedAdapter: SignalAdapter | null = isSignalAdapter(args.provider)
-    ? args.provider
-    : null;
-  const innerProvider: SignalProvider = isSignalAdapter(args.provider)
-    ? args.provider.decide
-    : typeof args.provider === "function"
-      ? args.provider
-      : signalProviderFromList(args.provider);
+  /**
+   * Пункт 24 политики: проба классифицирует контейнер СТРОГО и работает
+   * со снимком адаптера. Недопустимый источник передаётся движку КАК
+   * ЕСТЬ, чтобы отказ остался структурированным (stage `"signals"` или
+   * `"adapter"`), а проба повторила те же ошибки и была ok = false.
+   */
+  const sourceCheck = classifySignalSource(args.provider);
+  const probedAdapter: SignalAdapter | null =
+    sourceCheck.ok && sourceCheck.kind === "adapter"
+      ? sourceCheck.adapter
+      : null;
+  const innerProvider: SignalProvider = sourceCheck.ok
+    ? sourceCheck.provider
+    : () => null;
   const decisions: RecordedDecision[] = [];
   const guardFailures: { index: number; requested: number }[] = [];
   const windowFailures: { index: number; requested: number }[] = [];
-  const errors: string[] = [];
+  const errors: string[] = sourceCheck.ok ? [] : [...sourceCheck.errors];
 
   const wrapper: SignalProvider = (context) => {
     // (б) видимость: visibleBars = index − firstVisibleIndex + 1, то
@@ -276,8 +300,9 @@ export function probeProvider(args: {
 
   const outcome = runBacktest({
     bars: args.bars,
-    signals:
-      probedAdapter === null
+    signals: !sourceCheck.ok
+      ? args.provider
+      : probedAdapter === null
         ? wrapper
         : {
             adapterId: probedAdapter.adapterId,
@@ -821,16 +846,24 @@ export function certifySignalAdapter(args: {
   const errors: string[] = [];
   const barsCount = Array.isArray(args.bars) ? args.bars.length : 0;
 
-  const adapterErrors = validateSignalAdapter(args.adapter);
+  /**
+   * Снимок адаптера (пункт 23 политики): поля читаются по одному разу,
+   * и вся сертификация работает ТОЛЬКО со снимком. Геттер не может
+   * пройти проверку одной функцией `decide`, а прогонам отдать другую,
+   * и `requiredLookbackBars` не может измениться между прогонами.
+   */
+  const adapterCheck = captureSignalAdapter(args.adapter);
 
-  if (adapterErrors.length > 0) {
+  if (!adapterCheck.ok) {
     return certification({
       ok: false,
-      errors: adapterErrors,
+      errors: adapterCheck.errors,
       adapter: null,
       window: { startIndex: 0, endIndexExclusive: barsCount }
     });
   }
+
+  const adapter: SignalAdapter = adapterCheck.adapter;
 
   const startIndex = args.startIndex ?? 0;
   const endIndexExclusive = args.endIndexExclusive ?? barsCount;
@@ -865,7 +898,7 @@ export function certifySignalAdapter(args: {
     return certification({
       ok: false,
       errors,
-      adapter: args.adapter,
+      adapter: adapter,
       window: { startIndex, endIndexExclusive }
     });
   }
@@ -876,10 +909,10 @@ export function certifySignalAdapter(args: {
     endIndexExclusive
   };
 
-  const requiredLookbackBars = args.adapter.requiredLookbackBars;
+  const requiredLookbackBars = adapter.requiredLookbackBars;
   // Диагностика принимает SignalSource: адаптер передаётся ЦЕЛИКОМ,
   // чтобы разгон соответствовал его заявлению.
-  const adapterProvider: SignalSource = args.adapter;
+  const adapterProvider: SignalSource = adapter;
   const declaredWarmupBars = Math.max(0, requiredLookbackBars - 1);
   const extraWarmupBars = declaredWarmupBars + extra;
 
@@ -892,14 +925,14 @@ export function certifySignalAdapter(args: {
 
   const structuralProbe = probeProvider({
     bars: args.bars,
-    provider: args.adapter,
+    provider: adapter,
     config: withWarmup(declaredWarmupBars),
     segment
   });
 
   const repeatProbe = probeProvider({
     bars: args.bars,
-    provider: args.adapter,
+    provider: adapter,
     config: withWarmup(declaredWarmupBars),
     segment
   });
@@ -923,7 +956,7 @@ export function certifySignalAdapter(args: {
 
   const extraProbe = probeProvider({
     bars: args.bars,
-    provider: args.adapter,
+    provider: adapter,
     config: withWarmup(extraWarmupBars),
     segment
   });
@@ -1010,7 +1043,7 @@ export function certifySignalAdapter(args: {
     ok: errors.length === 0,
     errors,
     limitations,
-    adapter: args.adapter,
+    adapter: adapter,
     window: { startIndex, endIndexExclusive },
     structuralProbe,
     determinism,
