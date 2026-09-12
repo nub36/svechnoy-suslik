@@ -2233,6 +2233,129 @@ UX-FIX P1-C (12.09.2026): PROGRESSIVE DISCLOSURE — UI-only, semantics
   (@prisma/client), идентично baseline.
 
 
+## §31k. Chart UX fix базового графика — легенда/ценовая шкала, навигация, ручная история (12.09.2026)
+
+UI-only фикс собственного SuslikChart поверх принятого P1-C UX (§31j).
+Semantics данных не менялись: OHLC/индикаторы считает тот же серверный
+слой `lib/indicators`, история грузится тем же `GET /api/chart/candles`
+(cursor `before`), SMC DTO/API/runtime не тронуты.
+
+**1. ЛЕГЕНДА НЕ ПЕРЕКРЫВАЕТ ПРАВУЮ ЦЕНОВУЮ ШКАЛУ**
+- Было: `.chartLegend` с `max-width: calc(100% - 16px)` считал ширину от
+  контейнера графика, ВКЛЮЧАЯ колонку правой ценовой шкалы, поэтому
+  строка «дата/O/H/L/C/объём/EMA/RSI/MACD» уезжала под ценовые подписи.
+- Стало: место резервируется по ФАКТИЧЕСКИМ измерениям
+  lightweight-charts 5.2.1, без hardcoded координат —
+  `timeScale().width()` (ширина plot-области БЕЗ колонок ценовых шкал —
+  layout-конвенция библиотеки), `priceScale("right").width()` (ширина
+  самой шкалы) и `legend.offsetLeft` (фактический левый отступ из CSS,
+  включая media-правила). Арифметика — чистая функция `legendSpace()`
+  в новом `lib/chart/chart-ux.ts` (детерминированно тестируется).
+- Результат пишется CSS-переменными на обёртку графика:
+  `--chart-legend-max-w` → `max-width` легенды (fallback — прежний
+  `calc(100% - 16px)`, поэтому до первого измерения легенда не выходит
+  за контейнер) и `--chart-price-scale-w` → кнопка «Сбросить масштаб»
+  сдвигается на ширину шкалы и не закрывает нижние ценовые подписи.
+- При нехватке горизонтального места легенда корректно переносится
+  (`flex-wrap: wrap` + `overflow-wrap: anywhere`), остаётся внутри
+  plot-области (`position: absolute` относительно `.chartWrap`) и не
+  перехватывает ввод (`pointer-events: none` — crosshair-обновления и
+  drag/zoom не ломаются). Пересчёт — штатной подпиской
+  `timeScale().subscribeSizeChange()`, при обновлении легенды и после
+  применения данных/истории; responsive-правила 430px/360px сохранены.
+
+**2. НАВИГАЦИЯ И МАСШТАБ — ШТАТНЫЕ OPTIONS БИБЛИОТЕКИ**
+Собственная «физика» drag/zoom поверх lightweight-charts НЕ писалась
+(в `CandleChart.tsx` нет `addEventListener`/wheel/pointer-обработчиков —
+проверяется тестом). Значения зафиксированы явно в
+`lib/chart/chart-ux.ts` и передаются в `createChart`:
+- `SUSLIK_HANDLE_SCROLL`: `pressedMouseMove` (click+drag внутри plot →
+  горизонтальное перемещение истории), `mouseWheel` (deltaX колеса/
+  тачпада → листание истории), `horzTouchDrag` (touch-драг),
+  `vertTouchDrag: false` — вертикальный touch-свайп отдаётся странице
+  `/coin/[symbol]`, иначе график «ловит» палец.
+- `SUSLIK_HANDLE_SCALE`: `mouseWheel` (deltaY → zoom временной шкалы в
+  точке курсора), `pinch` (touch-щипок), `axisPressedMouseMove:
+  { time: true, price: true }` — драг по оси времени растягивает/сжимает
+  временную шкалу, драг по правой ценовой шкале ШТАТНО меняет
+  вертикальный масштаб, `axisDoubleClickReset: { time: true, price: true }`
+  — двойной клик по оси возвращает auto-scale.
+- `SUSLIK_KINETIC_SCROLL`: `{ mouse: false, touch: true }` — инерция на
+  touch штатная, мышью drag точный.
+- `SUSLIK_RIGHT_PRICE_SCALE`: `visible/autoScale/alignLabels/
+  borderVisible` + `ensureEdgeTickMarksVisible: true` (крайние ценовые
+  метки не обрезаются); `mode` и `minimumWidth` не переопределяются —
+  ширина берётся измерением, а не хардкодом.
+- `SUSLIK_TIME_SCALE_NAVIGATION`: `fixLeftEdge/fixRightEdge: false`
+  (иначе подгрузка истории влево и возврат к последним барам
+  блокировались бы штатным механизмом), `rightBarStaysOnScroll: false`.
+- Сброс масштаба (кнопка «Сбросить масштаб» и двойной клик по графику):
+  `timeScale().resetTimeScale()` + `setAutoScale(true)` на правой шкале
+  КАЖДОЙ панели (`chart.panes()` — свечи/объём, RSI, MACD; панели не
+  сломаны) + `timeScale().scrollToRealTime()`.
+
+**3. РУЧНАЯ ИСТОРИЯ: VIEWPORT НЕ СБРАСЫВАЕТСЯ**
+- До `setData` запоминается `getVisibleLogicalRange()`; после
+  `mergeOlder` диапазон сдвигается на число добавленных свечей чистой
+  функцией `shiftLogicalRange(range, added)` и восстанавливается
+  `setVisibleLogicalRange()`. При `null` (диапазон неизвестен либо
+  добавлено 0 свечей) viewport не трогается ВООБЩЕ.
+- `fitContent()` остаётся только в `applyData` — свежая загрузка окна
+  (первый рендер, смена актива/биржи/таймфрейма, «Повторить»);
+  `scrollToRealTime()` — только явный сброс масштаба. В `loadOlder` ни
+  то, ни другое не вызывается (гарантируется тестом), поэтому подгрузка
+  старых свечей не возвращает пользователя к последним барам.
+- Попутно устранена причина неожиданного сброса вида: переключение
+  индикаторов (Volume/EMA/SMA/RSI/MACD) больше НЕ пересоздаёт график и
+  НЕ перезапрашивает свечи — `applyVisibility` передаётся потребителям
+  через стабильный ref, видимость применяется отдельным эффектом к
+  живым сериям (поведение индикаторов не изменилось).
+
+**4. TradingView / P1-TV**: в этом фиксе НЕ реализовывался — ни widget,
+ни script, ни зависимости; новое решение пользователя
+`[ Суслик | TradingView ]` внутри блока графика (два switch control →
+один mode state) зафиксировано в §2 roadmap как SUPERSEDED прежнее
+«отменено» и как будущий этап **P1-TV** (перед/вместе с P1-D).
+
+**ГРАНИЦЫ**: не менялись `lib/chart/smc-contract.ts`,
+`smc-projection.ts`, `smc-api-service.ts`, `app/api/chart/smc/route.ts`,
+`lib/smc/*`, `lib/strategies/*`, `prisma/*`, `package.json`,
+`package-lock.json`; `components/chart/SmartMoneyPanel.tsx` не менялся
+вовсе (принятый P1-C compact UX, collapsed «Почему»/«Технические
+детали», commit-гейт, cannot-evaluate ≠ NEUTRAL, 1d Option A — на
+месте). БД не мутировалась, worker'ы не запускались, новых зависимостей
+нет.
+
+**TESTS**: новый `scripts/test-chart-ux.ts` — 179 проверок, 0 провалов:
+точные значения и ключевой набор interaction options (drag/scroll/wheel/
+pinch/оси/двойной клик/auto-scale), геометрия `legendSpace` (desktop,
+narrow, tiny, fallback до измерения, мусорные входы, кастомный зазор,
+инвариант «легенда внутри plot-области, резерв ≥ ширины шкалы»),
+`shiftLogicalRange` + интеграция с реальным `mergeOlder` (видимыми
+остаются ТЕ ЖЕ свечи, правый край ≠ последний бар), статические гарды
+`CandleChart.tsx` (нет самодельной физики ввода; в `loadOlder` нет
+`fitContent`/`scrollToRealTime`/`setVisibleRange`; видимость 9 серий;
+RSI/MACD в панелях 1/2; сброс масштаба; P1-C Smart Money не тронут; нет
+protected-path/Signal-токенов) и `globals.css` (var()-based max-width,
+flex-wrap, overflow-wrap, pointer-events, резерв кнопки, media 430/360).
+Проверено mutation-тестированием: 10 преднамеренных поломок (убрать
+восстановление viewport; добавить fitContent после merge; выключить
+drag/price-axis/wheel-zoom; сломать резерв легенды; убрать CSS-var;
+убрать subscribeSizeChange; убрать scrollToRealTime; вернуть
+applyVisibility в deps создания графика) — ловятся все 10.
+Регрессия без изменений: test-smc-panel 2872, api-service 111,
+projection 206, chart history 50 / params 37 / sql / url-state 18,
+indicators 74, freshness 52, common horizon 227, eligibility 96,
+lookahead 13, evaluate 31, smart-money 62, phase3c-fix 59, smc core
+(scoring 75, fvg 37, order-blocks 63, liquidity 48, pivots 24, range 50,
+fsm 62, displacement 23, phase3d-config 70), strategy-runtime
+--self-test 56 / --check-validation 32. `npx tsc --noEmit` exit 0,
+`git diff --check` чисто. Dev-smoke: `/coin/BTC` → 200, новые CSS-правила
+отдаются клиенту; `npm run build` в песочнице падает только по
+environment-причине (@prisma/client не сгенерирован, binaries.prisma.sh
+недоступен) — сигнатура идентична baseline.
+
+
 ==================================================
 32. PRODUCT ROADMAP / ДАЛЬНЕЙШЕЕ РАЗВИТИЕ (10.09.2026)
 ==================================================
@@ -2293,9 +2416,22 @@ HEAD: `9085d55936b20d54add3ab6a1534515be2d3480b` (RANGE_POSITION CLOSED/UNDERSTO
   /api/chart/smc с текущими symbol/timeframe + summary/WHY панель из
   принятого DTO; AbortController/requestId race-safety; cannot-evaluate
   ≠ NEUTRAL; агрегат ≠ выбранная биржа; см. §31j
-- P1-D (**next**): визуальные SMC-примитивы поверх свечей (swing/BOS/
+- P1-C-UX (12.09.2026, **implemented**): UI-only fix поверх P1-C —
+  progressive disclosure панели Smart Money (compact default, collapsed
+  «Почему» и «Технические детали», unmount commit-gate; см. §31j) и
+  chart UX базового графика: легенда не перекрывает правую ценовую
+  шкалу, штатная навигация/масштаб lightweight-charts 5.2.1, ручной
+  viewport сохраняется при подгрузке истории (см. §31k)
+- P1-TV (**next**, перед/вместе с дальнейшим P1-D): переключатель
+  режимов `[ Суслик | TradingView ]` ВНУТРИ блока графика (не страницы);
+  два визуальных switch control → ОДИН mode state; «Суслик» —
+  PostgreSQL-свечи/наши индикаторы/Smart Money/P1-D overlays,
+  «TradingView» — отдельная официальная интеграция без имитации UI.
+  На 12.09.2026 НЕ реализован: только зафиксирован (§2 roadmap)
+- P1-D: визуальные SMC-примитивы поверх свечей (swing/BOS/
   CHoCH, liquidity/sweep, FVG/Order Block, dealing range,
-  premium/equilibrium/discount) с использованием factIds из P1-A
+  premium/equilibrium/discount) с использованием factIds из P1-A —
+  планируется после/вместе с P1-TV
 - Собственный график на PostgreSQL-свечах, оверлеи SMC, объяснение `WHY` сигнала
 
 **P2 — Backtest Engine / тестер стратегий**
@@ -2319,11 +2455,33 @@ HEAD: `9085d55936b20d54add3ab6a1534515be2d3480b` (RANGE_POSITION CLOSED/UNDERSTO
 
 ## 2. SuslikChart — изменение требования
 
-**Отменено:** переключатель страниц `[ Суслик ] [ TradingView ]`
+> **SUPERSEDED (12.09.2026, новое решение пользователя).** Прежнее
+> «**Отменено:** переключатель страниц `[ Суслик ] [ TradingView ]`»
+> больше не действует как отказ от переключателя: отменён был только
+> ПЕРЕключатель СТРАНИЦ. Принято новое решение — переключатель режимов
+> ВНУТРИ блока графика, будущий этап **P1-TV** (см. §1 roadmap).
 
-**Сейчас:**
+**Новое решение (зафиксировано документацией; реализация — P1-TV):**
+- В самом блоке графика будет переключатель `[ Суслик | TradingView ]`.
+  Это НЕ переключение всей страницы `/coin/[symbol]` — оба режима
+  сохраняются и относятся только к области графика.
+- Режим **«Суслик»** (текущий): собственные PostgreSQL-свечи
+  (`lib/exchanges`, `Candle`, `IndicatorSnapshot`), наши индикаторы,
+  Smart Money (P1-A…P1-C), будущие P1-D overlays.
+- Режим **«TradingView»**: отдельная ОФИЦИАЛЬНАЯ TradingView
+  integration — не подделка/копия TradingView, не имитация его UI,
+  самодельный график за TradingView не выдаётся.
+- В chart interface предусмотрены ДВА визуальных switch control
+  (например primary + compact рядом с областью графика), но ОБА
+  управляют ОДНИМ И ТЕМ ЖЕ mode state — двух независимых флагов не
+  будет.
+- В chart UX fix от 12.09.2026 (§31k) TradingView НЕ реализовывался:
+  ни widget, ни script, ни новые зависимости не добавлялись — только
+  эта документация и фикс базового графика.
+
+**Сейчас (без изменений):**
 - Развивать **собственный SuslikChart** на PostgreSQL-свечах (`lib/exchanges`, `Candle`, `IndicatorSnapshot`)
-- Не реализовывать TradingView-режим, не имитировать его UI, не выдавать самодельный график за TradingView
+- Не имитировать UI TradingView и не выдавать самодельный график за TradingView
 
 **Текущие оверлеи:**
 - Свечи, Volume, EMA(20/50/200), RSI(14), MACD(12/26/9)

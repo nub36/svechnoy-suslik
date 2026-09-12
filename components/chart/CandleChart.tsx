@@ -40,6 +40,15 @@ import {
   parseChartUrlState
 } from "@/lib/chart/url-state";
 import {
+  SUSLIK_HANDLE_SCALE,
+  SUSLIK_HANDLE_SCROLL,
+  SUSLIK_KINETIC_SCROLL,
+  SUSLIK_RIGHT_PRICE_SCALE,
+  SUSLIK_TIME_SCALE_NAVIGATION,
+  legendSpace,
+  shiftLogicalRange
+} from "@/lib/chart/chart-ux";
+import {
   SMC_NETWORK_ERROR_MESSAGE,
   SmartMoneyPanel,
   buildSmcPanelViewModel,
@@ -75,6 +84,22 @@ import {
  * поэтому exchange в SMC-запрос не передаётся. Отрисовка
  * SMC-примитивов поверх свечей — следующий этап P1-D, здесь
  * её нет.
+ *
+ * CHART UX (fix поверх P1-C):
+ *  - легенда OHLC/индикаторов и кнопка «Сбросить масштаб» не
+ *    перекрывают правую ценовую шкалу: место резервируется по
+ *    ФАКТИЧЕСКИМ измерениям lightweight-charts (timeScale().width(),
+ *    priceScale("right").width(), legend.offsetLeft), арифметика —
+ *    чистая функция legendSpace() в lib/chart/chart-ux.ts;
+ *  - навигация/масштаб — ШТАТНЫЕ options библиотеки 5.2.1
+ *    (handleScroll / handleScale / kineticScroll / rightPriceScale /
+ *    timeScale), явно зафиксированные в том же модуле: колесо → zoom,
+ *    drag внутри plot → движение по истории, драг по осям → масштаб
+ *    осей, двойной клик по оси → auto-scale, touch — драг и pinch;
+ *  - ручной уход назад в историю сохраняется при подгрузке старых
+ *    свечей (shiftLogicalRange), fitContent/scrollToRealTime при
+ *    mergeOlder не вызываются; переключение индикаторов не
+ *    пересоздаёт график и не перезапрашивает свечи.
  */
 
 type SymbolInfo = {
@@ -453,6 +478,17 @@ export default function CandleChart({
   const legendMapsRef =
     useRef<LegendMaps | null>(null);
 
+  /* ---------- резерв места под правую ценовую шкалу ---------- */
+
+  // Обёртка графика: на неё пишутся измеренные CSS-переменные
+  // (--chart-legend-max-w, --chart-price-scale-w), поэтому легенда и
+  // кнопка сброса масштаба не залезают на правую price scale.
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  // Последнее записанное значение ширины легенды — чтобы не дёргать
+  // style на каждом движении курсора (легенда обновляется часто).
+  const legendMaxWidthRef = useRef<number | null>(null);
+  const priceScaleWidthRef = useRef<number | null>(null);
+
   const [historyLoading, setHistoryLoading] =
     useState(false);
   const [historyEnded, setHistoryEnded] =
@@ -664,8 +700,92 @@ export default function CandleChart({
     }
   }, []);
 
+  /* ---------- резерв места под правую ценовую шкалу ---------- */
+
+  /**
+   * Легенда (дата/O/H/L/C/объём/EMA/RSI/MACD) и кнопка сброса масштаба
+   * обязаны оставаться ВНУТРИ plot-области: справа находится ценовая
+   * шкала, и её подписи не должны перекрываться.
+   *
+   * Ширина берётся из ФАКТИЧЕСКИХ измерений lightweight-charts, а не из
+   * hardcoded координат:
+   *  - chart.timeScale().width() — ширина plot-области БЕЗ колонок
+   *    ценовых шкал (layout-конвенция библиотеки);
+   *  - chart.priceScale("right").width() — ширина самой шкалы;
+   *  - legend.offsetLeft — фактический левый отступ легенды из CSS
+   *    (включая media-правила узких экранов).
+   * Арифметика — чистая функция legendSpace() в lib/chart/chart-ux.ts.
+   * Результат пишется CSS-переменными на обёртку графика, поэтому при
+   * недостатке места легенда корректно переносится (flex-wrap) и не
+   * вылезает под ценовую шкалу.
+   */
+  const applyChartMetrics = useCallback(() => {
+    const chart = chartRef.current;
+    const wrap = wrapRef.current;
+
+    if (!chart || !wrap) {
+      return;
+    }
+
+    let plotWidth = 0;
+    let priceScaleWidth = 0;
+
+    try {
+      plotWidth = chart.timeScale().width();
+      priceScaleWidth = chart
+        .priceScale("right")
+        .width();
+    } catch {
+      // Plot-область/шкала ещё не созданы (first paint) — ниже
+      // сработает fallback по ширине контейнера.
+    }
+
+    const legendEl = legendRef.current;
+
+    const space = legendSpace({
+      plotWidth,
+      priceScaleWidth,
+      leftInset: legendEl ? legendEl.offsetLeft : 0,
+      containerWidth: wrap.clientWidth
+    });
+
+    const unchanged =
+      space.maxWidthPx === legendMaxWidthRef.current &&
+      space.priceScaleWidthPx === priceScaleWidthRef.current;
+
+    if (unchanged) {
+      return;
+    }
+
+    legendMaxWidthRef.current = space.maxWidthPx;
+    priceScaleWidthRef.current = space.priceScaleWidthPx;
+
+    if (space.maxWidthPx === null) {
+      // Измерить не удалось — оставляем CSS-fallback.
+      wrap.style.removeProperty("--chart-legend-max-w");
+    } else {
+      wrap.style.setProperty(
+        "--chart-legend-max-w",
+        `${space.maxWidthPx}px`
+      );
+    }
+
+    wrap.style.setProperty(
+      "--chart-price-scale-w",
+      `${space.priceScaleWidthPx}px`
+    );
+  }, []);
+
   /* ---------- наполнение серий данными ---------- */
 
+  /**
+   * «Сбросить масштаб» (кнопка и двойной клик по графику): возврат к
+   * ожидаемому виду ШТАТНЫМИ средствами lightweight-charts 5.2.1 —
+   * timeScale().resetTimeScale() (barSpacing/rightOffset к дефолту),
+   * setAutoScale(true) на правой ценовой шкале каждой панели и
+   * timeScale().scrollToRealTime() (последние закрытые бары).
+   * Собственная «физика» масштаба не реализуется.
+   */
   const resetChartScale = useCallback(() => {
     const chart = chartRef.current;
 
@@ -675,12 +795,22 @@ export default function CandleChart({
 
     chart.timeScale().resetTimeScale();
 
-    chart
-      .priceScale("right")
-      .applyOptions({
-        autoScale: true
-      });
-  }, []);
+    // У панелей RSI и MACD собственные правые ценовые шкалы:
+    // auto-scale возвращается во всех панелях, иначе индикаторы
+    // остались бы в растянутом вручную состоянии.
+    try {
+      for (const pane of chart.panes()) {
+        pane.priceScale("right").setAutoScale(true);
+      }
+    } catch {
+      // Шкалы панелей ещё не готовы; масштаб времени уже сброшен,
+      // auto-scale вернётся при следующей отрисовке.
+    }
+
+    chart.timeScale().scrollToRealTime();
+
+    applyChartMetrics();
+  }, [applyChartMetrics]);
 
   const rebuildLegendMaps = useCallback(
     (data: CandlesResponse) => {
@@ -733,6 +863,11 @@ export default function CandleChart({
     (time: number | null) => {
       const el = legendRef.current;
       const maps = legendMapsRef.current;
+
+      // Резерв места под ценовую шкалу пересчитывается здесь: легенда
+      // обновляется чаще всего остального (движение курсора, данные,
+      // история), а ширина шкалы зависит от разрядности цен.
+      applyChartMetrics();
 
       if (!el) {
         return;
@@ -798,7 +933,7 @@ export default function CandleChart({
         )
       ].join(" ");
     },
-    []
+    [applyChartMetrics]
   );
 
   const applyData = useCallback(
@@ -929,7 +1064,15 @@ export default function CandleChart({
         ) ?? []
       );
 
+      // fitContent — ТОЛЬКО на свежей загрузке окна (первая
+      // отрисовка, смена актива/биржи/таймфрейма, «Повторить»):
+      // это ожидаемый default view. Подгрузка более старой истории
+      // (loadOlder) fitContent/scrollToRealTime НЕ вызывает —
+      // ручной уход назад в историю там сохраняется.
       chartRef.current?.timeScale().fitContent();
+
+      // renderLegendAt заодно пересчитывает резерв места под
+      // ценовую шкалу (applyChartMetrics).
       renderLegendAt(null);
     },
     [rebuildLegendMaps, renderLegendAt]
@@ -964,6 +1107,17 @@ export default function CandleChart({
       visible: showMacd
     });
   }, [showVolume, showEma, showSma, showRsi, showMacd]);
+
+  // Видимость индикаторов применяется к УЖЕ созданным сериям отдельным
+  // эффектом ниже. Потребители (создание графика и загрузка свечей)
+  // держат стабильную ссылку, поэтому переключение EMA/SMA/RSI/MACD/
+  // Volume НЕ пересоздаёт график и НЕ перезапрашивает свечи: ручной
+  // уход назад в историю при этом не сбрасывается на последние бары.
+  const applyVisibilityRef = useRef(applyVisibility);
+
+  useEffect(() => {
+    applyVisibilityRef.current = applyVisibility;
+  }, [applyVisibility]);
 
   /* ---------- создание графика ---------- */
 
@@ -1000,10 +1154,33 @@ export default function CandleChart({
         vertLines: { color: colors.line },
         horzLines: { color: colors.line }
       },
+      /*
+       * Навигация и масштаб — ШТАТНЫЕ interaction options
+       * lightweight-charts 5.2.1 (значения и обоснование каждого
+       * флага — в lib/chart/chart-ux.ts):
+       *  - колесо мыши (deltaY) → zoom временной шкалы в точке
+       *    курсора, горизонтальный свайп/колесо (deltaX) → движение
+       *    по истории;
+       *  - click+drag внутри plot → горизонтальное перемещение
+       *    истории (pressedMouseMove);
+       *  - драг по оси времени → растянуть/сжать временную шкалу,
+       *    драг по правой ценовой шкале → вертикальный масштаб
+       *    (axisPressedMouseMove.time/.price);
+       *  - двойной клик по оси времени/цены → возврат к auto-scale
+       *    (axisDoubleClickReset), как и кнопка «Сбросить масштаб»;
+       *  - touch: горизонтальный драг и pinch работают, вертикальный
+       *    драг отдан странице (vertTouchDrag false).
+       * Собственная «физика» drag/zoom поверх библиотеки не пишется.
+       */
+      handleScroll: SUSLIK_HANDLE_SCROLL,
+      handleScale: SUSLIK_HANDLE_SCALE,
+      kineticScroll: SUSLIK_KINETIC_SCROLL,
       rightPriceScale: {
+        ...SUSLIK_RIGHT_PRICE_SCALE,
         borderColor: colors.line
       },
       timeScale: {
+        ...SUSLIK_TIME_SCALE_NAVIGATION,
         borderColor: colors.line,
         timeVisible: true,
         secondsVisible: false
@@ -1158,7 +1335,7 @@ export default function CandleChart({
       // пропорции панелей не критичны
     }
 
-    applyVisibility();
+    applyVisibilityRef.current();
 
     // Прокрутка влево до начала видимой области —
     // подгружаем более старую историю (cursor по openTime).
@@ -1188,6 +1365,18 @@ export default function CandleChart({
           : null
       );
     });
+
+    // Размер plot-области меняется (resize окна, перестройка панелей
+    // RSI/MACD, смена разрядности цен) — резерв места под легенду и
+    // кнопку сброса пересчитывается ШТАТНОЙ подпиской библиотеки,
+    // а не самодельным ResizeObserver поверх неё.
+    chart
+      .timeScale()
+      .subscribeSizeChange(() => {
+        applyChartMetrics();
+      });
+
+    applyChartMetrics();
 
     // реакция на смену темы
     const observer =
@@ -1221,7 +1410,9 @@ export default function CandleChart({
       macdHistRef.current = null;
       rsiGuideLinesRef.current = [];
     };
-  }, [applyChartTheme, applyVisibility]);
+    // applyVisibility намеренно НЕ в зависимостях: график создаётся
+    // один раз, а видимость серий применяет отдельный эффект.
+  }, [applyChartTheme, renderLegendAt, applyChartMetrics]);
 
   /* ---------- загрузка списков ---------- */
 
@@ -1483,7 +1674,7 @@ export default function CandleChart({
         }
 
         applyData(data);
-        applyVisibility();
+        applyVisibilityRef.current();
         applyChartTheme();
         setStatus("ok");
       } catch (error) {
@@ -1511,7 +1702,6 @@ export default function CandleChart({
       exchange,
       timeframe,
       applyData,
-      applyVisibility,
       applyChartTheme
     ]
   );
@@ -1628,8 +1818,8 @@ export default function CandleChart({
         const chart = chartRef.current;
         const colors = readThemeColors();
 
-        // Сохраняем видимую область: после setData
-        // сдвигаем её на число добавленных свечей.
+        // Сохраняем видимую область: запоминаем логический диапазон
+        // ДО setData (после слияния индексы баров сдвинутся).
         const range =
           chart
             ?.timeScale()
@@ -1714,14 +1904,28 @@ export default function CandleChart({
           )
         );
 
-        if (chart && range) {
+        // РУЧНОЙ VIEWPORT СОХРАНЯЕТСЯ: диапазон сдвигается ровно на
+        // число добавленных свечей (чистая арифметика —
+        // lib/chart/chart-ux.ts, покрыта scripts/test-chart-ux.ts).
+        // fitContent / scrollToRealTime / setVisibleRange здесь
+        // сознательно НЕ вызываются: подгрузка более старой истории не
+        // имеет права неожиданно возвращать пользователя к последним
+        // барам. Если диапазон неизвестен либо добавлено 0 свечей,
+        // shiftLogicalRange вернёт null и viewport не трогается вовсе.
+        const shifted = shiftLogicalRange(
+          range,
+          candlesMerge.added
+        );
+
+        if (chart && shifted !== null) {
           chart
             .timeScale()
-            .setVisibleLogicalRange({
-              from: range.from + candlesMerge.added,
-              to: range.to + candlesMerge.added
-            });
+            .setVisibleLogicalRange(shifted);
         }
+
+        // Порядок цен в окне мог измениться → ширина ценовой шкалы
+        // тоже; резерв места под легенду пересчитывается.
+        applyChartMetrics();
 
         if (!hasMoreRef.current) {
           setHistoryEnded(true);
@@ -1744,7 +1948,14 @@ export default function CandleChart({
         setHistoryLoading(false);
       }
     },
-    [symbol, exchange, timeframe, rebuildLegendMaps, renderLegendAt]
+    [
+      symbol,
+      exchange,
+      timeframe,
+      rebuildLegendMaps,
+      renderLegendAt,
+      applyChartMetrics
+    ]
   );
 
   useEffect(() => {
@@ -2172,6 +2383,7 @@ export default function CandleChart({
         </div>
       ) : (
         <div
+          ref={wrapRef}
           className="chartWrap"
           onDoubleClick={resetChartScale}
         >
@@ -2272,9 +2484,15 @@ export default function CandleChart({
           {selectedMarket
             ? ` · рынок ${selectedMarket.exchangeSymbol} на ${selectedMarket.exchange}`
             : ""}
-          . Масштаб — колесо мыши или щипок,
-          прокрутка влево подгружает более старую
-          историю
+          . Навигация: перетаскивание мышью или
+          горизонтальный свайп — движение по истории,
+          колесо мыши или щипок — масштаб, драг по оси
+          времени или по ценовой шкале — масштаб оси,
+          двойной клик по оси и кнопка «Сбросить
+          масштаб» — возврат к авто-масштабу и последним
+          закрытым барам; прокрутка влево подгружает
+          более старую историю, текущий вид при этом
+          сохраняется
           {historyEnded
             ? " · история загружена полностью"
             : ""}

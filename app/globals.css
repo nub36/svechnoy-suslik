@@ -1366,7 +1366,10 @@ td:nth-child(2) {
 
 .chartResetScale {
   position: absolute;
-  right: 10px;
+  /* Справа находится ценовая шкала: кнопка сдвигается на её
+     фактическую ширину (--chart-price-scale-w пишет CandleChart),
+     чтобы не закрывать нижние ценовые подписи. */
+  right: calc(var(--chart-price-scale-w, 0px) + 10px);
   bottom: 10px;
   z-index: 3;
   cursor: pointer;
@@ -1384,7 +1387,17 @@ td:nth-child(2) {
   top: 8px;
   left: 8px;
   z-index: 2;
-  max-width: calc(100% - 16px);
+  /*
+   * Легенда не должна залезать на правую ценовую шкалу.
+   * --chart-legend-max-w пишет CandleChart по ФАКТИЧЕСКИМ измерениям
+   * lightweight-charts (plot-область = timeScale().width(), ширина
+   * шкалы = priceScale("right").width(), левый отступ = offsetLeft);
+   * арифметика — lib/chart/chart-ux.ts:legendSpace().
+   * Fallback до первого измерения — прежний calc(), поэтому легенда
+   * никогда не выходит за контейнер.
+   */
+  max-width: var(--chart-legend-max-w, calc(100% - 16px));
+  overflow-wrap: anywhere;
   padding: 6px 10px;
   border-radius: 8px;
   background: color-mix(in srgb, var(--panel2) 88%, transparent);
@@ -1434,7 +1447,7 @@ td:nth-child(2) {
   }
 
   .chartResetScale {
-    right: 6px;
+    right: calc(var(--chart-price-scale-w, 0px) + 6px);
     bottom: 6px;
     font-size: 12px;
   }
