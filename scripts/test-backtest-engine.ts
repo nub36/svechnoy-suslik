@@ -1398,7 +1398,25 @@ function stripComments(source: string): string {
     .replace(/\/\/.*$/gm, " ");
 }
 
+const P2A_CORE = new Set([
+  "contract.ts",
+  "engine.ts",
+  "validate.ts",
+  "splits.ts",
+  "metrics.ts",
+  "costs.ts",
+  "serialize.ts",
+  "no-lookahead.ts",
+]);
+
+const P2B_ALLOWED_EXTERNAL = new Set([
+  "node:crypto",
+  "../smc/types",
+  "../strategies/smart-money-eligibility",
+]);
+
 const allSpecifiers: string[] = [];
+const p2aExternal: string[] = [];
 
 for (const name of sourceFiles) {
   const source = stripComments(readFileSync(join(backtestDir, name), "utf8"));
@@ -1415,24 +1433,45 @@ for (const name of sourceFiles) {
 
   allSpecifiers.push(...specifiers);
 
-  ok(
-    // contract.ts импортов не имеет вовсе — это допустимо.
-    specifiers.every(
+  if (P2A_CORE.has(name)) {
+    p2aExternal.push(...specifiers.filter((s) => !s.startsWith("./")));
+    ok(
+      specifiers.every(
         (specifier) =>
           specifier.startsWith("./") ||
           (specifier === "node:crypto" && name === "serialize.ts")
       ),
-    `isolation: ${name} импортирует только слой backtest (${specifiers.join(", ")})`
-  );
+      `isolation: ${name} импортирует только слой backtest (${specifiers.join(", ")})`
+    );
+  } else {
+    // P2-B files: allowed to import from ../smc/types and ../strategies/smart-money-eligibility
+    // plus ./ and node:crypto, but still no Prisma
+    ok(
+      specifiers.every(
+        (specifier) =>
+          specifier.startsWith("./") ||
+          specifier.startsWith("../smc/") ||
+          specifier.startsWith("../strategies/") ||
+          P2B_ALLOWED_EXTERNAL.has(specifier)
+      ),
+      `isolation: ${name} импортирует только слой backtest + smc/strategies (${specifiers.join(", ")})`
+    );
+  }
 }
 
 const externalSpecifiers = [
-  ...new Set(allSpecifiers.filter((item) => !item.startsWith("./")))
+  ...new Set(allSpecifiers.filter((item) => !item.startsWith("./") && !item.startsWith("../")))
 ];
 
+const p2aExternalUnique = [...new Set(p2aExternal)];
+
 ok(
-  externalSpecifiers.length === 1 && externalSpecifiers[0] === "node:crypto",
-  `isolation: единственная внешняя зависимость слоя — node:crypto (${externalSpecifiers.join(", ")})`
+  p2aExternalUnique.length === 1 && p2aExternalUnique[0] === "node:crypto",
+  `isolation: единственная внешняя зависимость P2-A ядра — node:crypto (${p2aExternalUnique.join(", ")})`
+);
+ok(
+  externalSpecifiers.every((s) => s === "node:crypto"),
+  `isolation: внешние зависимости слоя — только node:crypto (${externalSpecifiers.join(", ")})`
 );
 ok(
   !allSpecifiers.some((item) => item.startsWith("@prisma") || item.includes("prisma")),
