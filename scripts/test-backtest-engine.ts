@@ -1950,14 +1950,20 @@ function parseChain(
     i = skipWhitespace(source, i);
     if (i >= source.length) break;
     const ch = source[i];
-    if (ch === ".") {
-      i++;
+    // `.` — обычный доступ к свойству; `?.` — optional chaining.
+    // `?.` в JS — единый токен (`?` и `.` без пробела между ними), но после
+    // него пробелы допустимы: `process ?. env`. Поддерживаем только эти
+    // обычные формы; это по-прежнему лексический сканер, а не анализ семантики.
+    const optional = ch === "?" && source[i + 1] === ".";
+    if (ch === "." || optional) {
+      i += optional ? 2 : 1;
       i = skipWhitespace(source, i);
-      const ident = parseIdentifier(source, i);
-      if (!ident) break;
-      chain.push(ident.name);
-      i = ident.end;
-    } else if (ch === "[") {
+    } else if (ch !== "[") {
+      break;
+    }
+    if (source[i] === "[") {
+      // `process["env"]` и `process?.["env"]`; `. [` — не валидный JS, цепочку не удлиняем
+      if (ch === "." && !optional) break;
       i++;
       i = skipWhitespace(source, i);
       const str = tryParseStringLiteral(source, i);
@@ -1970,9 +1976,12 @@ function parseChain(
       i = skipWhitespace(source, i);
       if (source[i] !== "]") break;
       i++;
-    } else {
-      break;
+      continue;
     }
+    const ident = parseIdentifier(source, i);
+    if (!ident) break;
+    chain.push(ident.name);
+    i = ident.end;
   }
   return { chain, end: i };
 }
@@ -2020,6 +2029,66 @@ function hasProcessEnvViolation(source: string): {
     i++;
   }
   return { violated: chains.length > 0, chains };
+}
+
+/* ---------- claim boundary of the lexical scanner (P2AB HARDENING #2) ---------- */
+
+/**
+ * Ограничения области действия этой проверки.
+ *
+ * Эти тесты — консервативный ЛЕКСИЧЕСКИЙ регрессионный барьер по исходному
+ * тексту lib/backtest/*. Это НЕ полное доказательство безопасности JS/TS,
+ * НЕ песочница и НЕ доказательство отсутствия lookahead. Сканер не должен
+ * использоваться как утверждение «любой доступ к process/env исключён».
+ */
+const SCANNER_LIMITATIONS: string[] = [
+  "Lexical guard only: the scanner reads source text; it does not type-check, resolve symbols, follow aliases or evaluate the module graph.",
+  "Not a complete JS/TS security proof: passing these tests does NOT mean \"all process/env access is prevented\" and does not prove absence of env access.",
+  "Not a no-lookahead proof and not a sandbox: runtime behaviour is not confined by this scanner.",
+  "Does not promise detection of arbitrary aliasing, e.g. `const p = process; p.env`.",
+  "Does not promise detection of reflection, e.g. `Reflect.get(process, \"env\")`.",
+  "Does not promise detection of computed keys assembled at runtime, e.g. `process[\"e\" + \"nv\"]`.",
+  "Does not promise detection of escaped/computed property tricks (e.g. `process[\"\\u0065nv\"]`) unless explicitly tested below.",
+  "Does not promise detection of arbitrary TypeScript expression rewriting, casts or parenthesized aliases, e.g. `(process as any).env`.",
+  "Does not promise detection of dynamic imports hidden inside complex template interpolation when that interpolation is not parsed.",
+  "Does not promise detection of semantic code generation or eval-style indirection.",
+  "Fail-closed false positives are possible and accepted: conservative token/substring checks (e.g. `process.` inside any property path, `new Date` anywhere in the layer) may flag code that does not actually read env or wall-clock time.",
+  "Coverage is limited to the fixtures listed in this file; ordinary syntax without a fixture is not guaranteed to be covered."
+];
+
+const SCANNER_LIMITATIONS_TEXT = SCANNER_LIMITATIONS.join("\n").toLowerCase();
+
+ok(
+  SCANNER_LIMITATIONS.length >= 10,
+  `claim boundary: scanner limitations list is non-empty (${SCANNER_LIMITATIONS.length} items)`
+);
+ok(
+  SCANNER_LIMITATIONS_TEXT.includes("lexical"),
+  "claim boundary: limitations state that the guard is lexical"
+);
+ok(
+  SCANNER_LIMITATIONS_TEXT.includes("not a complete js/ts security proof") &&
+    SCANNER_LIMITATIONS_TEXT.includes("does not mean"),
+  "claim boundary: limitations state that this is not a complete security proof"
+);
+ok(
+  SCANNER_LIMITATIONS_TEXT.includes("not a no-lookahead proof") &&
+    SCANNER_LIMITATIONS_TEXT.includes("not a sandbox"),
+  "claim boundary: limitations reject no-lookahead-proof / sandbox claims"
+);
+for (const required of [
+  "aliasing",
+  "reflection",
+  "computed keys assembled at runtime",
+  "escaped/computed property tricks",
+  "casts or parenthesized aliases",
+  "template interpolation",
+  "eval-style indirection"
+]) {
+  ok(
+    SCANNER_LIMITATIONS_TEXT.includes(required),
+    `claim boundary: limitations explicitly document "${required}"`
+  );
 }
 
 function extractSpecifiersWeak(source: string): string[] {
@@ -2201,6 +2270,46 @@ const adversarialFixtures = [
     shouldRejectProcessEnv: true
   },
   {
+    label: "process?.env optional chain dot",
+    code: "const v = process?.env;",
+    shouldRejectProcessEnv: true
+  },
+  {
+    label: "process?.['env'] optional chain bracket single",
+    code: "const v = process?.['env'];",
+    shouldRejectProcessEnv: true
+  },
+  {
+    label: "process?.[\"env\"] optional chain bracket double",
+    code: 'const v = process?.["env"];',
+    shouldRejectProcessEnv: true
+  },
+  {
+    label: "process ?. env optional chain with whitespace",
+    code: "const v = process ?. env;",
+    shouldRejectProcessEnv: true
+  },
+  {
+    label: "globalThis?.process?.env optional chain",
+    code: "const v = globalThis?.process?.env;",
+    shouldRejectProcessEnv: true
+  },
+  {
+    label: "globalThis?.['process']?.['env'] optional chain brackets single",
+    code: "const v = globalThis?.['process']?.['env'];",
+    shouldRejectProcessEnv: true
+  },
+  {
+    label: "globalThis?.process[\"env\"] optional chain mixed",
+    code: 'const v = globalThis?.process["env"];',
+    shouldRejectProcessEnv: true
+  },
+  {
+    label: "globalThis[\"process\"]?.env optional chain mixed",
+    code: 'const v = globalThis["process"]?.env;',
+    shouldRejectProcessEnv: true
+  },
+  {
     label: "disallowed ../ dependency from P2-A core",
     code: 'import x from "../strategies/foo";',
     shouldRejectCoreDotDot: true
@@ -2260,6 +2369,22 @@ const negativeFixtures = [
   {
     label: "string literal mentioning from '@prisma/client'",
     code: "const s = 'from \"@prisma/client\"';"
+  },
+  {
+    label: "comment mentioning process?.env and process?.['env']",
+    code: "// process?.env / process?.['env'] are forbidden here\nconst a = 1;"
+  },
+  {
+    label: "comment mentioning globalThis?.process?.env",
+    code: "// globalThis?.process?.env is also forbidden\nconst a = 1;"
+  },
+  {
+    label: 'string literal mentioning process?.["env"]',
+    code: "const s = 'process?.[\"env\"]';"
+  },
+  {
+    label: "string literal mentioning globalThis?.process?.env",
+    code: 'const s = "globalThis?.process?.env";'
   }
 ];
 
@@ -2347,6 +2472,26 @@ ok(
   mutationFailures >= 6,
   `mutation control: weakened scanner fails to detect at least 6 adversarial cases (missed ${mutationFailures})`
 );
+
+// Отдельный контроль для optional chaining (P2AB HARDENING #2): у «слабого»
+// сканера нет поддержки `?.` вообще, поэтому каждый optional-chain фикстур
+// обязан им НЕ детектироваться — иначе фикстуры не нагружают новую ветку кода.
+const optionalChainFixtures = adversarialFixtures.filter((fix) =>
+  fix.label.includes("optional chain")
+);
+
+ok(
+  optionalChainFixtures.length >= 8,
+  `mutation control: ${optionalChainFixtures.length} optional-chain adversarial fixtures are present (expected >= 8)`
+);
+
+for (const fix of optionalChainFixtures) {
+  const weakProc = hasProcessEnvViolationWeak(fix.code);
+  ok(
+    !weakProc,
+    `mutation control: weak scanner (no optional-chain support) MISSES ${fix.label}`
+  );
+}
 
 
 /* ---------- детерминизм и неизменяемость ---------- */
