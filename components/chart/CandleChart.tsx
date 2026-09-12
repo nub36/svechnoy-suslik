@@ -40,11 +40,14 @@ import {
   parseChartUrlState
 } from "@/lib/chart/url-state";
 import {
+  LEGEND_BOTTOM_GAP_PX,
   SUSLIK_HANDLE_SCALE,
   SUSLIK_HANDLE_SCROLL,
   SUSLIK_KINETIC_SCROLL,
+  SUSLIK_MAIN_PANE_SCALE_MARGINS,
   SUSLIK_RIGHT_PRICE_SCALE,
   SUSLIK_TIME_SCALE_NAVIGATION,
+  createMainPaneAutoscaleProvider,
   legendSpace,
   shiftLogicalRange
 } from "@/lib/chart/chart-ux";
@@ -398,6 +401,73 @@ function fmtTime(time: number): string {
   );
 }
 
+/**
+ * HTML легенды под курсором (чистая функция: те же строки, что и
+ * раньше, — меняется только место вызова).
+ *
+ * Вынесена из renderLegendAt, чтобы метрики графика пересчитывались
+ * ПОСЛЕ записи в DOM: высота legend-бокса участвует в AUTO-запасе
+ * основной панели (длинная свеча не должна уходить под легенду).
+ */
+function legendHtml(
+  time: number | null,
+  maps: LegendMaps | null
+): string {
+  if (!maps || maps.index.size === 0) {
+    return '<span class="k">Загрузка данных…</span>';
+  }
+
+  const t =
+    time !== null && maps.index.has(time)
+      ? time
+      : maps.lastTime;
+  const i = maps.index.get(t);
+  const candle = maps.candles[i ?? -1];
+
+  if (!candle) {
+    return '<span class="k">Нет данных</span>';
+  }
+
+  const up = candle.close >= candle.open;
+  const span = (
+    key: string,
+    value: string,
+    cls?: string
+  ) =>
+    `<span class="k">${key}</span> ` +
+    `<b class="${cls ?? ""}">${value}</b>`;
+
+  return [
+    `<span class="lgTime">${fmtTime(t)}</span>`,
+    span("O", fmtPrice(candle.open)),
+    span("H", fmtPrice(candle.high)),
+    span("L", fmtPrice(candle.low)),
+    span(
+      "C",
+      fmtPrice(candle.close),
+      up ? "up" : "down"
+    ),
+    span(
+      "Объём",
+      fmtVolume(maps.volume.get(t))
+    ),
+    span("EMA20", fmtPrice(maps.ema20.get(t))),
+    span("EMA50", fmtPrice(maps.ema50.get(t))),
+    span("EMA200", fmtPrice(maps.ema200.get(t))),
+    span("SMA20", fmtPrice(maps.sma20.get(t))),
+    span("RSI14", fmtPrice(maps.rsi14.get(t))),
+    span("MACD", fmtPrice(maps.macdM.get(t))),
+    span("сигн.", fmtPrice(maps.macdS.get(t))),
+    span(
+      "гист.",
+      fmtPrice(maps.macdH.get(t)),
+      (maps.macdH.get(t) ?? 0) >= 0
+        ? "up"
+        : "down"
+    )
+  ].join(" ");
+}
+
 function valueMap(
   points: TimePoint[] | undefined
 ): Map<number, number> {
@@ -488,6 +558,11 @@ export default function CandleChart({
   // style на каждом движении курсора (легенда обновляется часто).
   const legendMaxWidthRef = useRef<number | null>(null);
   const priceScaleWidthRef = useRef<number | null>(null);
+  // Вертикальная геометрия основной панели: нижний край легенды (px от
+  // верха панели) и высота панели. -1 — «ещё не измеряли», поэтому
+  // первое же измерение считается изменением и включает AUTO-запас.
+  const legendBottomPxRef = useRef(-1);
+  const mainPaneHeightPxRef = useRef(-1);
 
   const [historyLoading, setHistoryLoading] =
     useState(false);
@@ -700,12 +775,55 @@ export default function CandleChart({
     }
   }, []);
 
-  /* ---------- резерв места под правую ценовую шкалу ---------- */
+  /* ---------- метрики графика: шкала, легенда, вертикаль ---------- */
+
+  /**
+   * Явные scaleMargins правой ценовой шкалы ОСНОВНОЙ панели (свечи).
+   *
+   * Шкала берётся у самой серии (candleSeries.priceScale()), а НЕ через
+   * chart.applyOptions({ rightPriceScale }): chart-level опции
+   * библиотека применяет сразу ко всем панелям, а RSI и MACD обязаны
+   * остаться на штатных дефолтах со своим autoscale.
+   *
+   * Ручной вертикальный масштаб это НЕ отменяет: значения одинаковы в
+   * обоих режимах, auto-scale возвращается только явным действием
+   * пользователя (кнопка «Сбросить масштаб» / двойной клик), а при
+   * выключенном auto-scale шкала вообще не трогается.
+   */
+  const applyMainPaneScaleMargins = useCallback(() => {
+    const candle = candleSeriesRef.current;
+
+    if (!candle) {
+      return;
+    }
+
+    try {
+      const scale = candle.priceScale();
+
+      if (scale.options().autoScale !== true) {
+        // Пользователь увёл масштаб вручную (drag по ценовой шкале) —
+        // никаких повторных applyOptions: ручной диапазон остаётся его.
+        return;
+      }
+
+      scale.applyOptions({
+        scaleMargins: SUSLIK_MAIN_PANE_SCALE_MARGINS
+      });
+    } catch {
+      // Шкала панели ещё не готова — отступы применятся при следующем
+      // пересчёте метрик.
+    }
+  }, []);
 
   /**
    * Легенда (дата/O/H/L/C/объём/EMA/RSI/MACD) и кнопка сброса масштаба
    * обязаны оставаться ВНУТРИ plot-области: справа находится ценовая
    * шкала, и её подписи не должны перекрываться.
+   *
+   * Здесь же измеряется ВЕРТИКАЛЬНАЯ геометрия основной панели — высота
+   * панели и нижний край legend-бокса; от них зависит AUTO-запас
+   * ценового диапазона (см. createMainPaneAutoscaleProvider в
+   * lib/chart/chart-ux.ts).
    *
    * Ширина берётся из ФАКТИЧЕСКИХ измерений lightweight-charts, а не из
    * hardcoded координат:
@@ -729,15 +847,19 @@ export default function CandleChart({
 
     let plotWidth = 0;
     let priceScaleWidth = 0;
+    let paneHeightPx = 0;
 
     try {
       plotWidth = chart.timeScale().width();
       priceScaleWidth = chart
         .priceScale("right")
         .width();
+      paneHeightPx =
+        chart.panes()[0]?.getHeight() ?? 0;
     } catch {
-      // Plot-область/шкала ещё не созданы (first paint) — ниже
-      // сработает fallback по ширине контейнера.
+      // Plot-область/шкала/панели ещё не созданы (first paint) — ниже
+      // сработает fallback по ширине контейнера, а вертикальная
+      // геометрия пересчитается при следующем измерении.
     }
 
     const legendEl = legendRef.current;
@@ -753,28 +875,58 @@ export default function CandleChart({
       space.maxWidthPx === legendMaxWidthRef.current &&
       space.priceScaleWidthPx === priceScaleWidthRef.current;
 
-    if (unchanged) {
-      return;
-    }
+    if (!unchanged) {
+      legendMaxWidthRef.current = space.maxWidthPx;
+      priceScaleWidthRef.current = space.priceScaleWidthPx;
 
-    legendMaxWidthRef.current = space.maxWidthPx;
-    priceScaleWidthRef.current = space.priceScaleWidthPx;
+      if (space.maxWidthPx === null) {
+        // Измерить не удалось — оставляем CSS-fallback.
+        wrap.style.removeProperty("--chart-legend-max-w");
+      } else {
+        wrap.style.setProperty(
+          "--chart-legend-max-w",
+          `${space.maxWidthPx}px`
+        );
+      }
 
-    if (space.maxWidthPx === null) {
-      // Измерить не удалось — оставляем CSS-fallback.
-      wrap.style.removeProperty("--chart-legend-max-w");
-    } else {
       wrap.style.setProperty(
-        "--chart-legend-max-w",
-        `${space.maxWidthPx}px`
+        "--chart-price-scale-w",
+        `${space.priceScaleWidthPx}px`
       );
     }
 
-    wrap.style.setProperty(
-      "--chart-price-scale-w",
-      `${space.priceScaleWidthPx}px`
-    );
-  }, []);
+    /* -------- вертикальная геометрия основной панели -------- */
+
+    // Нижний край legend-бокса в координатах панели: легенда — overlay
+    // внутри графика (offsetParent — chartWrap, а верх chartWrap
+    // совпадает с верхом контейнера и панели 0). Скрытая легенда
+    // (offsetHeight = 0, например на экранах уже 360px) резерва не даёт.
+    const legendBottomPx =
+      legendEl && legendEl.offsetHeight > 0
+        ? legendEl.offsetTop +
+          legendEl.offsetHeight +
+          LEGEND_BOTTOM_GAP_PX
+        : 0;
+
+    const verticalUnchanged =
+      legendBottomPx === legendBottomPxRef.current &&
+      paneHeightPx === mainPaneHeightPxRef.current;
+
+    legendBottomPxRef.current = legendBottomPx;
+    mainPaneHeightPxRef.current = paneHeightPx;
+
+    if (verticalUnchanged) {
+      return;
+    }
+
+    // Высота панели или легенды изменилась → AUTO-запас надо
+    // пересчитать. Штатный способ: повторное применение тех же
+    // scaleMargins даёт fullUpdate, после которого библиотека
+    // пересчитывает ценовой диапазон — и только в auto-scale
+    // (в ручном режиме пересчёт не выполняется, ручной диапазон
+    // остаётся нетронутым).
+    applyMainPaneScaleMargins();
+  }, [applyMainPaneScaleMargins]);
 
   /* ---------- наполнение серий данными ---------- */
 
@@ -862,76 +1014,20 @@ export default function CandleChart({
   const renderLegendAt = useCallback(
     (time: number | null) => {
       const el = legendRef.current;
-      const maps = legendMapsRef.current;
 
-      // Резерв места под ценовую шкалу пересчитывается здесь: легенда
-      // обновляется чаще всего остального (движение курсора, данные,
-      // история), а ширина шкалы зависит от разрядности цен.
+      if (el) {
+        el.innerHTML = legendHtml(
+          time,
+          legendMapsRef.current
+        );
+      }
+
+      // Метрики пересчитываются ПОСЛЕ записи в DOM: легенда обновляется
+      // чаще всего остального (движение курсора, данные, история), а
+      // измеряются и ширина ценовой шкалы (зависит от разрядности цен),
+      // и фактическая высота legend-бокса (от неё зависит AUTO-запас
+      // основной панели по вертикали).
       applyChartMetrics();
-
-      if (!el) {
-        return;
-      }
-
-      if (!maps || maps.index.size === 0) {
-        el.innerHTML =
-          '<span class="k">Загрузка данных…</span>';
-
-        return;
-      }
-
-      const t =
-        time !== null && maps.index.has(time)
-          ? time
-          : maps.lastTime;
-      const i = maps.index.get(t);
-      const candle = maps.candles[i ?? -1];
-
-      if (!candle) {
-        el.innerHTML =
-          '<span class="k">Нет данных</span>';
-
-        return;
-      }
-
-      const up = candle.close >= candle.open;
-      const span = (
-        key: string,
-        value: string,
-        cls?: string
-      ) =>
-        `<span class="k">${key}</span> ` +
-        `<b class="${cls ?? ""}">${value}</b>`;
-
-      el.innerHTML = [
-        `<span class="lgTime">${fmtTime(t)}</span>`,
-        span("O", fmtPrice(candle.open)),
-        span("H", fmtPrice(candle.high)),
-        span("L", fmtPrice(candle.low)),
-        span(
-          "C",
-          fmtPrice(candle.close),
-          up ? "up" : "down"
-        ),
-        span(
-          "Объём",
-          fmtVolume(maps.volume.get(t))
-        ),
-        span("EMA20", fmtPrice(maps.ema20.get(t))),
-        span("EMA50", fmtPrice(maps.ema50.get(t))),
-        span("EMA200", fmtPrice(maps.ema200.get(t))),
-        span("SMA20", fmtPrice(maps.sma20.get(t))),
-        span("RSI14", fmtPrice(maps.rsi14.get(t))),
-        span("MACD", fmtPrice(maps.macdM.get(t))),
-        span("сигн.", fmtPrice(maps.macdS.get(t))),
-        span(
-          "гист.",
-          fmtPrice(maps.macdH.get(t)),
-          (maps.macdH.get(t) ?? 0) >= 0
-            ? "up"
-            : "down"
-        )
-      ].join(" ");
     },
     [applyChartMetrics]
   );
@@ -1209,7 +1305,36 @@ export default function CandleChart({
         wickDownColor: colors.red,
         borderUpColor: colors.green,
         borderDownColor: colors.red,
-        priceLineWidth: 1
+        priceLineWidth: 1,
+        /*
+         * ВЕРТИКАЛЬНЫЙ AUTO-запас основной панели — штатный
+         * autoscaleInfoProvider библиотеки: базовый диапазон (видимые
+         * high/low свечей) расширяется в ценовых единицах так, чтобы
+         * экстремумы pump/dump не ложились вплотную к краю полосы и не
+         * уходили под legend-бокс.
+         *
+         * На ручной масштаб не влияет: в ручном режиме библиотека не
+         * пересчитывает диапазон (PriceScale
+         * ._private__recalculatePriceRangeImpl сразу завершается при
+         * isCustomPriceRange() && !isAutoScale()), провайдер не
+         * вызывается, и пользователь свободно сжимает/растягивает цену
+         * drag'ом по правой ценовой шкале. Собственных min/max
+         * ограничений приложение не добавляет.
+         */
+        autoscaleInfoProvider:
+          createMainPaneAutoscaleProvider({
+            paneHeightPx: () => {
+              try {
+                return (
+                  chart.panes()[0]?.getHeight() ?? 0
+                );
+              } catch {
+                return 0;
+              }
+            },
+            legendBottomPx: () =>
+              legendBottomPxRef.current
+          })
       });
 
     volumeSeriesRef.current =

@@ -2,7 +2,9 @@
  * Chart UX regression (fix поверх P1-C): навигация/масштаб собственного
  * SuslikChart, резерв места под правую ценовую шкалу (легенда не
  * перекрывает price scale), сохранение ручного viewport при подгрузке
- * истории, а также статические гарды на CandleChart.tsx и globals.css.
+ * истории, ВЕРТИКАЛЬНЫЙ масштаб основной панели (AUTO-запас по видимым
+ * high/low отдельно от свободы ручного drag'а по ценовой шкале), а также
+ * статические гарды на CandleChart.tsx и globals.css.
  *
  * Детерминированно: WITHOUT DOM, WITHOUT browser, WITHOUT lightweight-charts
  * runtime — проверяются чистые функции lib/chart/chart-ux.ts и исходники.
@@ -16,14 +18,26 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  AUTOSCALE_LEGEND_RESERVE_MAX,
+  AUTOSCALE_MIN_EDGE_PAD_PX,
+  AUTOSCALE_SPAN_PAD_RATIO,
+  LEGEND_BOTTOM_GAP_PX,
   LEGEND_RIGHT_GAP_PX,
   SUSLIK_HANDLE_SCALE,
   SUSLIK_HANDLE_SCROLL,
   SUSLIK_KINETIC_SCROLL,
+  SUSLIK_MAIN_PANE_SCALE_MARGINS,
   SUSLIK_RIGHT_PRICE_SCALE,
   SUSLIK_TIME_SCALE_NAVIGATION,
+  autoscalePadding,
+  chartGestureBindings,
+  createMainPaneAutoscaleProvider,
   legendSpace,
-  shiftLogicalRange
+  priceScaleBand,
+  projectAutoscaleExtremes,
+  shiftLogicalRange,
+  validateScaleMargins,
+  verticalScaleModePolicy
 } from "../lib/chart/chart-ux";
 import { mergeOlder } from "../lib/chart/history";
 
@@ -642,6 +656,981 @@ ok(!FORBIDDEN.test(noteText), "текст навигации: нет вероя�
 ok(!noteText.includes("%"), "текст навигации: нет процентов");
 ok(!FORBIDDEN.test(UX_SRC), "lib/chart/chart-ux: нет вероятностных формулировок");
 ok(!/%/.test(UX_SRC.replace(/\/\*[\s\S]*?\*\//g, "")), "lib/chart/chart-ux: нет процентов");
+
+/* ================================================================ */
+/* 5. Вертикальный масштаб: AUTO-запас vs MANUAL-свобода             */
+/* ================================================================ */
+
+console.log("\n=== 5. Вертикальный масштаб основной панели ===");
+
+/** Типичная геометрия: панель 240px, легенда в две строки (низ 62px). */
+const DESKTOP_PANE_PX = 240;
+const DESKTOP_LEGEND_BOTTOM_PX = 62;
+/** Мобильная геометрия: панель 254px, легенда в пять строк (низ 124px). */
+const MOBILE_PANE_PX = 254;
+const MOBILE_LEGEND_BOTTOM_PX = 124;
+/** Видимый диапазон pump'а: high 110, low 100. */
+const PUMP_HIGH = 110;
+const PUMP_LOW = 100;
+const PUMP_SPAN = PUMP_HIGH - PUMP_LOW;
+
+/* ---------- 5.1 Явные scaleMargins основной панели ---------- */
+
+eq(
+  SUSLIK_MAIN_PANE_SCALE_MARGINS,
+  { top: 0.2, bottom: 0.1 },
+  "margins: основная панель имеет ЯВНЫЕ top/bottom отступы (не молчаливый дефолт)"
+);
+eq(
+  Object.keys(SUSLIK_MAIN_PANE_SCALE_MARGINS).sort(),
+  ["bottom", "top"],
+  "margins: ключи — ровно документированный PriceScaleMargins"
+);
+ok(
+  validateScaleMargins(SUSLIK_MAIN_PANE_SCALE_MARGINS).ok,
+  "margins: значения проходят штатную валидацию библиотеки"
+);
+eq(
+  validateScaleMargins(SUSLIK_MAIN_PANE_SCALE_MARGINS).reason,
+  null,
+  "margins: причина ошибки отсутствует"
+);
+ok(
+  SUSLIK_MAIN_PANE_SCALE_MARGINS.top > 0 &&
+    SUSLIK_MAIN_PANE_SCALE_MARGINS.bottom > 0,
+  "margins: отступы сверху и снизу положительные (разумный padding)"
+);
+ok(
+  SUSLIK_MAIN_PANE_SCALE_MARGINS.top +
+    SUSLIK_MAIN_PANE_SCALE_MARGINS.bottom <
+    1,
+  "margins: top + bottom < 1 (требование lightweight-charts)"
+);
+ok(
+  SUSLIK_MAIN_PANE_SCALE_MARGINS.top +
+    SUSLIK_MAIN_PANE_SCALE_MARGINS.bottom <=
+    0.5,
+  "margins: сумма ≤ 0.5 — полоса рисования не меньше половины панели (ручной zoom не зажат)"
+);
+ok(
+  !("scaleMargins" in SUSLIK_RIGHT_PRICE_SCALE),
+  "margins: chart-level rightPriceScale отступов не содержит → RSI/MACD остаются на штатных дефолтах"
+);
+
+// Валидация повторяет правила PriceScale._internal_applyOptions
+// (top/bottom в 0..1, сумма не больше 1).
+for (const bad of [
+  { top: -0.1, bottom: 0.1 },
+  { top: 0.1, bottom: -0.2 },
+  { top: 1.2, bottom: 0 },
+  { top: 0, bottom: 1.5 },
+  { top: 0.7, bottom: 0.5 },
+  { top: Number.NaN, bottom: 0.1 },
+  { top: 0.1, bottom: Number.POSITIVE_INFINITY },
+  {
+    top: undefined as unknown as number,
+    bottom: 0.1
+  },
+  null,
+  undefined
+]) {
+  const res = validateScaleMargins(bad);
+
+  ok(
+    !res.ok,
+    `margins validation: ${JSON.stringify(bad)} отклоняется`
+  );
+  ok(
+    typeof res.reason === "string" && res.reason.length > 0,
+    `margins validation: ${JSON.stringify(bad)} — причина названа`
+  );
+}
+for (const good of [
+  { top: 0, bottom: 0 },
+  { top: 0.999, bottom: 0 },
+  { top: 0.5, bottom: 0.5 },
+  { top: 0.2, bottom: 0.1 }
+]) {
+  ok(
+    validateScaleMargins(good).ok,
+    `margins validation: ${JSON.stringify(good)} принимается`
+  );
+}
+
+/* ---------- 5.2 Геометрия полосы рисования ---------- */
+
+{
+  const band = priceScaleBand({ paneHeightPx: DESKTOP_PANE_PX });
+
+  eq(band.topMarginPx, 48, "band: верхний отступ = top × высота панели");
+  eq(band.bottomMarginPx, 24, "band: нижний отступ = bottom × высота панели");
+  eq(band.bandPx, 168, "band: полоса рисования = высота − отступы");
+}
+{
+  const band = priceScaleBand({
+    paneHeightPx: DESKTOP_PANE_PX,
+    margins: { top: 0.25, bottom: 0.25 }
+  });
+
+  eq(band.bandPx, 120, "band: собственные отступы учитываются");
+}
+for (const bad of [0, -100, Number.NaN, Number.POSITIVE_INFINITY]) {
+  const band = priceScaleBand({ paneHeightPx: bad });
+
+  ok(
+    band.bandPx === 0 && band.topMarginPx === 0 && band.bottomMarginPx === 0,
+    `band: вырожденная высота ${String(bad)} → нули, без NaN`
+  );
+}
+{
+  const band = priceScaleBand({
+    paneHeightPx: DESKTOP_PANE_PX,
+    margins: { top: 0.9, bottom: 0.9 }
+  });
+
+  ok(
+    Math.abs(
+      band.bandPx -
+        DESKTOP_PANE_PX *
+          (1 -
+            SUSLIK_MAIN_PANE_SCALE_MARGINS.top -
+            SUSLIK_MAIN_PANE_SCALE_MARGINS.bottom)
+    ) < 1e-9,
+    "band: невалидные отступы откатываются к константе основной панели"
+  );
+}
+
+/* ---------- 5.3 Штатный mapping экстремумов ---------- */
+
+// Без запаса библиотека кладёт high/low ВПЛОТНУЮ к границам полосы —
+// именно это и выглядело как «цена уходит за верхнюю границу».
+{
+  const naked = projectAutoscaleExtremes({
+    paneHeightPx: DESKTOP_PANE_PX,
+    rangeMin: PUMP_LOW,
+    rangeMax: PUMP_HIGH,
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW
+  });
+
+  ok(naked !== null, "projection: валидный вход проецируется");
+  eq(naked!.highY, naked!.bandTopY, "projection без запаса: high лежит на верхней границе полосы");
+  eq(naked!.lowY, naked!.bandBottomY, "projection без запаса: low лежит на нижней границе полосы");
+  eq(naked!.highClearancePx, 0, "projection без запаса: зазора над high нет");
+  eq(naked!.lowClearancePx, 0, "projection без запаса: зазора под low нет");
+}
+// Экстремум вне диапазона шкалы детектируется (fits = false), а не
+// прячется клампом.
+{
+  const clipped = projectAutoscaleExtremes({
+    paneHeightPx: DESKTOP_PANE_PX,
+    rangeMin: PUMP_LOW,
+    rangeMax: PUMP_HIGH,
+    visibleHigh: PUMP_HIGH + 5,
+    visibleLow: PUMP_LOW
+  });
+
+  ok(clipped !== null, "projection/clipped: проекция существует");
+  ok(
+    clipped!.highClearancePx < 0,
+    "projection/clipped: high за пределами диапазона → clearance отрицательный"
+  );
+  ok(!clipped!.fits, "projection/clipped: обрезанный экстремум помечен как не помещающийся");
+}
+for (const bad of [
+  { paneHeightPx: 0, rangeMin: 100, rangeMax: 110 },
+  { paneHeightPx: 240, rangeMin: 110, rangeMax: 110 },
+  { paneHeightPx: 240, rangeMin: 120, rangeMax: 110 },
+  { paneHeightPx: 240, rangeMin: Number.NaN, rangeMax: 110 },
+  { paneHeightPx: Number.NaN, rangeMin: 100, rangeMax: 110 }
+]) {
+  eq(
+    projectAutoscaleExtremes(bad),
+    null,
+    `projection: вырожденный вход ${JSON.stringify(bad)} → null (диапазон расширяет библиотека)`
+  );
+}
+
+/* ---------- 5.4 AUTO-запас: pump/dump видны полностью ---------- */
+
+{
+  const pad = autoscalePadding({
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW,
+    paneHeightPx: DESKTOP_PANE_PX,
+    legendBottomPx: DESKTOP_LEGEND_BOTTOM_PX
+  });
+
+  ok(pad.above > 0 && pad.below > 0, "padding desktop: запас есть сверху и снизу");
+  ok(
+    Math.abs(pad.below - PUMP_SPAN * AUTOSCALE_SPAN_PAD_RATIO) < 1e-9,
+    "padding desktop: нижний запас — доля видимого спана (пропорционально волатильности)"
+  );
+  ok(
+    pad.above > pad.below,
+    "padding desktop: верхний запас больше нижнего — сверху легенда"
+  );
+  eq(pad.legendReservePx, 14, "padding desktop: легенда занимает 14px сверх верхнего отступа");
+  ok(
+    pad.legendReserveRatio > 0 &&
+      pad.legendReserveRatio <= AUTOSCALE_LEGEND_RESERVE_MAX,
+    "padding desktop: резерв под легенду в допустимых долях полосы"
+  );
+
+  const proj = projectAutoscaleExtremes({
+    paneHeightPx: DESKTOP_PANE_PX,
+    rangeMin: PUMP_LOW - pad.below,
+    rangeMax: PUMP_HIGH + pad.above,
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW
+  });
+
+  ok(proj !== null, "padding desktop: проекция с запасом существует");
+  ok(proj!.fits, "padding desktop: pump high/low помещаются в полосу");
+  ok(
+    proj!.highClearancePx >= AUTOSCALE_MIN_EDGE_PAD_PX,
+    "padding desktop: high НЕ вплотную к краю полосы"
+  );
+  ok(
+    proj!.lowClearancePx >= AUTOSCALE_MIN_EDGE_PAD_PX,
+    "padding desktop: low НЕ вплотную к краю полосы"
+  );
+  ok(
+    proj!.highY >= DESKTOP_LEGEND_BOTTOM_PX - 1e-9,
+    "padding desktop: pump high ниже legend-бокса (не уходит под легенду)"
+  );
+  ok(
+    proj!.highY > 0 && proj!.lowY < DESKTOP_PANE_PX - 1,
+    "padding desktop: экстремумы внутри панели, а не за её границей"
+  );
+}
+
+// Мобильный layout: легенда в пять строк перекрывает половину панели.
+{
+  const pad = autoscalePadding({
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW,
+    paneHeightPx: MOBILE_PANE_PX,
+    legendBottomPx: MOBILE_LEGEND_BOTTOM_PX
+  });
+  const proj = projectAutoscaleExtremes({
+    paneHeightPx: MOBILE_PANE_PX,
+    rangeMin: PUMP_LOW - pad.below,
+    rangeMax: PUMP_HIGH + pad.above,
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW
+  });
+
+  ok(proj !== null && proj.fits, "padding mobile: pump помещается в полосу");
+  ok(
+    proj!.highY >= MOBILE_LEGEND_BOTTOM_PX - 1e-9,
+    "padding mobile: pump high ниже высокой легенды"
+  );
+  ok(
+    (proj!.lowY - proj!.highY) / proj!.bandPx >= 0.5,
+    "padding mobile: видимые свечи занимают не меньше половины полосы (не полоска)"
+  );
+}
+
+// Легенды нет (скрыта на узких экранах / ещё не отрисована).
+{
+  const pad = autoscalePadding({
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW,
+    paneHeightPx: DESKTOP_PANE_PX,
+    legendBottomPx: 0
+  });
+
+  eq(pad.legendReservePx, 0, "padding без легенды: резерв нулевой");
+  ok(
+    Math.abs(pad.above - pad.below) < 1e-9,
+    "padding без легенды: запас симметричный"
+  );
+  ok(
+    Math.abs(pad.above - PUMP_SPAN * AUTOSCALE_SPAN_PAD_RATIO) < 1e-9,
+    "padding без легенды: минимум — минимальный краевой зазор либо доля спана"
+  );
+
+  const proj = projectAutoscaleExtremes({
+    paneHeightPx: DESKTOP_PANE_PX,
+    rangeMin: PUMP_LOW - pad.below,
+    rangeMax: PUMP_HIGH + pad.above,
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW
+  });
+
+  ok(
+    proj !== null && proj.highClearancePx >= AUTOSCALE_MIN_EDGE_PAD_PX,
+    "padding без легенды: экстремумы всё равно не вплотную к краю"
+  );
+}
+
+// Экстремальная легенда: резерв ограничен, свечи не превращаются в полоску.
+{
+  const pad = autoscalePadding({
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW,
+    paneHeightPx: DESKTOP_PANE_PX,
+    legendBottomPx: DESKTOP_PANE_PX
+  });
+
+  ok(
+    pad.legendReserveRatio <= AUTOSCALE_LEGEND_RESERVE_MAX + 1e-12,
+    "padding extreme: резерв под легенду ограничен константой"
+  );
+  ok(
+    pad.above <= PUMP_SPAN,
+    "padding extreme: запас сверху не превышает видимый спан"
+  );
+  const total = PUMP_SPAN + pad.above + pad.below;
+  ok(
+    PUMP_SPAN / total >= 0.5,
+    "padding extreme: видимые свечи занимают ≥ половины диапазона"
+  );
+}
+
+// Монотонность: больше легенда → больше запас сверху.
+{
+  const a = autoscalePadding({
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW,
+    paneHeightPx: DESKTOP_PANE_PX,
+    legendBottomPx: 40
+  });
+  const b = autoscalePadding({
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW,
+    paneHeightPx: DESKTOP_PANE_PX,
+    legendBottomPx: 80
+  });
+  const c = autoscalePadding({
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW,
+    paneHeightPx: DESKTOP_PANE_PX,
+    legendBottomPx: 120
+  });
+
+  ok(a.above <= b.above && b.above <= c.above, "padding: запас сверху монотонно растёт с высотой легенды");
+  ok(
+    a.below === b.below && b.below === c.below,
+    "padding: нижний запас от легенды не зависит"
+  );
+
+  const small = autoscalePadding({
+    visibleHigh: 101,
+    visibleLow: 100,
+    paneHeightPx: DESKTOP_PANE_PX,
+    legendBottomPx: DESKTOP_LEGEND_BOTTOM_PX
+  });
+  const big = autoscalePadding({
+    visibleHigh: 200,
+    visibleLow: 100,
+    paneHeightPx: DESKTOP_PANE_PX,
+    legendBottomPx: DESKTOP_LEGEND_BOTTOM_PX
+  });
+
+  ok(big.above > small.above, "padding: запас растёт вместе с видимым спаном (сильный pump)");
+}
+
+// Вырожденные и мусорные входы.
+for (const bad of [
+  { visibleHigh: 100, visibleLow: 100, paneHeightPx: 240, legendBottomPx: 62 },
+  { visibleHigh: 90, visibleLow: 100, paneHeightPx: 240, legendBottomPx: 62 },
+  { visibleHigh: Number.NaN, visibleLow: 100, paneHeightPx: 240, legendBottomPx: 62 },
+  { visibleHigh: 110, visibleLow: Number.NaN, paneHeightPx: 240, legendBottomPx: 62 },
+  { visibleHigh: 110, visibleLow: 100, paneHeightPx: 0, legendBottomPx: 62 },
+  { visibleHigh: 110, visibleLow: 100, paneHeightPx: -50, legendBottomPx: 62 },
+  { visibleHigh: 110, visibleLow: 100, paneHeightPx: Number.NaN, legendBottomPx: 62 },
+  { visibleHigh: 110, visibleLow: 100, paneHeightPx: 240, legendBottomPx: -20 },
+  { visibleHigh: 110, visibleLow: 100, paneHeightPx: 240, legendBottomPx: Number.NaN },
+  { visibleHigh: 110, visibleLow: 100, paneHeightPx: 240, legendBottomPx: Number.POSITIVE_INFINITY }
+]) {
+  const pad = autoscalePadding(bad);
+
+  ok(
+    Number.isFinite(pad.above) && pad.above >= 0,
+    `padding garbage ${JSON.stringify(bad)}: above конечный и неотрицательный`
+  );
+  ok(
+    Number.isFinite(pad.below) && pad.below >= 0,
+    `padding garbage ${JSON.stringify(bad)}: below конечный и неотрицательный`
+  );
+  ok(
+    Number.isFinite(pad.legendReserveRatio) &&
+      pad.legendReserveRatio >= 0 &&
+      pad.legendReserveRatio <= AUTOSCALE_LEGEND_RESERVE_MAX + 1e-12,
+    `padding garbage ${JSON.stringify(bad)}: резерв в допустимых границах`
+  );
+}
+eq(
+  autoscalePadding({
+    visibleHigh: 100,
+    visibleLow: 100,
+    paneHeightPx: 240,
+    legendBottomPx: 62
+  }),
+  { above: 0, below: 0, legendReservePx: 0, legendReserveRatio: 0 },
+  "padding: вырожденный диапазон не трогаем (его расширяет библиотека на 5 × minMove)"
+);
+
+// Собственные параметры политики.
+{
+  const pad = autoscalePadding({
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW,
+    paneHeightPx: DESKTOP_PANE_PX,
+    legendBottomPx: 0,
+    spanPadRatio: 0.1,
+    minEdgePadPx: 0
+  });
+
+  ok(
+    Math.abs(pad.above - PUMP_SPAN * 0.1) < 1e-9,
+    "padding params: spanPadRatio переопределяется"
+  );
+  const capped = autoscalePadding({
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW,
+    paneHeightPx: DESKTOP_PANE_PX,
+    legendBottomPx: DESKTOP_PANE_PX,
+    legendReserveMax: 0.1
+  });
+
+  ok(
+    capped.legendReserveRatio <= 0.1 + 1e-12,
+    "padding params: legendReserveMax ограничивает резерв"
+  );
+  const customMargins = autoscalePadding({
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW,
+    paneHeightPx: DESKTOP_PANE_PX,
+    legendBottomPx: MOBILE_LEGEND_BOTTOM_PX,
+    margins: { top: 0.4, bottom: 0.1 }
+  });
+  const customProj = projectAutoscaleExtremes({
+    paneHeightPx: DESKTOP_PANE_PX,
+    rangeMin: PUMP_LOW - customMargins.below,
+    rangeMax: PUMP_HIGH + customMargins.above,
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW,
+    margins: { top: 0.4, bottom: 0.1 }
+  });
+
+  eq(customProj!.bandTopY, 96, "padding params: собственные отступы меняют геометрию полосы");
+  ok(
+    customProj!.highY >= MOBILE_LEGEND_BOTTOM_PX - 1e-9,
+    "padding params: запас считается под фактическую полосу — high снова ниже легенды"
+  );
+  ok(
+    customProj!.fits,
+    "padding params: экстремумы помещаются и с собственными отступами"
+  );
+}
+
+/* ---------- 5.5 Штатный autoscaleInfoProvider ---------- */
+
+const provider = createMainPaneAutoscaleProvider({
+  paneHeightPx: () => DESKTOP_PANE_PX,
+  legendBottomPx: () => DESKTOP_LEGEND_BOTTOM_PX
+});
+const baseInfo = () => ({
+  priceRange: { minValue: PUMP_LOW, maxValue: PUMP_HIGH }
+});
+
+{
+  const res = provider(baseInfo);
+
+  ok(res !== null && res.priceRange !== null, "provider: результат валиден");
+  ok(
+    res!.priceRange!.maxValue > PUMP_HIGH,
+    "provider: диапазон расширен сверху (pump high не в край)"
+  );
+  ok(
+    res!.priceRange!.minValue < PUMP_LOW,
+    "provider: диапазон расширен снизу (dump low не в край)"
+  );
+  ok(
+    res!.priceRange!.minValue <= PUMP_LOW &&
+      res!.priceRange!.maxValue >= PUMP_HIGH,
+    "provider: видимые high/low НЕ клампятся и не подменяются (семантика OHLC сохранена)"
+  );
+  ok(
+    res!.priceRange!.maxValue - res!.priceRange!.minValue > PUMP_SPAN,
+    "provider: диапазон только шире базового — сужения нет"
+  );
+  eq(res!.margins, undefined, "provider: px-составляющая AutoScaleMargins не используется (ручной режим не сжимается)");
+
+  const proj = projectAutoscaleExtremes({
+    paneHeightPx: DESKTOP_PANE_PX,
+    rangeMin: res!.priceRange!.minValue,
+    rangeMax: res!.priceRange!.maxValue,
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW
+  });
+
+  ok(
+    proj !== null && proj.fits,
+    "provider: pump полностью помещается в основную панель"
+  );
+  ok(
+    proj!.highY >= DESKTOP_LEGEND_BOTTOM_PX - 1e-9,
+    "provider: pump high рисуется ниже легенды"
+  );
+}
+eq(provider(() => null), null, "provider: null от базовой реализации пробрасывается");
+eq(
+  provider(() => ({ priceRange: null })),
+  { priceRange: null },
+  "provider: пустой диапазон пробрасывается без падения"
+);
+{
+  const degenerate = provider(() => ({
+    priceRange: { minValue: 100, maxValue: 100 }
+  }));
+
+  eq(
+    degenerate,
+    { priceRange: { minValue: 100, maxValue: 100 }, margins: undefined },
+    "provider: вырожденный диапазон возвращается как есть (расширяет библиотека)"
+  );
+}
+{
+  const withMargins = provider(() => ({
+    priceRange: { minValue: PUMP_LOW, maxValue: PUMP_HIGH },
+    margins: { above: 3, below: 4 }
+  }));
+
+  eq(
+    withMargins!.margins,
+    { above: 3, below: 4 },
+    "provider: чужие px-margins пробрасываются без изменений"
+  );
+}
+{
+  const zeroGeometry = createMainPaneAutoscaleProvider({
+    paneHeightPx: () => 0,
+    legendBottomPx: () => 0
+  })(baseInfo);
+
+  ok(
+    zeroGeometry!.priceRange!.maxValue > PUMP_HIGH &&
+      zeroGeometry!.priceRange!.minValue < PUMP_LOW,
+    "provider: без измерений панели остаётся пропорциональный запас"
+  );
+}
+{
+  const throwing = createMainPaneAutoscaleProvider({
+    paneHeightPx: () => Number.NaN,
+    legendBottomPx: () => Number.POSITIVE_INFINITY
+  })(baseInfo);
+
+  ok(
+    Number.isFinite(throwing!.priceRange!.maxValue) &&
+      Number.isFinite(throwing!.priceRange!.minValue),
+    "provider: мусорная геометрия не даёт NaN в диапазон"
+  );
+}
+// Ни при какой геометрии провайдер не сужает диапазон.
+for (const paneHeightPx of [0, 60, 120, 240, 400, 800]) {
+  for (const legendBottomPx of [0, 30, 62, 124, 240, 400]) {
+    const res = createMainPaneAutoscaleProvider({
+      paneHeightPx: () => paneHeightPx,
+      legendBottomPx: () => legendBottomPx
+    })(baseInfo);
+
+    ok(
+      res!.priceRange!.minValue <= PUMP_LOW &&
+        res!.priceRange!.maxValue >= PUMP_HIGH,
+      `provider grid H=${String(paneHeightPx)} legend=${String(legendBottomPx)}: диапазон не уже базового`
+    );
+  }
+}
+
+/* ---------- 5.6 AUTO и MANUAL — разные режимы ---------- */
+
+{
+  const auto = verticalScaleModePolicy("auto");
+  const manual = verticalScaleModePolicy("manual");
+
+  eq(auto.mode, "auto", "policy: режим AUTO");
+  eq(manual.mode, "manual", "policy: режим MANUAL");
+  eq(auto.paddingApplied, true, "policy AUTO: запас применяется (экстремумы не обрезаются)");
+  eq(
+    manual.paddingApplied,
+    false,
+    "policy MANUAL: запас НЕ применяется — ручной вертикальный zoom свободен"
+  );
+  ok(
+    auto.rangeSource !== manual.rangeSource,
+    "policy: источники диапазона AUTO и MANUAL различаются (default padding ≠ manual freedom)"
+  );
+  eq(auto.clamps.length, 0, "policy AUTO: искусственных ограничений нет");
+  eq(
+    manual.clamps.length,
+    0,
+    "policy MANUAL: никаких собственных min/max clamp'ов вертикального zoom'а"
+  );
+  eq(
+    auto.restoredBy.length,
+    0,
+    "policy AUTO: auto-scale не «возвращается» сам (нечего возвращать)"
+  );
+  eq(
+    manual.restoredBy.length,
+    3,
+    "policy MANUAL: auto-scale возвращается двойным кликом по шкале, кнопкой сброса и двойным кликом по графику"
+  );
+  ok(
+    manual.restoredBy.some((r) => r.includes("axisDoubleClickReset.price")),
+    "policy MANUAL: двойной клик по ценовой шкале — штатный возврат auto-scale"
+  );
+  ok(
+    manual.restoredBy.some((r) => r.includes("Сбросить масштаб")),
+    "policy MANUAL: кнопка «Сбросить масштаб» возвращает auto-scale"
+  );
+  eq(
+    auto.scaleMarginsApplied,
+    manual.scaleMarginsApplied,
+    "policy: scaleMargins — общая геометрия полосы, режим не переключают"
+  );
+}
+// Ручное «сплющивание» и растягивание приложение не ограничивает:
+// ручной диапазон просто проецируется как есть.
+{
+  const flattened = projectAutoscaleExtremes({
+    paneHeightPx: DESKTOP_PANE_PX,
+    rangeMin: 0,
+    rangeMax: 1000,
+    visibleHigh: PUMP_HIGH,
+    visibleLow: PUMP_LOW
+  });
+
+  ok(
+    flattened !== null && flattened.fits,
+    "manual: сильный ручной zoom out (свечи полоской)проецируется без ограничений"
+  );
+  ok(
+    flattened!.lowY - flattened!.highY < 5,
+    "manual: сплющенные свечи занимают несколько пикселей — приложение их не растягивает принудительно"
+  );
+
+  const stretched = projectAutoscaleExtremes({
+    paneHeightPx: DESKTOP_PANE_PX,
+    rangeMin: 99.9,
+    rangeMax: 100.1,
+    visibleHigh: 100.1,
+    visibleLow: 99.9
+  });
+
+  ok(
+    stretched !== null && stretched.fits,
+    "manual: сильный ручной zoom in (растянутые свечи) проектируется без ограничений"
+  );
+  ok(
+    stretched!.lowY - stretched!.highY > 100,
+    "manual: растянутые свечи занимают почти всю полосу — clamp'ов нет"
+  );
+}
+
+/* ---------- 5.7 Жесты: время и цена разделены ---------- */
+
+{
+  const rows = chartGestureBindings(
+    SUSLIK_HANDLE_SCROLL,
+    SUSLIK_HANDLE_SCALE
+  );
+
+  eq(rows.length, 9, "gestures: полная карта жестов (9 строк)");
+  ok(
+    rows.every((r) => r.axis === "time" || r.axis === "price"),
+    "gestures: ось — только time или price"
+  );
+
+  const enabledPrice = rows.filter(
+    (r) => r.axis === "price" && r.enabled
+  );
+
+  eq(
+    enabledPrice.length,
+    2,
+    "gestures: цену масштабируют ровно два жеста — drag по правой шкале и двойной клик по ней"
+  );
+  ok(
+    enabledPrice.some((r) => r.gesture.includes("drag по правой ценовой шкале")),
+    "gestures: drag по правой ценовой шкале → вертикальный масштаб (axisPressedMouseMove.price)"
+  );
+  ok(
+    enabledPrice.some((r) => r.gesture.includes("двойной клик по ценовой шкале")),
+    "gestures: двойной клик по ценовой шкале → возврат price auto-scale"
+  );
+  eq(
+    rows.filter((r) => r.axis === "price" && r.gesture.includes("колесо")).length,
+    0,
+    "gestures: колесо НЕ масштабирует цену — вертикальный zoom колесом не подменяется"
+  );
+  ok(
+    rows.every(
+      (r) => !r.gesture.includes("колесо") || r.axis === "time"
+    ),
+    "gestures: любое колесо — это время/история"
+  );
+
+  const find = (gesture: string) =>
+    rows.find((r) => r.gesture === gesture);
+
+  eq(find("drag по plot")?.axis, "time", "gestures: drag по plot — движение по истории");
+  eq(find("drag по plot")?.enabled, true, "gestures: drag по plot включён");
+  eq(find("колесо/свайп deltaY")?.axis, "time", "gestures: deltaY — zoom временной шкалы");
+  eq(find("колесо/свайп deltaY")?.enabled, true, "gestures: deltaY включён");
+  eq(find("колесо/свайп deltaX")?.axis, "time", "gestures: deltaX — движение по истории");
+  eq(find("drag по оси времени")?.enabled, true, "gestures: drag по оси времени растягивает время");
+  eq(find("pinch")?.axis, "time", "gestures: pinch — время");
+  eq(
+    find("вертикальный touch-драг")?.enabled,
+    false,
+    "gestures: вертикальный touch отдан странице (цена пальцем не перехватывается)"
+  );
+
+  // Штатная нормализация boolean → обе оси.
+  const normalized = chartGestureBindings(SUSLIK_HANDLE_SCROLL, {
+    ...SUSLIK_HANDLE_SCALE,
+    axisPressedMouseMove: true,
+    axisDoubleClickReset: true
+  });
+
+  ok(
+    normalized
+      .filter((r) => r.axis === "price" && r.enabled)
+      .some((r) => r.gesture.includes("drag по правой ценовой шкале")),
+    "gestures: axisPressedMouseMove = true нормализуется и для цены"
+  );
+  const disabled = chartGestureBindings(SUSLIK_HANDLE_SCROLL, {
+    ...SUSLIK_HANDLE_SCALE,
+    axisPressedMouseMove: false
+  });
+
+  ok(
+    !disabled
+      .filter((r) => r.axis === "price" && r.enabled)
+      .some((r) => r.gesture.includes("drag")),
+    "gestures: axisPressedMouseMove = false действительно выключает вертикальный drag"
+  );
+}
+
+/* ---------- 5.8 Статические гарды CandleChart ---------- */
+
+const metricsCode = extractBetween(
+  chartCode,
+  "const applyChartMetrics = useCallback(",
+  "const resetChartScale = useCallback(",
+  "applyChartMetrics CandleChart"
+);
+const marginsCode = extractBetween(
+  chartCode,
+  "const applyMainPaneScaleMargins = useCallback(",
+  "const applyChartMetrics = useCallback(",
+  "applyMainPaneScaleMargins CandleChart"
+);
+const legendCode = extractBetween(
+  chartCode,
+  "const renderLegendAt = useCallback(",
+  "const applyData = useCallback(",
+  "renderLegendAt CandleChart"
+);
+const createChartCode = extractBetween(
+  chartCode,
+  "const chart = createChart(container, {",
+  "chartRef.current = chart;",
+  "createChart CandleChart"
+);
+
+eq(
+  (chartCode.match(/autoscaleInfoProvider/g) ?? []).length,
+  1,
+  "chart: autoscaleInfoProvider задан ровно один раз — серия свечей"
+);
+ok(
+  /createMainPaneAutoscaleProvider\(\{/.test(chartCode),
+  "chart: запас считается чистой функцией из lib/chart/chart-ux"
+);
+eq(
+  (chartCode.match(/SUSLIK_MAIN_PANE_SCALE_MARGINS/g) ?? []).length,
+  2,
+  "chart: отступы основной панели — константа модуля (импорт + применение)"
+);
+eq(
+  (chartCode.match(/scaleMargins/g) ?? []).length,
+  2,
+  "chart: scaleMargins только у volume-overlay и основной панели"
+);
+ok(
+  /scaleMargins: \{\s*top: 0\.82,\s*bottom: 0\s*\}/.test(chartCode),
+  "chart: volume-overlay остался в нижней части панели (top 0.82)"
+);
+ok(
+  /scale\.applyOptions\(\{\s*scaleMargins: SUSLIK_MAIN_PANE_SCALE_MARGINS\s*\}\)/.test(
+    chartCode
+  ),
+  "chart: отступы применяются к шкале серии свечей, а не chart-level"
+);
+ok(
+  /const scale = candle\.priceScale\(\);/.test(marginsCode),
+  "chart: шкала берётся у серии свечей → это панель 0, а не RSI/MACD"
+);
+ok(
+  !/chart\s*\.\s*applyOptions\(\{[\s\S]{0,400}?rightPriceScale[\s\S]{0,200}?scaleMargins/.test(
+    chartCode
+  ),
+  "chart: chart-level applyOptions не меняет отступы (иначе задели бы RSI/MACD)"
+);
+ok(
+  !/rightPriceScale: \{[\s\S]{0,300}?scaleMargins/.test(createChartCode),
+  "chart: в createChart у rightPriceScale отступов нет"
+);
+ok(
+  !/(rsiRef|macdLineRef|macdSignalRef|macdHistRef)[\s\S]{0,300}?scaleMargins/.test(
+    chartCode
+  ),
+  "chart: у серий RSI/MACD отступы не переопределяются (свой autoscale сохранён)"
+);
+ok(
+  /if \(scale\.options\(\)\.autoScale !== true\) \{/.test(marginsCode),
+  "chart: при выключенном auto-scale шкала не трогается — ручной масштаб не отменяется"
+);
+eq(
+  (chartCode.match(/setAutoScale\(/g) ?? []).length,
+  1,
+  "chart: setAutoScale вызывается ровно один раз — в сбросе масштаба"
+);
+eq(
+  (chartCode.match(/autoScale/g) ?? []).length,
+  1,
+  "chart: autoScale упоминается только в гарде ручного режима (эффекты его не переключают)"
+);
+eq(
+  (chartCode.match(/setVisibleRange\(/g) ?? []).length,
+  0,
+  "chart: setVisibleRange не вызывается — ценовой диапазон приложение не навязывает"
+);
+eq(
+  (chartCode.match(/margins:/g) ?? []).length,
+  0,
+  "chart: px-составляющая AutoScaleMargins не используется (она сжимала бы полосу и в ручном режиме)"
+);
+for (const token of [
+  "Math.min",
+  "Math.max",
+  "priceRange",
+  "clamp",
+  "minBarHeight",
+  "onMouseMove",
+  "onPointerMove",
+  "onPointerDown",
+  "onTouchMove",
+  "onWheel",
+  "wheel",
+  "setPointerCapture",
+  "getBoundingClientRect"
+]) {
+  ok(
+    !chartCode.includes(token),
+    `chart: нет собственной вертикальной физики/клампов (${token})`
+  );
+}
+ok(
+  /chart\.panes\(\)\[0\]\?\.getHeight\(\)/.test(chartCode),
+  "chart: высота основной панели измеряется штатным getHeight()"
+);
+ok(
+  /legendEl\.offsetTop \+/.test(metricsCode) &&
+    /legendEl\.offsetHeight/.test(metricsCode),
+  "chart: нижний край легенды измеряется, а не хардкодится"
+);
+ok(
+  !/legendBottomPx = [1-9]/.test(metricsCode) &&
+    !/paneHeightPx = [1-9]/.test(metricsCode),
+  "chart: вертикальная геометрия не задана хардкодом"
+);
+ok(
+  /LEGEND_BOTTOM_GAP_PX/.test(metricsCode),
+  "chart: зазор под легендой — константа модуля"
+);
+ok(
+  /if \(verticalUnchanged\) \{\s*return;/.test(metricsCode),
+  "chart: отступы перечитываются только при реальном изменении геометрии (не на каждое движение курсора)"
+);
+ok(
+  /applyMainPaneScaleMargins\(\);/.test(metricsCode),
+  "chart: изменение геометрии перечитывает autoscale основной панели"
+);
+ok(
+  legendCode.indexOf("legendHtml(") < legendCode.indexOf("applyChartMetrics()") &&
+    legendCode.indexOf("legendHtml(") !== -1,
+  "chart: метрики считаются ПОСЛЕ записи легенды (высота легенды фактическая)"
+);
+ok(
+  /paneHeightPx: \(\) => \{/.test(chartCode),
+  "chart: провайдер читает высоту панели в момент пересчёта (не кэш)"
+);
+ok(
+  /legendBottomPx: \(\) =>/.test(chartCode),
+  "chart: провайдер читает нижний край легенды в момент пересчёта"
+);
+ok(
+  /\}, \[applyMainPaneScaleMargins\]\);/.test(chartCode),
+  "chart: applyChartMetrics остаётся стабильным useCallback"
+);
+ok(
+  /\}, \[applyChartTheme, renderLegendAt, applyChartMetrics\]\);/.test(chartCode),
+  "chart: эффект создания графика по-прежнему создаёт график один раз"
+);
+ok(
+  /setStretchFactor\(4\)/.test(chartCode),
+  "chart: stretch-фактор основной панели не менялся"
+);
+
+/* ---------- 5.9 Легенда не закрывает ценовую шкалу (прежний фикс) ---------- */
+
+{
+  const space = legendSpace({
+    plotWidth: 1160,
+    priceScaleWidth: 76.4,
+    leftInset: 8,
+    containerWidth: 1240
+  });
+
+  ok(
+    (space.maxWidthPx ?? 0) + 8 + LEGEND_RIGHT_GAP_PX <= 1160,
+    "legend/price axis: правый край легенды левее ценовой шкалы — drag по шкале не перекрыт"
+  );
+  ok(
+    space.reservedRightPx >= Math.ceil(76.4),
+    "legend/price axis: резерв под шкалу сохранён"
+  );
+}
+ok(
+  /right: calc\(var\(--chart-price-scale-w, 0px\) \+ 10px\)/.test(cssCode),
+  "CSS: кнопка сброса сдвинута левее ценовой шкалы — ось остаётся доступной для drag'а"
+);
+ok(
+  /pointer-events: none/.test(
+    extractBetween(cssCode, ".chartLegend {", "}", "CSS .chartLegend (5)")
+  ),
+  "CSS: легенда не перехватывает pointer-события графика и ценовой шкалы"
+);
+eq(LEGEND_BOTTOM_GAP_PX, 4, "legend: зазор под легендой — константа модуля");
+ok(
+  AUTOSCALE_SPAN_PAD_RATIO > 0 && AUTOSCALE_SPAN_PAD_RATIO < 0.2,
+  "padding: доля спана разумная (не раздувает диапазон)"
+);
+ok(
+  AUTOSCALE_MIN_EDGE_PAD_PX >= 1 && AUTOSCALE_MIN_EDGE_PAD_PX <= 8,
+  "padding: минимальный краевой зазор — единицы пикселей"
+);
+ok(
+  AUTOSCALE_LEGEND_RESERVE_MAX > 0 && AUTOSCALE_LEGEND_RESERVE_MAX <= 0.5,
+  "padding: резерв под легенду не может съесть больше половины полосы"
+);
 
 /* ---------- итог ---------- */
 

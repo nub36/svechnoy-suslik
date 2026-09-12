@@ -2356,6 +2356,142 @@ environment-причине (@prisma/client не сгенерирован, binari
 недоступен) — сигнатура идентична baseline.
 
 
+## §31l. Chart UX vertical fix — AUTO-запас основной панели и свобода ручного price scale (12.09.2026)
+
+UI-only фикс поверх §31k (parent `fa43d2f`). Семантика данных не менялась:
+OHLC/индикаторы считает тот же серверный слой, SMC DTO/API/runtime,
+`lib/strategies`, Prisma и package-файлы не тронуты. TradingView-интеграция
+(§2, P1-TV) по-прежнему документация-only — в этом фиксе не реализовывалась.
+
+**1. ПРИЧИНА: В AUTO-SCALE ЭКСТРЕМУМЫ ЛОЖИЛИСЬ ВПЛОТНУЮ К КРАЮ ПОЛОСЫ**
+
+Аудит установленной lightweight-charts 5.2.1
+(`dist/lightweight-charts.development.mjs`, `dist/typings.d.ts`):
+- у правой шкалы основной панели `scaleMargins` не задавались явно →
+  действовал дефолт библиотеки `{ bottom: 0.1, top: 0.2 }`;
+- `PriceScale._private__logicalToCoordinate` вместе с
+  `_internal_invertedCoordinate` (invertScale = false) даёт
+  `y(price) = topMarginPx + (internalHeight − 1) × (rangeMax − price) / длина`,
+  а auto-scale-диапазон — это ровно видимые min/max источников
+  (`_private__recalculatePriceRangeImpl` → `source.autoscaleInfo(...)`).
+  Следовательно видимый high ложился ТОЧНО на верхнюю границу полосы
+  рисования (y = topMarginPx), а low — точно на нижнюю: зазор нулевой,
+  на длинной свече это выглядело как «цена/high уходит за верхнюю границу»;
+- легенда — overlay ВНУТРИ панели (`top: 8px`, фон `panel2` 88%), на узких
+  экранах переносится в 3–5 строк (≈60–126px) и накрывает весь верхний
+  отступ (0.2 × 200–300px = 40–60px), поэтому pump-high уходил ещё и под
+  legend-бокс;
+- `Model._internal_applyPriceScaleOptions("right", …)` применяет опции
+  сразу ко ВСЕМ панелям → chart-level `scaleMargins` задели бы RSI/MACD;
+- `PriceScale._private__topMarginPx/_bottomMarginPx`: `scaleMargins`
+  участвуют в пересчёте координат ВСЕГДА — и в auto-, и в ручном режиме,
+  поэтому «динамическими» отступами резерв под легенду делать нельзя
+  (сжали бы полосу ручного вертикального zoom'а);
+- `_private__recalculatePriceRangeImpl` сразу завершается при
+  `isCustomPriceRange() && !isAutoScale()` → после ручного drag'а диапазон
+  не пересчитывается: ручной масштаб свободен, `autoscaleInfoProvider`
+  в нём не вызывается;
+- px-поля `AutoScaleMargins` (`margins.above/below`) хранятся на шкале и
+  добавлялись бы к полосе рисования и в ручном режиме → для запаса не
+  использовались.
+
+**2. РЕШЕНИЕ: ДВЕ ШТАТНЫЕ МЕХАНИКИ, РАЗДЕЛЁННЫЕ ПО РЕЖИМАМ**
+
+AUTO (открытие графика, «Сбросить масштаб», двойной клик):
+- явные `SUSLIK_MAIN_PANE_SCALE_MARGINS = { top: 0.2, bottom: 0.1 }`
+  (`lib/chart/chart-ux.ts`) применяются ТОЛЬКО к шкале серии свечей —
+  `candle.priceScale().applyOptions({ scaleMargins })`, поэтому pane 0
+  получает фиксированный профессиональный отступ, а RSI/MACD остаются на
+  штатных дефолтах со своим autoscale (0/100 у RSI не форсируются);
+- штатный `autoscaleInfoProvider` серии свечей
+  (`createMainPaneAutoscaleProvider()`): базовый расчёт библиотеки по
+  ВИДИМЫМ high/low (не close) расширяется в ЦЕНОВЫХ единицах —
+  диапазон только шире, high/low не клампятся и не подменяются:
+  * пропорциональный запас `AUTOSCALE_SPAN_PAD_RATIO = 0.025` сверху и
+    снизу и минимум `AUTOSCALE_MIN_EDGE_PAD_PX = 2` px от края полосы;
+  * резерв под легенду: запас сверху растёт так, чтобы видимый high
+    оказался ниже legend-бокса (решение уравнения проекции
+    `above ≥ r × (span + below) / (1 − r)`, r — доля полосы, которую
+    легенда занимает сверх верхнего отступа);
+  * потолок `AUTOSCALE_LEGEND_RESERVE_MAX = 0.45` — даже при легенде в
+    5 строк видимые свечи занимают не меньше половины полосы;
+  * геометрия — измерения (`chart.panes()[0].getHeight()`,
+    `legend.offsetTop + offsetHeight + LEGEND_BOTTOM_GAP_PX`), а не
+    хардкод; метрики пересчитываются ПОСЛЕ записи легенды в DOM
+    (`legendHtml()` вынесен в чистую функцию) и только при реальном
+    изменении геометрии, пересчёт auto-scale — повторным применением тех
+    же `scaleMargins` (штатный `fullUpdate`), без самодельных эффектов.
+
+MANUAL (drag по правой ценовой шкале) — свобода без ограничений приложения:
+- `handleScale.axisPressedMouseMove.price = true` (§31k); путь в библиотеке
+  подтверждён аудитом: `PriceAxisWidget._private__mouseDownEvent` →
+  `model.startScalePrice(pane, priceScale, localY)` → `PriceScale.scaleTo`
+  → `setMode({ autoScale: false })` + пользовательский диапазон;
+  единственная блокировка — `priceScale.isEmpty()` (нулевая высота или
+  пустой диапазон), к основной панели неприменима. Шкалу панели 0 ничто
+  не перекрывает: легенда и кнопка сброса сдвинуты левее шкалы на её
+  фактическую ширину (`--chart-price-scale-w`), у легенды
+  `pointer-events: none`;
+- сводная карта жестов — чистая функция `chartGestureBindings()`:
+  drag по plot → история, колесо deltaY → zoom ВРЕМЕНИ, deltaX → история,
+  drag по оси времени → растянуть/сжать время, drag по правой ценовой
+  шкале → вертикальный масштаб, двойной клик по шкале → price auto-scale,
+  вертикальный touch → страница. Вертикального zoom'а колесом в модели
+  библиотеки нет, поэтому wheel цену не подменяет;
+- собственных ограничений приложение не добавляет: в `CandleChart.tsx` нет
+  `setVisibleRange`, `margins:`, `Math.min/Math.max`, манипуляций
+  `priceRange`, pointer/wheel-обработчиков (статические гарды в тестах) —
+  вручную можно и «сплющить» свечи в полоску, и растянуть на всю панель;
+- ручной режим не отменяется React-эффектами: `setAutoScale(true)` — ровно
+  один вызов, в `resetChartScale` (кнопка и двойной клик по графику);
+  перечитывание геометрии выполняется только при
+  `priceScale().options().autoScale === true`, а двойной клик по ценовой
+  шкале возвращает auto-scale штатным `axisDoubleClickReset.price`
+  (`Pane.resetPriceScale` → `setMode({ autoScale: true })`).
+
+**3. ГОРИЗОНТАЛЬНЫЙ UX И ПРОЧИЕ ПАНЕЛИ НЕ ТРОНУТЫ**
+
+`shiftLogicalRange`/loadOlder, `fitContent` (ровно один — на свежей
+загрузке окна), `scrollToRealTime` (только сброс), `subscribeSizeChange`,
+stretch-факторы 4 / 1.6 / 1.6, volume-overlay `scaleMargins { top: 0.82,
+bottom: 0 }` на собственной шкале, EMA/SMA и RSI/MACD — без изменений;
+резерв легенды под ценовую шкалу (§31k) сохранён.
+
+**4. ТЕСТЫ И ПРОВЕРКИ**
+
+`scripts/test-chart-ux.ts` — новая секция 5 (вертикальный масштаб):
+валидация отступов по правилам библиотеки (top/bottom в 0..1, сумма < 1),
+геометрия полосы, штатный mapping экстремумов (включая детект «экстремум
+вне диапазона» вместо клампа), AUTO-запас (desktop/mobile/без легенды/
+экстремальная легенда/монотонность/мусорные входы), провайдер (расширение,
+отсутствие клампов, проброс `margins`, null/вырожденный диапазон, сетка
+геометрий), разделение AUTO ≠ MANUAL (`verticalScaleModePolicy`: AUTO —
+запас применяется, MANUAL — не применяется и clamps пусты), карта жестов
+(цену масштабируют ровно два жеста, колесо — только время), статические
+гарды CandleChart. Итог 424/424 (было 179). Mutation-тестирование:
+15 преднамеренных поломок (убрать провайдер; вернуть запас в px `margins`;
+клампить/сузить диапазон; игнорировать легенду; раздуть/обнулить отступы;
+убрать гард ручного режима; вернуть auto-scale в эффекте; вызвать
+`setVisibleRange`; задать отступы chart-level; считать метрики до записи
+легенды; выключить price drag / двойной клик; отдать колесу цену;
+перечитывать отступы на каждое движение курсора) — ловятся все 15.
+Регрессия без изменений: test-smc-panel 2872, api-service 111,
+projection 206, chart history 50 / params 37 / url-state 18,
+common horizon 227, eligibility, lookahead 13, evaluate 31, smart-money,
+admin-consistency 84, indicators 74, freshness 52, journal 30, ohlcv
+(cli 105, lock 56, pilot 131), smc core (scoring 75, fvg 37,
+order-blocks 63, liquidity 48, pivots 24, range 50, fsm 62,
+displacement 23, phase3d-b 55 / -c 91 / -d 128 / config 70),
+strategy-periods 59, snapshot-cli 47, chart-sql. `npx tsc --noEmit`
+exit 0, `git diff --check` чисто. Dev-smoke: `/coin/BTC` → 200
+(SSR отдаёт `chartWrap`/`chartContainer`/`chartLegend` и кнопку
+«Сбросить масштаб»), `/api/chart/candles` → 503 с безопасным русским
+сообщением (БД в песочнице нет). `npm run build` в песочнице падает
+только по environment-причине (@prisma/client не сгенерирован) — лог
+побайтово совпадает с baseline `fa43d2f` (нормированы только тайминги),
+«Compiled successfully» и валидация типов/линта проходят.
+
+
 ==================================================
 32. PRODUCT ROADMAP / ДАЛЬНЕЙШЕЕ РАЗВИТИЕ (10.09.2026)
 ==================================================
