@@ -44,6 +44,7 @@ import {
   type ExperimentRecord,
   type ExperimentSubjectInput,
   type SegmentReport,
+  type SelectionPolicy,
   type VariantDefinition
 } from "../lib/experiment/contract";
 import { resolveVariants } from "../lib/experiment/identity";
@@ -58,12 +59,14 @@ import {
   BACKTEST_FAILURE_STAGE_MAP,
   experimentInvariantErrors,
   runExperiment,
-  runExperimentReport
+  runExperimentReport,
+  setExperimentInvariantProbe
 } from "../lib/experiment/run";
 import { buildSelectionRecord, rankEvidence } from "../lib/experiment/selection";
 import {
   assertFiniteEvidenceMetrics,
   assertLimitationsPresent,
+  assertOosIsolation,
   assertResultSelfConsistency,
   validateSubmittedSegmentResult,
   windowOf
@@ -1635,6 +1638,408 @@ ok(
 ok(
   assertResultSelfConsistency(TRAIN_RESULT).ok === true,
   "FIX 5: подлинный результат по-прежнему принимается (positive control)"
+);
+
+/* ------------------------------------------------------------------ */
+/* HARDENING #2, FIX 1 — сегмент-локальная допустимость выбора          */
+/*                                                                     */
+/* Вариант-победитель `segment-b` оценён на TRAIN и VALIDATION, но     */
+/* отказывает ТОЛЬКО на OOS. Сводный статус варианта остаётся          */
+/* `rejected` (происхождение), однако выбор по TRAIN/VALIDATION обязан */
+/* остаться действительным и НЕ зависеть от OOS.                        */
+/* ------------------------------------------------------------------ */
+
+const OOS_WINDOW_START = T0 + RECORD.split.oos.startIndex * H1;
+
+/** Провайдер: решения в TRAIN/VALIDATION; на OOS — отказ или успех. */
+function segmentLocalVariant(args: {
+  readonly label: string;
+  readonly trainIndexes: readonly number[];
+  readonly validationIndexes: readonly number[];
+  readonly oosFailure: string | null;
+}): VariantDefinition {
+  const provider: SignalProvider = (context) => {
+    if (context.bar.time >= OOS_WINDOW_START) {
+      if (args.oosFailure !== null) {
+        throw new Error(args.oosFailure);
+      }
+
+      return entryDecision(
+        "LONG",
+        context.bar.close - 9,
+        context.bar.close + 7,
+        "OOS"
+      );
+    }
+
+    if (args.trainIndexes.includes(context.index)) {
+      return entryDecision(
+        "LONG",
+        context.bar.close - 9,
+        context.bar.close + 7,
+        `T${String(context.index)}`
+      );
+    }
+
+    if (args.validationIndexes.includes(context.index)) {
+      return entryDecision(
+        "LONG",
+        context.bar.close - 9,
+        context.bar.close + 7,
+        `V${String(context.index)}`
+      );
+    }
+
+    return null;
+  };
+
+  return {
+    label: args.label,
+    params: { variant: args.label },
+    config: {},
+    signals: provider,
+    signalSourceId: `src-${args.label}`
+  };
+}
+
+const SEGMENT_WINNER = segmentLocalVariant({
+  label: "segment-b",
+  trainIndexes: [10, 30],
+  validationIndexes: [80, 84],
+  oosFailure: "H2: OOS-отказ"
+});
+const SEGMENT_WINNER_OOS_OK = segmentLocalVariant({
+  label: "segment-b",
+  trainIndexes: [10, 30],
+  validationIndexes: [80, 84],
+  oosFailure: null
+});
+const SEGMENT_RUNNER_UP = segmentLocalVariant({
+  label: "segment-a",
+  trainIndexes: [12],
+  validationIndexes: [78],
+  oosFailure: null
+});
+
+function segmentPolicy(stage: "TRAIN" | "VALIDATION"): SelectionPolicy {
+  return { kind: "select-by-rank", stage, criteria: ["trades"] };
+}
+
+interface SelectionSnapshot {
+  readonly winner: string | null;
+  readonly selectedKey: string | null;
+  readonly selectedId: string | null;
+  readonly order: string;
+  readonly rationale: string;
+  readonly trainEvidence: string;
+  readonly validationEvidence: string;
+}
+
+function selectionSnapshot(record: ExperimentRecord): SelectionSnapshot {
+  return {
+    winner: record.selection.selectedLabel,
+    selectedKey: record.selection.selectedSelectionKey,
+    selectedId: record.selection.selectedConfigurationId,
+    order: (record.selection.ranking?.order ?? [])
+      .map((entry) => `${entry.label}:${entry.selectionKey}`)
+      .join(" > "),
+    rationale: record.selection.rationale,
+    trainEvidence: canonicalJson(record.evidence.trainSelection),
+    validationEvidence: canonicalJson(
+      record.evidence.validationConfirmation
+    )
+  };
+}
+
+const oosFailTrainOutcome = runExperiment({
+  bars: BARS,
+  subject: SUBJECT,
+  variants: [SEGMENT_RUNNER_UP, SEGMENT_WINNER],
+  selectionPolicy: segmentPolicy("TRAIN")
+});
+const oosOkTrainOutcome = runExperiment({
+  bars: BARS,
+  subject: SUBJECT,
+  variants: [SEGMENT_RUNNER_UP, SEGMENT_WINNER_OOS_OK],
+  selectionPolicy: segmentPolicy("TRAIN")
+});
+const oosFailValidationOutcome = runExperiment({
+  bars: BARS,
+  subject: SUBJECT,
+  variants: [SEGMENT_RUNNER_UP, SEGMENT_WINNER],
+  selectionPolicy: segmentPolicy("VALIDATION")
+});
+const oosOkValidationOutcome = runExperiment({
+  bars: BARS,
+  subject: SUBJECT,
+  variants: [SEGMENT_RUNNER_UP, SEGMENT_WINNER_OOS_OK],
+  selectionPolicy: segmentPolicy("VALIDATION")
+});
+
+ok(
+  oosFailTrainOutcome.ok,
+  "FIX 1 (H2): select-by-rank TRAIN с OOS-отказом победителя — запись действительна (не stage=invariant)"
+);
+ok(
+  oosFailValidationOutcome.ok,
+  "FIX 1 (H2): select-by-rank VALIDATION с OOS-отказом победителя — запись действительна (не stage=invariant)"
+);
+ok(
+  oosOkTrainOutcome.ok && oosOkValidationOutcome.ok,
+  "FIX 1 (H2): положительный контроль — эквивалентный вариант без OOS-отказа валиден"
+);
+
+if (
+  oosFailTrainOutcome.ok &&
+  oosOkTrainOutcome.ok &&
+  oosFailValidationOutcome.ok &&
+  oosOkValidationOutcome.ok
+) {
+  const failTrainRecord = oosFailTrainOutcome.record;
+  const okTrainRecord = oosOkTrainOutcome.record;
+  const failValidationRecord = oosFailValidationOutcome.record;
+  const okValidationRecord = oosOkValidationOutcome.record;
+
+  const failWinner = failTrainRecord.variants.find(
+    (item) => item.label === "segment-b"
+  );
+  const failTrainRow = buildComparison(failTrainRecord).rows.find(
+    (row) => row.label === "segment-b"
+  );
+  const failTrainText = formatExperimentReport(buildComparison(failTrainRecord));
+
+  ok(
+    failTrainRecord.selection.selectedLabel === "segment-b" &&
+      failTrainRecord.selection.selectedConfigurationId ===
+        failWinner?.configurationId &&
+      failTrainRecord.selection.selectedSelectionKey ===
+        failWinner?.selectionKey,
+    "FIX 1 (H2): победитель TRAIN — OOS-падающий вариант, выбранный по своему TRAIN-сегменту"
+  );
+  ok(
+    canonicalJson(selectionSnapshot(failTrainRecord)) ===
+      canonicalJson(selectionSnapshot(okTrainRecord)),
+    "FIX 1 (H2): победитель/порядок/входы тай-брейка/rationale/свидетельства не изменились от OOS-отказа"
+  );
+  ok(
+    canonicalJson(selectionSnapshot(failValidationRecord)) ===
+      canonicalJson(selectionSnapshot(okValidationRecord)),
+    "FIX 1 (H2): то же для политики VALIDATION"
+  );
+  ok(
+    failTrainRecord.selection.rationale === okTrainRecord.selection.rationale &&
+      failValidationRecord.selection.rationale ===
+        okValidationRecord.selection.rationale,
+    "FIX 1 (H2): rationale выбора не зависит от OOS-отказа"
+  );
+  ok(
+    canonicalJson(failTrainRecord.counts) ===
+      canonicalJson({ declared: 2, evaluated: 1, rejected: 1 }),
+    "FIX 1 (H2): сводные счётчики честно отражают OOS-отказ (1 оценён, 1 отклонён)"
+  );
+  ok(
+    failWinner !== undefined &&
+      failWinner.status === "rejected" &&
+      failWinner.rejection?.segment === "OOS" &&
+      failWinner.rejection.errors.length > 0,
+    "FIX 1 (H2): сводный статус победителя остаётся rejected с причиной в OOS-сегменте (происхождение)"
+  );
+  ok(
+    failWinner?.segments?.TRAIN.status === "ok" &&
+      failWinner?.segments?.VALIDATION.status === "ok" &&
+      failWinner?.segments?.OOS.status === "failed" &&
+      failWinner?.segments?.OOS.result === null &&
+      failWinner?.segments?.OOS.report === null,
+    "FIX 1 (H2): сегмент-локальные статусы видны в записи (TRAIN/VALIDATION ok, OOS failed)"
+  );
+  ok(
+    failWinner?.segments?.OOS.errors.some((error) =>
+      error.includes("H2: OOS-отказ")
+    ) === true,
+    "FIX 1 (H2): текст ошибки OOS-сегмента сохранён в записи"
+  );
+  ok(
+    failTrainRow !== undefined &&
+      failTrainRow.status === "rejected" &&
+      failTrainRow.oos === null &&
+      failTrainRow.train !== null &&
+      failTrainRow.validation !== null,
+    "FIX 1 (H2): отчёт сравнения показывает OOS-отказ, не теряя TRAIN/VALIDATION"
+  );
+  ok(
+    failTrainText.includes("H2: OOS-отказ") &&
+      failTrainText.includes("segment-b"),
+    "FIX 1 (H2): форматированный отчёт сохраняет видимость OOS-отказа"
+  );
+  ok(
+    assertOosIsolation(failTrainRecord).ok &&
+      experimentInvariantErrors(failTrainRecord).length === 0,
+    "FIX 1 (H2): запись с OOS-отказом победителя проходит цепочку инвариантов"
+  );
+
+  /* смена ТОЛЬКО причины/текста OOS-отказа */
+  const otherReasonVariant = segmentLocalVariant({
+    label: "segment-b",
+    trainIndexes: [10, 30],
+    validationIndexes: [80, 84],
+    oosFailure: "H2: OOS-отказ (изменённый текст)"
+  });
+  const otherReasonOutcome = runExperiment({
+    bars: BARS,
+    subject: SUBJECT,
+    variants: [SEGMENT_RUNNER_UP, otherReasonVariant],
+    selectionPolicy: segmentPolicy("TRAIN")
+  });
+
+  ok(
+    otherReasonOutcome.ok &&
+      canonicalJson(selectionSnapshot(otherReasonOutcome.record)) ===
+        canonicalJson(selectionSnapshot(failTrainRecord)),
+    "FIX 1 (H2): смена ТОЛЬКО причины OOS-отказа не меняет выбор/порядок/rationale/свидетельства"
+  );
+  ok(
+    otherReasonOutcome.ok &&
+      canonicalJson(otherReasonOutcome.record.variants[1].segments?.OOS.errors) !==
+        canonicalJson(failTrainRecord.variants[1].segments?.OOS.errors),
+    "FIX 1 (H2): негативный контроль — смена текста OOS-отказа действительно применена"
+  );
+
+  /* перестановка объявления */
+  const permutedOutcome = runExperiment({
+    bars: BARS,
+    subject: SUBJECT,
+    variants: [SEGMENT_WINNER, SEGMENT_RUNNER_UP],
+    selectionPolicy: segmentPolicy("TRAIN")
+  });
+
+  ok(
+    permutedOutcome.ok &&
+      permutedOutcome.record.selection.selectedLabel === "segment-b" &&
+      (permutedOutcome.record.selection.ranking?.order ?? [])
+        .map((entry) => entry.label)
+        .join(">") === "segment-b>segment-a" &&
+      permutedOutcome.record.selection.rationale ===
+        failTrainRecord.selection.rationale,
+    "FIX 1 (H2): перестановка объявления не меняет победителя/порядок/rationale"
+  );
+}
+
+/* Точное равенство критериев: победитель определяется ВЫБОРНЫМ КЛЮЧОМ
+   (tie-x лексикографически раньше tie-a), а не сводным статусом. */
+
+const TIE_WINNER = segmentLocalVariant({
+  label: "tie-x",
+  trainIndexes: [10],
+  validationIndexes: [80],
+  oosFailure: "H2: OOS-отказ (точное равенство)"
+});
+const TIE_WINNER_OOS_OK = segmentLocalVariant({
+  label: "tie-x",
+  trainIndexes: [10],
+  validationIndexes: [80],
+  oosFailure: null
+});
+const TIE_RUNNER = segmentLocalVariant({
+  label: "tie-a",
+  trainIndexes: [10],
+  validationIndexes: [80],
+  oosFailure: null
+});
+
+const tieFailOutcome = runExperiment({
+  bars: BARS,
+  subject: SUBJECT,
+  variants: [TIE_RUNNER, TIE_WINNER],
+  selectionPolicy: segmentPolicy("TRAIN")
+});
+const tieOkOutcome = runExperiment({
+  bars: BARS,
+  subject: SUBJECT,
+  variants: [TIE_RUNNER, TIE_WINNER_OOS_OK],
+  selectionPolicy: segmentPolicy("TRAIN")
+});
+
+ok(
+  tieFailOutcome.ok &&
+    tieOkOutcome.ok &&
+    tieFailOutcome.record.selection.selectedLabel === "tie-x" &&
+    tieFailOutcome.record.selection.ranking?.order[0]?.label === "tie-x" &&
+    tieFailOutcome.record.selection.ranking?.order[1]?.tieBreakApplied === true,
+  "FIX 1 (H2): при ТОЧНОМ равенстве критериев победитель определён выборным ключом и не зависит от OOS-отказа"
+);
+ok(
+  tieFailOutcome.ok &&
+    tieOkOutcome.ok &&
+    canonicalJson(selectionSnapshot(tieFailOutcome.record)) ===
+      canonicalJson(selectionSnapshot(tieOkOutcome.record)),
+  "FIX 1 (H2): точное равенство — снапшот выбора совпадает с OOS-успешным эквивалентом"
+);
+
+/* ------------------------------------------------------------------ */
+/* HARDENING #2, FIX 2 — end-to-end пин проводки цепочки инвариантов    */
+/* ------------------------------------------------------------------ */
+
+const WIRING_PROBE_MARKER =
+  "hardening #2: шов проводки цепочки инвариантов (end-to-end)";
+
+/** Шов исполняется ВНУТРИ цепочки: если runExperiment её не потребляет — маркер не всплывёт. */
+const wiredOutcome = (() => {
+  setExperimentInvariantProbe(() => [WIRING_PROBE_MARKER]);
+
+  try {
+    return runExperiment(INPUT_BASE);
+  } finally {
+    setExperimentInvariantProbe(null);
+  }
+})();
+
+ok(
+  !wiredOutcome.ok &&
+    wiredOutcome.stage === "invariant" &&
+    wiredOutcome.errors.includes(WIRING_PROBE_MARKER),
+  "FIX 2 (H2): runExperiment ПОТРЕБЛЯЕТ цепочку инвариантов — шов на её выходе меняет исход (end-to-end)"
+);
+
+const additiveOutcome = (() => {
+  setExperimentInvariantProbe(() => []);
+
+  try {
+    return runExperiment(INPUT_BASE);
+  } finally {
+    setExperimentInvariantProbe(null);
+  }
+})();
+
+ok(
+  additiveOutcome.ok,
+  "FIX 2 (H2): аддитивный шов с пустым результатом не отвергает подлинную запись"
+);
+
+const additiveAddsNotReplaces = (() => {
+  setExperimentInvariantProbe(() => [WIRING_PROBE_MARKER]);
+
+  try {
+    return (
+      experimentInvariantErrors(emptyLimitationsRecord).includes(
+        WIRING_PROBE_MARKER
+      ) &&
+      experimentInvariantErrors(emptyLimitationsRecord).some((error) =>
+        error.includes("limitations")
+      )
+    );
+  } finally {
+    setExperimentInvariantProbe(null);
+  }
+})();
+
+ok(
+  additiveAddsNotReplaces,
+  "FIX 2 (H2): шов ДОБАВЛЯЕТ ошибку, но не заменяет/не отключает существующие проверки"
+);
+
+ok(
+  experimentInvariantErrors(RECORD).length === 0 && runExperiment(INPUT_BASE).ok,
+  "FIX 2 (H2): после снятия шва поведение восстановлено (positive control)"
 );
 
 /* ------------------------------------------------------------------ */

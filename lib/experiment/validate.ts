@@ -624,6 +624,14 @@ export function validateSubmittedSegmentResult(
  * Проверка того, что OOS не участвовал в выборе/ранжировании:
  * флаги, стадия и ВОСПРОИЗВОДИМОСТЬ записанного порядка из
  * TRAIN/VALIDATION-свидетельств.
+ *
+ * HARDENING #2 (segment-local selection validation): допустимость выбора
+ * проверяется по СЕГМЕНТУ СТАДИИ ВЫБОРА (TRAIN или VALIDATION), а не по
+ * сводному статусу варианта. Сводный статус — это происхождение (отказ
+ * любого сегмента честно виден), но он не может задним числом отменить
+ * выбор, сделанный без чтения OOS: отказ OOS-сегмента у победителя
+ * TRAIN/VALIDATION-ранжирования оставляет запись действительной, а сам
+ * отказ виден в `variants[i].status/rejection/segments.OOS`.
  */
 export function assertOosIsolation(record: ExperimentRecord): ValidationReport {
   const errors: string[] = [];
@@ -664,19 +672,60 @@ export function assertOosIsolation(record: ExperimentRecord): ValidationReport {
     );
   }
 
-  // Выбор (если он выполнен) обязан указывать на вариант, присутствующий
-  // в отчёте: «победитель из ниоткуда» невозможен.
+  // Выбор (если он выполнен) обязан (а) указывать на вариант ИЗ ЗАПИСИ,
+  // (б) совпадать с победителем СВОЕГО ранжирования и (в) опираться на
+  // ОЦЕНЁННЫЙ сегмент СВОЕЙ стадии выбора (TRAIN или VALIDATION). Сводный
+  // статус варианта здесь НЕ участвует: он может остаться `rejected` из-за
+  // отказа OOS-сегмента (или последующей стадии), но это происхождение, а
+  // не основание отменить выбор, сделанный до OOS (пункт 22в контракта).
   if (selection.performed && selection.selectedConfigurationId !== null) {
-    const found = record.variants.some(
+    const selected = record.variants.find(
       (variant) =>
-        variant.configurationId === selection.selectedConfigurationId &&
-        variant.status === "evaluated"
+        variant.configurationId === selection.selectedConfigurationId
     );
+    const ranking = selection.ranking;
 
-    if (!found) {
+    if (selected === undefined) {
       errors.push(
-        "selection.selectedConfigurationId не соответствует ни одному оценённому варианту отчёта"
+        "selection.selectedConfigurationId отсутствует в записи эксперимента — «победитель из ниоткуда» невозможен"
       );
+    }
+
+    const winner =
+      ranking === null || ranking.order.length === 0 ? null : ranking.order[0];
+
+    if (ranking === null || winner === null) {
+      errors.push(
+        "selection.performed=true при отсутствии ранжирования — выбор не из чего"
+      );
+    } else {
+      if (
+        selected !== undefined &&
+        winner.configurationId !== selected.configurationId
+      ) {
+        errors.push(
+          "selection.selectedConfigurationId не совпадает с победителем ранжирования своей стадии"
+        );
+      }
+
+      if (selection.policy.kind !== "none" && ranking.stage !== selection.policy.stage) {
+        errors.push(
+          "ranking.stage не совпадает со стадией политики выбора — выбор мог опереться не на тот сегмент"
+        );
+      }
+    }
+
+    if (ranking !== null && selected !== undefined) {
+      const segmentStatus =
+        selected.segments === null
+          ? null
+          : selected.segments[ranking.stage].status;
+
+      if (segmentStatus !== "ok") {
+        errors.push(
+          `selection.selectedConfigurationId: сегмент ${ranking.stage} победителя не оценён (status=${String(segmentStatus)}) — выбор обязан опираться на оценённый сегмент своей стадии, а не на сводный статус варианта`
+        );
+      }
     }
   }
 
