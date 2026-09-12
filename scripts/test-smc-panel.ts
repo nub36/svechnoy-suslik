@@ -61,6 +61,7 @@ import {
   SmartMoneyPanel,
   buildSmcPanelViewModel,
   buildSmcRequestUrl,
+  createSmcCommitter,
   createSmcControllerState,
   formatSmcScore,
   formatSmcUtcMs,
@@ -73,9 +74,14 @@ import {
   smcHttpErrorMessage,
   smcMarketStatusLabel,
   toSmcWhyRows,
+  type SmcCommitHost,
   type SmcControllerState,
+  type SmcEvent,
+  type SmcExchangeRow,
   type SmcPanelState,
   type SmcPanelViewModel,
+  type SmcTransition,
+  type SmcWhyRow,
 } from "../components/chart/SmartMoneyPanel";
 
 /**
@@ -440,6 +446,23 @@ function visibleText(markup: string): string {
     .trim();
 }
 
+/**
+ * Разметка, как её видит пользователь при ВСЕХ закрытых <details>:
+ * содержимое каждого <details> вырезается, но <summary> (кликабельный
+ * заголовок) остаётся видимым. Вложенных <details> в панели нет —
+ * это проверяется отдельно (self-check).
+ */
+function collapsedMarkup(markup: string): string {
+  const stripped = markup.replace(/<details\b[^>]*>([\s\S]*?)<\/details>/g, (_all, inner: string) => {
+    const summary = /<summary\b[^>]*>([\s\S]*?)<\/summary>/.exec(inner);
+    return summary === null ? "" : `<summary>${summary[1]}</summary>`;
+  });
+  if (/<details|<\/details>/.test(stripped)) {
+    throw new Error("collapsedMarkup: в разметке есть вложенные <details> — упростите структуру");
+  }
+  return stripped;
+}
+
 /** Текст verdict-бейджа (первый freshBadge с точным классом). */
 function verdictBadge(markup: string): string | null {
   const match = /class="freshBadge"[^>]*>([^<]*)</.exec(markup);
@@ -600,10 +623,34 @@ async function main(): Promise<void> {
       /dispatchSmc\(\{ type: "unmount" \}\)/.test(chartCode),
       "chart: unmount идёт через ту же машину состояний (abort + панель гаснет)"
     );
+    // Commit-гейт: no-op переход не пишет React state, а после unmount
+    // React-записи запрещены полностью (abort при этом выполняется).
     ok(
-      /if \(!transition\.changed\)/.test(smcCode),
-      "chart-smc: no-op переход не пишет state (устаревший ответ/aborted/unmount)"
+      /if \(!transition\.changed\)/.test(panelCode),
+      "commit-гейт: no-op переход не пишет state (устаревший ответ/aborted)"
     );
+    ok(
+      /if \(!mounted\)/.test(panelCode),
+      "commit-гейт: после unmount React-setState не вызывается"
+    );
+    ok(/createSmcCommitter\(/.test(smcCode), "chart-smc: переходы применяются через commit-гейт");
+    ok(/smcCommitter\.commit\(/.test(smcCode), "chart-smc: commit-гейт используется для ответа/ошибки/отмены");
+    ok(/smcCommitter\.getState\(\)/.test(smcCode), "chart-smc: reduce читает состояние из гейта (ref-state)");
+
+    // Порядок в cleanup критичен: сначала запрет React-записей, затем
+    // unmount-переход (тогда abort выполняется без setState).
+    const cleanup = extractBetween(
+      smcSectionRaw,
+      "return () => {\n      smcCommitter.markUnmounted();",
+      "}, [smcCommitter, dispatchSmc]);",
+      "cleanup lifecycle-эффекта SMC"
+    );
+    ok(
+      cleanup.indexOf("markUnmounted()") < cleanup.indexOf('dispatchSmc({ type: "unmount" })'),
+      "chart-smc: markUnmounted() вызывается ДО dispatch unmount (нет setState из cleanup)"
+    );
+    ok(/smcCommitter\.markMounted\(\)/.test(smcCode), "chart-smc: при mount React-записи разрешаются (StrictMode-safe)");
+
     ok(/buildSmcPanelViewModel\(smcPanel\.projection, exchange\)/.test(chartCode), "(13) chart: view-model знает ВЫБРАННУЮ биржу свечей");
   }
 
@@ -1405,6 +1452,159 @@ async function main(): Promise<void> {
   }
 
   // ================================================================
+  // 8b. (UX-FIX) Commit-гейт: unmount = abort БЕЗ лишнего setState
+  // ================================================================
+  console.log("\n=== 8b. Commit-гейт: abort на unmount без setState (lifecycle-фикс) ===");
+  {
+    /** Записывающий host: виден каждый setState и каждый abort. */
+    function makeHost(): {
+      calls: string[];
+      host: SmcCommitHost;
+      enabledCalls: number;
+      panelCalls: number;
+      abortCalls: number;
+    } {
+      const calls: string[] = [];
+      const host: SmcCommitHost = {
+        setEnabled(enabled: boolean): void {
+          calls.push(`setEnabled(${String(enabled)})`);
+        },
+        setPanel(panel: SmcPanelState): void {
+          calls.push(`setPanel(${panel.status})`);
+        },
+        abortActive(): void {
+          calls.push("abortActive");
+        },
+      };
+      return {
+        calls,
+        host,
+        get enabledCalls() {
+          return calls.filter((c) => c.startsWith("setEnabled")).length;
+        },
+        get panelCalls() {
+          return calls.filter((c) => c.startsWith("setPanel")).length;
+        },
+        get abortCalls() {
+          return calls.filter((c) => c === "abortActive").length;
+        },
+      };
+    }
+
+    /** dispatch через гейт — ровно так, как это делает CandleChart. */
+    function dispatch(committer: { getState(): SmcControllerState; commit(t: SmcTransition): void }, event: SmcEvent): SmcTransition {
+      const transition = reduceSmcState(committer.getState(), event);
+      committer.commit(transition);
+      return transition;
+    }
+
+    // ---- mounted: обычная работа (requestId/race-гарантии сохранены) ----
+    {
+      const rec = makeHost();
+      const committer = createSmcCommitter(createSmcControllerState(), rec.host);
+      ok(committer.isMounted(), "гейт: после создания компонент считается смонтированным");
+
+      const on = dispatch(committer, { type: "toggle", enabled: true, symbol: "BTC", timeframe: "1h" });
+      eq(on.fetch?.requestId, 1, "гейт: toggle → запрос requestId 1");
+      eq(rec.abortCalls, 1, "гейт: новый запрос всегда отменяет предыдущий (host.abortActive)");
+      eq(rec.enabledCalls, 1, "гейт: mounted — setEnabled вызван");
+      eq(rec.panelCalls, 1, "гейт: mounted — setPanel вызван");
+      eq(
+        rec.calls,
+        ["abortActive", "setEnabled(true)", "setPanel(loading)"],
+        "гейт: сначала отмена, затем записи React state"
+      );
+
+      // Ответ приходит в тот же гейт — state и React согласованы.
+      dispatch(committer, { type: "http-response", requestId: 1, ok: true, httpStatus: 200, body: pLong });
+      eq(committer.getState().panel.status, "ready", "гейт: актуальный ответ принят");
+      eq(rec.calls[rec.calls.length - 1], "setPanel(ready)", "гейт: ready записан в React state");
+
+      // Ответ чужого requestId (устаревший запрос) — no-op: ни abort, ни setState.
+      const before = rec.calls.length;
+      const stale = dispatch(committer, { type: "http-response", requestId: 999, ok: true, httpStatus: 200, body: pShort });
+      ok(!stale.changed, "гейт: устаревший ответ — no-op переход");
+      eq(rec.calls.length, before, "гейт: no-op переход не пишет React state");
+      eq(committer.getState().panel.status, "ready", "гейт: устаревший ответ не перезаписал актуальный ready");
+
+      // Смена параметров при активном запросе — abort старого + setState.
+      const params = dispatch(committer, { type: "params", symbol: "BTC", timeframe: "4h" });
+      ok(params.abortPrevious, "гейт: смена timeframe отменяет предыдущий запрос");
+      eq(params.fetch?.requestId, 2, "гейт: requestId инкрементируется (race-идентичность сохранена)");
+      eq(rec.abortCalls, 2, "гейт: активный запрос отменён через host.abortActive");
+    }
+
+    // ---- UNMOUNT: abort выполняется, setState размонтированному компоненту нет ----
+    {
+      const rec = makeHost();
+      const committer = createSmcCommitter(createSmcControllerState(), rec.host);
+
+      // In-flight запрос (как будто пользователь включил Smart Money).
+      dispatch(committer, { type: "toggle", enabled: true, symbol: "BTC", timeframe: "1h" });
+      eq(committer.getState().activeRequestId, 1, "гейт: перед unmount активен requestId 1");
+
+      // Ровно то, что делает cleanup эффекта CandleChart.
+      rec.calls.length = 0;
+      committer.markUnmounted();
+      ok(!committer.isMounted(), "гейт: markUnmounted запрещает React-записи");
+      dispatch(committer, { type: "unmount" });
+
+      eq(rec.abortCalls, 1, "unmount: активный SMC-запрос отменён (abortActive вызван)");
+      eq(rec.enabledCalls, 0, "unmount: setEnabled НЕ вызывается — лишнего setState нет");
+      eq(rec.panelCalls, 0, "unmount: setPanel НЕ вызывается — лишнего setState нет");
+      eq(rec.calls, ["abortActive"], "unmount: единственное действие cleanup — отмена запроса");
+
+      // Ref-state всё равно погашен: поздний ответ не проходит гарды.
+      ok(!committer.getState().enabled, "unmount: ref-state выключен (поздний ответ не пройдёт enabled-гард)");
+      eq(committer.getState().panel, SMC_PANEL_OFF, "unmount: ref-state панель скрыта");
+      eq(committer.getState().activeRequestId, 1, "unmount: identity запроса сохранена — поздний ответ отсекается enabled-гардом");
+
+      // Поздний async-ответ после unmount: ничего не меняет, setState нет.
+      const late = dispatch(committer, { type: "http-response", requestId: 1, ok: true, httpStatus: 200, body: pLong });
+      ok(!late.changed, "unmount: поздний ответ — no-op (устаревший ответ ничего не меняет)");
+      eq(rec.calls, ["abortActive"], "unmount: поздний ответ не добавил ни setState, ни abort");
+      eq(committer.getState().panel, SMC_PANEL_OFF, "unmount: панель осталась скрытой после позднего ответа");
+
+      // Поздняя ошибка/отмена — тоже тишина.
+      dispatch(committer, { type: "network-error", requestId: 1, message: SMC_NETWORK_ERROR_MESSAGE });
+      dispatch(committer, { type: "aborted", requestId: 1 });
+      eq(rec.calls, ["abortActive"], "unmount: поздние error/aborted не пишут React state");
+    }
+
+    // ---- Dev StrictMode: повторный mount снова разрешает записи ----
+    {
+      const rec = makeHost();
+      const committer = createSmcCommitter(createSmcControllerState(), rec.host);
+
+      committer.markUnmounted();
+      dispatch(committer, { type: "unmount" });
+      eq(rec.enabledCalls + rec.panelCalls, 0, "StrictMode: первый cleanup без setState");
+      eq(rec.abortCalls, 1, "StrictMode: cleanup всё равно отменяет активный запрос");
+
+      rec.calls.length = 0;
+      committer.markMounted();
+      ok(committer.isMounted(), "StrictMode: remount разрешает React-записи");
+      dispatch(committer, { type: "toggle", enabled: true, symbol: "BTC", timeframe: "1h" });
+      eq(
+        rec.calls,
+        ["abortActive", "setEnabled(true)", "setPanel(loading)"],
+        "StrictMode: после remount панель снова работает"
+      );
+    }
+
+    // ---- Статика: React-сеттеры SMC вызываются ТОЛЬКО через гейт ----
+    ok(!/setSmcEnabled\s*\(/.test(smcCode), "chart-smc: setSmcEnabled не вызывается напрямую (только через гейт)");
+    ok(!/setSmcPanel\s*\(/.test(smcCode), "chart-smc: setSmcPanel не вызывается напрямую (только через гейт)");
+    ok(/setEnabled: setSmcEnabled/.test(smcCode), "chart-smc: гейт получает стабильный setEnabled");
+    ok(/setPanel: setSmcPanel/.test(smcCode), "chart-smc: гейт получает стабильный setPanel");
+    ok(/abortActive: \(\) => \{/.test(smcCode), "chart-smc: гейт получает отмену активного запроса");
+    ok(
+      !/smcControllerRef/.test(smcCode),
+      "chart-smc: ref-state больше не живёт отдельным ref — единственный источник в гейте"
+    );
+  }
+
+  // ================================================================
   // 9. (9)(10)(11)(12)(13)(15) Рендер панели
   // ================================================================
   console.log("\n=== 9. Рендер панели (react-dom/server, без новых зависимостей) ===");
@@ -1429,13 +1629,15 @@ async function main(): Promise<void> {
     eq(renderPanel(SMC_PANEL_OFF, null), "", "(7) OFF: панель не рендерится (скрыта)");
 
     // (9/A) loading.
-    const loadingText = visibleText(renderPanel(loading, null));
+    const loadingMarkup = renderPanel(loading, null);
+    const loadingText = visibleText(loadingMarkup);
     ok(loadingText.includes("Смарт Мани"), "(9/A) loading: заголовок «Смарт Мани»");
     ok(loadingText.includes("Загрузка Smart Money"), "(9/A) loading: явная загрузка");
     ok(loadingText.includes("1 час"), "(9/A) loading: текущий timeframe подписан");
-    eq(verdictBadge(renderPanel(loading, null)), null, "(9/A) loading: вердикта ещё нет");
+    eq(verdictBadge(loadingMarkup), null, "(9/A) loading: вердикта ещё нет");
     ok(!loadingText.includes("LONG"), "(9/A) loading: LONG не показывается");
     ok(!loadingText.includes("NEUTRAL"), "(9/A) loading: NEUTRAL не показывается");
+    ok(!/<details/.test(loadingMarkup), "(UX) loading: скрытых разделов нет — только статус загрузки");
 
     // (9/B) HTTP error — изолирован от свечей.
     const errorMarkup = renderPanel(httpError, null);
@@ -1450,109 +1652,381 @@ async function main(): Promise<void> {
     ok(!errorText.includes("Нет оценки"), "(9/B) error не выдаётся за cannot-evaluate");
     ok(!errorText.includes("NEUTRAL"), "(9/B) error не выдаётся за NEUTRAL");
     ok(!errorText.includes("Почему"), "(9/B) error: WHY не выдумывается");
+    ok(!/<details/.test(errorMarkup), "(UX) error: «Технические детали» не выдумываются");
 
-    // (9/F)(11) LONG.
+    // ---------- view-models и разметка всех ready-fixture ----------
     const vmLong = buildSmcPanelViewModel(pLong, "BINANCE");
+    const vmShort = buildSmcPanelViewModel(pShort, "BINANCE");
+    const vmFive = buildSmcPanelViewModel(pFive, "BYBIT");
+    const vmMix = buildSmcPanelViewModel(pMix, "BINANCE");
+    const vmCannot = buildSmcPanelViewModel(pCannot, "BINANCE");
+    const vmNone = buildSmcPanelViewModel(pNone, "BINANCE");
+    const vmDayBingx = buildSmcPanelViewModel(pDay, "BINGX");
+
     const longMarkup = renderPanel(readyLong, vmLong);
+    const shortMarkup = renderPanel(readyShort, vmShort);
+    const fiveMarkup = renderPanel(readyFive, vmFive);
+    const mixMarkup = renderPanel(readyMix, vmMix);
+    const cannotMarkup = renderPanel(readyCannot, vmCannot);
+    const noneMarkup = renderPanel(readyNone, vmNone);
+    const dayMarkup = renderPanel(readyDay, vmDayBingx);
+
+    /** Текст default view: все <details> закрыты, <summary> видны. */
+    const defaultOf = (markup: string): string => visibleText(collapsedMarkup(markup));
+
+    /** Одна компактная строка биржи в списке (EXCHANGE · DIRECTION · LONG n · SHORT n). */
+    const rowLine = (row: SmcExchangeRow): string =>
+      `${row.exchange} · ${row.status === "evaluated" ? row.directionLabel : row.statusLabel}` +
+      ` · LONG ${formatSmcScore(row.longScore)} · SHORT ${formatSmcScore(row.shortScore)}`;
+
+    /** Точная разметка WHY-пункта: русский label + баллы, ничего больше. */
+    const whyItemMarkup = (reason: SmcWhyRow): string =>
+      `<li><span>${reason.label}</span><span class="muted"> · баллы LONG ${reason.longPoints},` +
+      ` SHORT ${reason.shortPoints} (максимум ${reason.maxPoints})</span></li>`;
+
+    // Технический блок: всегда перенесён в collapsed «Технические детали».
+    const TECHNICAL_TOKENS = [
+      "Рассчитано",
+      "Статус агрегации",
+      "Причина статуса",
+      "asOf движка",
+      "Отставание горизонта",
+      "Отфильтровано стратегией",
+    ] as const;
+
+    // ---------- (11)(UX) LONG: компактный default view ----------
+    const longDefault = defaultOf(longMarkup);
     const longText = visibleText(longMarkup);
+
     eq(verdictBadge(longMarkup), "LONG", "(11) LONG: бейдж LONG");
-    ok(longText.includes("Почему"), "(7) LONG: раздел «Почему»");
-    ok(longText.includes("биржа свечей на графике"), "(13) LONG: выбранная биржа помечена");
-    ok(longText.includes("баллы LONG 75"), "(11) LONG: баллы показаны как баллы");
-    ok(longText.includes("Баллы") || longText.includes("баллы"), "(15) баллы названы баллами");
-    ok(longText.includes("BTCUSDT"), "LONG: актив показан");
-    ok(longText.includes("1 час"), "LONG: timeframe показан русским label");
-    ok(longText.includes("Свечи на графике — одна биржа: BINANCE"), "(13) LONG: подписан скоуп свечей");
-    ok(longText.includes("агрегированная оценка актива"), "(13) LONG: подписан мультибиржевой скоуп SMC");
+    ok(longDefault.includes("Смарт Мани"), "(1/UX) default: заголовок «Смарт Мани»");
+    ok(longDefault.includes("BTCUSDT · 1 час"), "(UX) default: актив + timeframe одной строкой");
+    ok(longDefault.includes(vmLong.verdictNote), "(11/UX) default: короткая русская note вердикта");
     ok(
-      longText.includes("Результат выбранной биржи НЕ является агрегатом"),
+      longDefault.includes(
+        `Подтверждение ${vmLong.aggregate.confirmation} · порог minExchanges ${vmLong.aggregate.minExchanges}`
+      ),
+      "(14/UX) default: подтверждение — только из DTO (confirmation + minExchanges)"
+    );
+    ok(
+      longDefault.includes(
+        `Оценено ${vmLong.aggregate.evaluatedCount} / участников ${vmLong.aggregate.participantCount}`
+      ),
+      "(14/UX) default: оценено/участников — из DTO"
+    );
+    ok(
+      longDefault.includes(`Общий горизонт: ${vmLong.aggregate.horizonLabel}`),
+      "(14/UX) default: компактная строка общего горизонта"
+    );
+    ok(longDefault.includes("Свечи на графике — одна биржа: BINANCE"), "(13) LONG: подписан скоуп свечей");
+    ok(longDefault.includes("агрегированная оценка актива"), "(13) LONG: подписан мультибиржевой скоуп SMC");
+    ok(
+      longDefault.includes("Результат выбранной биржи НЕ является агрегатом"),
       "(13) LONG: явное разделение выбранной биржи и агрегата"
     );
-    ok(longText.includes("Результаты по биржам (1)"), "(14) LONG: число бирж из DTO");
+    ok(
+      longDefault.includes("Результаты по биржам (1) · баллы стратегии"),
+      "(14/15) LONG: число бирж из DTO, баллы названы баллами"
+    );
+    ok(longDefault.includes("биржа свечей на графике"), "(13) LONG: выбранная биржа помечена");
+    ok(vmLong.refusalSummary === null, "(UX) LONG: у успешной оценки «причины отказа» нет");
+    ok(!longDefault.includes("Причина:"), "(UX) LONG: блок причины отказа не показывается");
 
-    // (7) WHY: label/points/value из DTO, ничего не добавлено.
+    // Компактный список бирж: ОДНА строка на биржу, без многословия.
+    ok(longDefault.includes(rowLine(vmLong.exchanges[0])), "(UX) LONG: компактная строка «EXCHANGE · DIRECTION · LONG n · SHORT n»");
+    ok(
+      !longDefault.includes("направление LONG · баллы LONG"),
+      "(UX) LONG: прежняя многословная строка биржи убрана из default view"
+    );
+    eq(
+      (longDefault.match(/LONG 75/g) ?? []).length,
+      1,
+      "(UX) LONG: баллы биржи показаны в default view один раз (без дублирования)"
+    );
+    ok(
+      (vmLong.exchanges[0].longScore ?? 0) > (vmLong.exchanges[0].shortScore ?? 0),
+      "(11) LONG: семантика не изменилась — баллы LONG больше баллов SHORT"
+    );
+
+    // (7/UX) WHY — за native <details><summary>Почему</summary>, закрыт.
+    ok(/<details><summary[^>]*>Почему<\/summary>/.test(longMarkup), "(UX) «Почему» — native details/summary (без новой зависимости)");
+    ok(longDefault.includes("Почему"), "(7/UX) default: видно кликабельное «Почему»");
+    ok(!/баллы LONG \d+, SHORT \d+ \(максимум/.test(longDefault), "(UX) default: WHY-баллы скрыты до действия пользователя");
+
+    // (7) WHY после раскрытия: label + баллы из DTO, ничего не добавлено.
     for (const reason of pLong.overlays[0].reasons) {
-      ok(longText.includes(reason.label), `(7) WHY: label ${reason.code} показан`);
+      ok(!longDefault.includes(reason.label), `(UX) default: WHY label ${reason.code} скрыт`);
+      ok(longText.includes(reason.label), `(7) WHY: label ${reason.code} показан после раскрытия`);
       ok(
         longText.includes(`баллы LONG ${reason.longPoints}, SHORT ${reason.shortPoints} (максимум ${reason.maxPoints})`),
         `(7) WHY: баллы ${reason.code} показаны из DTO`
       );
+      ok(longMarkup.includes(whyItemMarkup(vmLong.exchanges[0].why.find((r) => r.code === reason.code)!)), `(UX) WHY ${reason.code}: пункт = label + баллы`);
+      if (!reason.label.includes(reason.code)) {
+        ok(!longMarkup.includes(reason.code), `(UX) internal reason.code ${reason.code} не показывается пользователю`);
+      }
       if (reason.value !== null) {
-        ok(longText.includes(reason.value), `(7) WHY: value ${reason.code} показан`);
+        ok(!longMarkup.includes(reason.value), `(UX) raw value ${reason.code} (${reason.value}) не показывается как текст`);
+      }
+      for (const factId of reason.factIds) {
+        ok(!longMarkup.includes(factId), `(8-P1D) factId ${reason.code} не рендерится (остался в view-model)`);
       }
     }
     ok(!longText.includes("factId"), "(8-P1D) factIds не показываются пользователю (они для P1-D)");
+    ok(!longText.includes("SMC1"), "(UX) deterministic-ключи SMC1|… не видны пользователю");
 
-    // (12) SHORT.
-    const vmShort = buildSmcPanelViewModel(pShort, "BINANCE");
-    eq(verdictBadge(renderPanel(readyShort, vmShort)), "SHORT", "(12) SHORT: бейдж SHORT");
-    ok(visibleText(renderPanel(readyShort, vmShort)).includes("баллы SHORT 75"), "(12) SHORT: баллы из DTO");
+    // (UX) Технические детали: закрыты, но ничего не удалено из модели.
+    ok(/<details[^>]*><summary[^>]*>Технические детали<\/summary>/.test(longMarkup), "(UX) «Технические детали» — native details/summary");
+    ok(longDefault.includes("Технические детали"), "(UX) default: видно кликабельное «Технические детали»");
+    for (const token of TECHNICAL_TOKENS) {
+      ok(!longDefault.includes(token), `(UX) default: технический блок «${token}» скрыт`);
+      ok(longText.includes(token), `(UX) «${token}» сохранён в технических деталях`);
+    }
+    ok(!longDefault.includes(vmLong.aggregate.statusReason), "(UX) default: полный statusReason скрыт");
+    ok(longText.includes(vmLong.aggregate.statusReason), "(UX) полный statusReason сохранён в технических деталях");
+    ok(!longDefault.includes("relative lag"), "(UX) default: технический lag-текст не доминирует");
+    ok(!longDefault.includes("absolute lag"), "(UX) default: технический lag-текст не доминирует");
+    ok(
+      longText.includes(
+        `Голоса бирж: LONG ${vmLong.aggregate.longVotes} · SHORT ${vmLong.aggregate.shortVotes} · NEUTRAL ${vmLong.aggregate.neutralVotes}`
+      ),
+      "(13) голоса бирж — в технических деталях"
+    );
 
-    // (9/D-E) evaluated NEUTRAL.
-    const vmFive = buildSmcPanelViewModel(pFive, "BYBIT");
-    const fiveMarkup = renderPanel(readyFive, vmFive);
+    // ---------- (12) SHORT ----------
+    const shortDefault = defaultOf(shortMarkup);
+    const shortText = visibleText(shortMarkup);
+    eq(verdictBadge(shortMarkup), "SHORT", "(12) SHORT: бейдж SHORT");
+    ok(shortDefault.includes(rowLine(vmShort.exchanges[0])), "(12/UX) SHORT: баллы биржи из DTO в компактной строке");
+    ok(shortDefault.includes(vmShort.verdictNote), "(12/UX) SHORT: короткая русская note");
+    ok(
+      shortDefault.includes(`SHORT ${formatSmcScore(vmShort.exchanges[0].shortScore)}`),
+      "(12) SHORT: баллы из DTO"
+    );
+    ok(
+      (vmShort.exchanges[0].shortScore ?? 0) > (vmShort.exchanges[0].longScore ?? 0),
+      "(12) SHORT: семантика не изменилась — баллы SHORT больше баллов LONG"
+    );
+    const shortTop = pShort.overlays[0].reasons.reduce((a, b) => (b.shortPoints > a.shortPoints ? b : a));
+    ok(
+      shortText.includes(
+        `баллы LONG ${shortTop.longPoints}, SHORT ${shortTop.shortPoints} (максимум ${shortTop.maxPoints})`
+      ),
+      "(12) SHORT: WHY-баллы из DTO доступны после раскрытия"
+    );
+    ok(!shortDefault.includes(shortTop.label), "(UX) SHORT: WHY скрыт по умолчанию");
+
+    // ---------- (9/D-E) evaluated NEUTRAL ----------
+    const fiveDefault = defaultOf(fiveMarkup);
+    const fiveText = visibleText(fiveMarkup);
     eq(verdictBadge(fiveMarkup), "NEUTRAL", "(9/E) evaluated NEUTRAL: бейдж NEUTRAL");
-    ok(visibleText(fiveMarkup).includes("Оценка выполнена"), "(9/E) NEUTRAL: сказано, что оценка выполнена");
-    ok(!visibleText(fiveMarkup).includes("Нет оценки"), "(9/E) NEUTRAL не показан как cannot-evaluate");
-    ok(visibleText(fiveMarkup).includes("Результаты по биржам (5)"), "(14) NEUTRAL: 5 бирж из DTO");
-    ok(visibleText(fiveMarkup).includes("Голоса бирж"), "(13) NEUTRAL: голоса бирж показаны");
+    ok(fiveDefault.includes("Оценка выполнена"), "(9/E) NEUTRAL: сказано, что оценка выполнена");
+    ok(!fiveDefault.includes("Нет оценки"), "(9/E) NEUTRAL не показан как cannot-evaluate");
+    ok(fiveDefault.includes("Результаты по биржам (5) · баллы стратегии"), "(14) NEUTRAL: 5 бирж из DTO");
+    ok(fiveText.includes("Голоса бирж"), "(13) NEUTRAL: голоса бирж сохранены в технических деталях");
+    ok(!fiveDefault.includes("Голоса бирж"), "(UX) NEUTRAL: голоса не перегружают default view");
     for (const name of NAMES) {
-      ok(visibleText(fiveMarkup).includes(name), `(14) NEUTRAL: биржа ${name} перечислена из DTO`);
+      ok(fiveDefault.includes(name), `(14) NEUTRAL: биржа ${name} перечислена из DTO`);
     }
 
-    // (13) конфликт: агрегат NEUTRAL при LONG выбранной биржи.
-    const vmMix = buildSmcPanelViewModel(pMix, "BINANCE");
-    const mixMarkup = renderPanel(readyMix, vmMix);
+    // ---------- (13) конфликт: агрегат NEUTRAL при LONG выбранной биржи ----------
+    const mixDefault = defaultOf(mixMarkup);
+    const mixText = visibleText(mixMarkup);
     eq(verdictBadge(mixMarkup), "NEUTRAL", "(13) конфликт: бейдж агрегата NEUTRAL");
-    ok(visibleText(mixMarkup).includes("конфликт направлений"), "(13) конфликт: помечен");
-    ok(visibleText(mixMarkup).includes("биржа свечей на графике"), "(13) конфликт: выбранная биржа помечена отдельно");
-    ok(
-      visibleText(mixMarkup).includes("направление LONG · баллы LONG 75"),
-      "(13) конфликт: per-exchange LONG виден в списке бирж"
-    );
-    ok(visibleText(mixMarkup).includes("Результаты по биржам (2)"), "(14) конфликт: 2 биржи из DTO");
+    ok(mixText.includes("конфликт направлений"), "(13) конфликт: помечен (в технических деталях)");
+    ok(!mixDefault.includes("конфликт направлений"), "(UX) конфликт: техническая пометка не в default view");
+    ok(mixDefault.includes("биржа свечей на графике"), "(13) конфликт: выбранная биржа помечена отдельно");
+    const mixBinance = vmMix.exchanges.find((row) => row.exchange === "BINANCE");
+    ok(mixBinance !== undefined, "(13) конфликт: BINANCE есть в списке бирж");
+    ok(mixDefault.includes(rowLine(mixBinance!)), "(13/UX) конфликт: per-exchange LONG виден в компактной строке");
+    ok(mixDefault.includes("BINANCE · LONG ·"), "(13/UX) конфликт: направление LONG выбранной биржи видно сразу");
+    ok(mixDefault.includes("Результаты по биржам (2) · баллы стратегии"), "(14) конфликт: 2 биржи из DTO");
 
-    // (10/C) cannot-evaluate — НЕ NEUTRAL и не «успешный агрегат».
-    const vmCannot = buildSmcPanelViewModel(pCannot, "BINANCE");
-    const cannotMarkup = renderPanel(readyCannot, vmCannot);
+    // ---------- (10/C) cannot-evaluate — НЕ NEUTRAL и не «успешный агрегат» ----------
+    const cannotDefault = defaultOf(cannotMarkup);
     const cannotText = visibleText(cannotMarkup);
     eq(verdictBadge(cannotMarkup), "Нет оценки", "(10) cannot-evaluate: бейдж «Нет оценки»");
-    ok(cannotText.includes("Это не NEUTRAL"), "(10) cannot-evaluate: прямо сказано «не NEUTRAL»");
-    ok(!cannotText.includes("Оценка выполнена"), "(10) cannot-evaluate: не называется выполненной оценкой");
-    ok(cannotText.includes("INSUFFICIENT_HISTORY"), "(10/C) причина «недостаточно данных» показана");
-    ok(cannotText.includes("Агрегация запрещена gate"), "(10/C) отказ агрегации показан, не спрятан");
+    ok(cannotDefault.includes("Это не NEUTRAL"), "(10) cannot-evaluate: прямо сказано «не NEUTRAL»");
+    ok(!cannotDefault.includes("Оценка выполнена"), "(10) cannot-evaluate: не называется выполненной оценкой");
+    ok(vmCannot.refusalSummary !== null, "(UX) cannot-evaluate: краткая безопасная причина отказа есть");
+    ok(
+      cannotDefault.includes(`Причина: ${vmCannot.refusalSummary}`),
+      "(UX) cannot-evaluate: краткая причина отказа видна СРАЗУ — с NEUTRAL не спутать"
+    );
+    ok(cannotText.includes("INSUFFICIENT_HISTORY"), "(10/C) причина «недостаточно данных» сохранена в технических деталях");
+    ok(!cannotDefault.includes("INSUFFICIENT_HISTORY"), "(UX) default: технический код причины отказа не показывается");
+    ok(cannotText.includes("Агрегация запрещена gate"), "(10/C) отказ агрегации показан, не спрятан (в технических деталях)");
     ok(!cannotText.includes("Голоса бирж"), "(10/C) пустые голоса не показываются как успех");
     ok(!cannotText.includes("Подтверждение биржами"), "(10/C) пустое confirmation не показывается как успех");
-    ok(cannotText.includes("не оценён"), "(10/C) per-exchange статус «не оценён»");
-    ok(cannotText.includes("причин нет"), "(10/C) WHY честно пуст");
+    ok(!cannotDefault.includes("Подтверждение"), "(UX) cannot-evaluate: gate не разрешил агрегацию — confirmation не показан");
+    ok(cannotDefault.includes("не оценён"), "(10/C) per-exchange статус «не оценён»");
+    ok(cannotDefault.includes("причин нет"), "(10/C) WHY честно пуст");
+    ok(cannotDefault.includes(rowLine(vmCannot.exchanges[0])), "(UX) cannot-evaluate: компактная строка без баллов-цифр (прочерки)");
 
-    const vmNone = buildSmcPanelViewModel(pNone, "BINANCE");
-    const noneText = visibleText(renderPanel(readyNone, vmNone));
-    eq(verdictBadge(renderPanel(readyNone, vmNone)), "Нет оценки", "(C) no_participants: бейдж «Нет оценки»");
-    ok(noneText.includes("нет участников"), "(C) no_participants: причина показана");
-    ok(noneText.includes("Участников для оценки нет"), "(C) no_participants: пустой список бирж объяснён");
-    ok(!noneText.includes("Оценка выполнена"), "(C) no_participants не показан как выполненный NEUTRAL");
+    // ---------- (C) no_participants ----------
+    const noneDefault = defaultOf(noneMarkup);
+    const noneText = visibleText(noneMarkup);
+    eq(verdictBadge(noneMarkup), "Нет оценки", "(C) no_participants: бейдж «Нет оценки»");
+    ok(noneDefault.includes("нет участников"), "(C) no_participants: причина показана");
+    ok(noneDefault.includes("Участников для оценки нет"), "(C) no_participants: пустой список бирж объяснён");
+    ok(!noneDefault.includes("Оценка выполнена"), "(C) no_participants не показан как выполненный NEUTRAL");
     ok(!noneText.includes("Голоса бирж"), "(C) no_participants: пустые голоса не показываются");
 
-    // (6/14) 1d: исключённая биржа — из DTO.
-    const vmDayBingx = buildSmcPanelViewModel(pDay, "BINGX");
-    const dayText = visibleText(renderPanel(readyDay, vmDayBingx));
-    ok(dayText.includes("Результаты по биржам (4)"), "(14) 1d: 4 участника из DTO");
-    ok(dayText.includes("BINGX"), "(14) 1d: исключённая биржа названа (из DTO)");
-    ok(dayText.includes("исключена из Smart Money агрегации"), "(13) 1d: пояснение про исключение выбранной биржи");
-    ok(dayText.includes("1 день"), "(14) 1d: timeframe подписан");
+    // ---------- (6/14) 1d: исключённая биржа — из DTO ----------
+    const dayDefault = defaultOf(dayMarkup);
+    const dayText = visibleText(dayMarkup);
+    ok(
+      dayDefault.includes(`Результаты по биржам (${vmDayBingx.exchanges.length}) · баллы стратегии`),
+      "(14) 1d: 4 участника из DTO"
+    );
+    eq(
+      vmDayBingx.aggregate.participantCount,
+      pDay.aggregate.participantCount,
+      "(14) 1d: participantCount — из DTO без хардкода"
+    );
+    eq(vmDayBingx.aggregate.confirmation, pDay.aggregate.confirmation, "(14) 1d: confirmation — из DTO без хардкода");
+    ok(
+      dayDefault.includes(
+        `Оценено ${vmDayBingx.aggregate.evaluatedCount} / участников ${vmDayBingx.aggregate.participantCount}`
+      ),
+      "(14/UX) 1d: оценено/участников честно из DTO"
+    );
+    ok(
+      dayDefault.includes(
+        `Подтверждение ${vmDayBingx.aggregate.confirmation} · порог minExchanges ${vmDayBingx.aggregate.minExchanges}`
+      ),
+      "(14/UX) 1d: confirmation 0/4 показан сразу, только из DTO"
+    );
+    ok(
+      dayDefault.includes(`Исключены eligibility: ${vmDayBingx.aggregate.exchangeExcluded.join(", ")}`),
+      "(14/UX) 1d: исключённые eligibility биржи видны сразу (из DTO)"
+    );
+    ok(pDay.aggregate.exchangeExcluded.includes("BINGX"), "(14) 1d: BINGX исключён самим DTO (Option A внутри P1-A)");
+    ok(dayDefault.includes("BINGX"), "(14) 1d: исключённая биржа названа (из DTO)");
+    ok(dayDefault.includes("исключена из Smart Money агрегации"), "(13) 1d: пояснение про исключение выбранной биржи");
+    ok(dayDefault.includes("1 день"), "(14) 1d: timeframe подписан");
+    eq(
+      (dayMarkup.match(/<summary[^>]*>Почему<\/summary>/g) ?? []).length,
+      vmDayBingx.exchanges.length,
+      "(UX) 1d: «Почему» есть у каждой биржи и все закрыты"
+    );
+    for (const row of vmDayBingx.exchanges) {
+      ok(dayDefault.includes(rowLine(row)), `(UX) 1d: компактная строка ${row.exchange}`);
+    }
+
+    // Рендер не мутирует DTO (factIds/value остаются как пришли с сервера).
+    const dtoBeforeRender = JSON.stringify(pDay);
+    renderPanel(readyDay, vmDayBingx);
+    eq(JSON.stringify(pDay), dtoBeforeRender, "(17) рендер панели не мутирует DTO (factIds сохранены)");
+
+    // ---------- (UX) единые гарды progressive disclosure по всем fixture ----------
+    const readyCases = [
+      ["LONG", longMarkup, vmLong, pLong],
+      ["SHORT", shortMarkup, vmShort, pShort],
+      ["NEUTRAL", fiveMarkup, vmFive, pFive],
+      ["conflict", mixMarkup, vmMix, pMix],
+      ["cannot-evaluate", cannotMarkup, vmCannot, pCannot],
+      ["no_participants", noneMarkup, vmNone, pNone],
+      ["1d", dayMarkup, vmDayBingx, pDay],
+    ] as const;
+
+    for (const [caseName, markup, vm, projection] of readyCases) {
+      const def = defaultOf(markup);
+      const full = visibleText(markup);
+      const whyCount = vm.exchanges.reduce((acc, row) => acc + (row.why.length > 0 ? 1 : 0), 0);
+
+      // native <details>, всё закрыто по умолчанию, вложенности нет.
+      ok(/<details/.test(markup), `(UX) ${caseName}: progressive disclosure через native <details>`);
+      ok(!/<details[^>]*\bopen\b/.test(markup), `(UX) ${caseName}: все <details> закрыты по умолчанию (нет атрибута open)`);
+      eq(
+        (markup.match(/<summary/g) ?? []).length,
+        whyCount + 1,
+        `(UX) ${caseName}: summary — по одному «Почему» на биржу с причинами + «Технические детали»`
+      );
+      eq(
+        (markup.match(/<details/g) ?? []).length,
+        (markup.match(/<\/details>/g) ?? []).length,
+        `(UX) ${caseName}: <details> сбалансированы (вложенных блоков нет)`
+      );
+
+      // Компактный default view.
+      ok(def.includes("Смарт Мани"), `(UX) ${caseName}: default — заголовок «Смарт Мани»`);
+      ok(
+        def.includes(`${vm.assetSymbol} · ${timeframeLabelOf(vm.timeframe)}`),
+        `(UX) ${caseName}: default — актив + timeframe`
+      );
+      ok(def.includes(vm.verdictLabel), `(UX) ${caseName}: default — вердикт ${vm.verdictLabel}`);
+      ok(def.includes(vm.verdictNote), `(UX) ${caseName}: default — короткая русская note вердикта`);
+      ok(
+        def.includes(`Оценено ${vm.aggregate.evaluatedCount} / участников ${vm.aggregate.participantCount}`),
+        `(UX) ${caseName}: default — оценено/участников из DTO`
+      );
+      ok(def.includes(vm.candlesScopeLabel), `(UX) ${caseName}: default — биржа свечей подписана`);
+      ok(def.includes(vm.smcScopeLabel), `(UX) ${caseName}: default — explainer «Smart Money = мультибиржевая агрегация»`);
+      ok(
+        vm.aggregate.gateAllowed === def.includes(`Подтверждение ${vm.aggregate.confirmation ?? "—"}`),
+        `(UX) ${caseName}: confirmation показывается только когда gate разрешил агрегацию`
+      );
+
+      // Технический блок — в collapsed деталях, в default view его нет.
+      for (const token of TECHNICAL_TOKENS) {
+        ok(!def.includes(token), `(UX) ${caseName}: default — технический блок «${token}» скрыт`);
+        ok(full.includes(token), `(UX) ${caseName}: «${token}» сохранён в технических деталях`);
+      }
+      if (vm.aggregate.statusReason.length > 0) {
+        ok(!def.includes(vm.aggregate.statusReason), `(UX) ${caseName}: default — полный statusReason скрыт`);
+        ok(full.includes(vm.aggregate.statusReason), `(UX) ${caseName}: statusReason сохранён в технических деталях`);
+      }
+      if (vm.aggregate.gateAllowed) {
+        ok(full.includes("Голоса бирж"), `(UX) ${caseName}: голоса сохранены в технических деталях`);
+        ok(!def.includes("Голоса бирж"), `(UX) ${caseName}: голоса скрыты из default view`);
+      } else {
+        ok(full.includes("Агрегация запрещена gate"), `(UX) ${caseName}: gate refusal сохранён в технических деталях`);
+        ok(!def.includes("Агрегация запрещена gate"), `(UX) ${caseName}: gate refusal скрыт из default view`);
+        ok(vm.refusalSummary !== null, `(UX) ${caseName}: cannot-evaluate имеет краткую причину отказа`);
+        ok(def.includes(`Причина: ${vm.refusalSummary}`), `(UX) ${caseName}: краткая причина отказа видна сразу`);
+      }
+
+      // Пер-exchange: одна компактная строка, WHY закрыт.
+      for (const row of vm.exchanges) {
+        ok(def.includes(rowLine(row)), `(UX) ${caseName}: компактная строка ${row.exchange}`);
+        for (const reason of row.why) {
+          ok(markup.includes(whyItemMarkup(reason)), `(UX) ${caseName}: WHY ${reason.code} = label + баллы`);
+          ok(!def.includes(reason.label), `(UX) ${caseName}: default — WHY label ${reason.code} скрыт`);
+          if (!reason.label.includes(reason.code)) {
+            ok(!markup.includes(reason.code), `(UX) ${caseName}: internal code ${reason.code} не рендерится`);
+          }
+          if (reason.value !== null) {
+            ok(!markup.includes(reason.value), `(UX) ${caseName}: raw value ${reason.code} не рендерится`);
+          }
+          for (const factId of reason.factIds) {
+            ok(!markup.includes(factId), `(UX) ${caseName}: factId ${reason.code} не рендерится`);
+          }
+        }
+      }
+      const totalReasons = vm.exchanges.reduce((acc, row) => acc + row.why.length, 0);
+      eq((markup.match(/<li>/g) ?? []).length, totalReasons, `(UX) ${caseName}: WHY-пунктов ровно столько, сколько reasons в DTO`);
+      ok(!/баллы LONG \d+, SHORT \d+ \(максимум/.test(def), `(UX) ${caseName}: default — WHY-баллы скрыты`);
+      ok(!full.includes("SMC1"), `(UX) ${caseName}: deterministic-ключи SMC1|… не видны пользователю`);
+      ok(!full.includes("factId"), `(UX) ${caseName}: слово factId пользователю не показывается`);
+
+      // (15) Никаких вероятностей/процентов ни в default, ни в раскрытом виде.
+      ok(!FORBIDDEN_CLAIMS.test(def), `(15) рендер ${caseName} (default): нет формулировок о вероятности/шансах`);
+      ok(!FORBIDDEN_CLAIMS.test(full), `(15) рендер ${caseName} (раскрытый): нет формулировок о вероятности/шансах`);
+      ok(!def.includes("%"), `(15) рендер ${caseName} (default): нет процентов`);
+      ok(!full.includes("%"), `(15) рендер ${caseName} (раскрытый): нет процентов`);
+
+      // projection DTO не мутируется рендером.
+      const before = JSON.stringify(projection);
+      renderPanel({ status: "ready", symbol: vm.assetSymbol, timeframe: vm.timeframe, projection }, vm);
+      eq(JSON.stringify(projection), before, `(17) ${caseName}: рендер не мутирует DTO`);
+    }
 
     // (15) Никаких «вероятностей»/процентов ни в тексте, ни в view-model.
+    // (15) не-ready состояния: те же гарды формулировок.
     const rendered = [
       ["loading", loadingText],
       ["http-error", errorText],
-      ["LONG", longText],
-      ["SHORT", visibleText(renderPanel(readyShort, vmShort))],
-      ["NEUTRAL", visibleText(fiveMarkup)],
-      ["conflict", visibleText(mixMarkup)],
-      ["cannot-evaluate", cannotText],
-      ["no_participants", noneText],
-      ["1d", dayText],
     ] as const;
     for (const [name, text] of rendered) {
       ok(!FORBIDDEN_CLAIMS.test(text), `(15) рендер ${name}: нет формулировок о вероятности/шансах`);

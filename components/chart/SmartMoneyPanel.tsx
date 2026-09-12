@@ -6,9 +6,20 @@
  *  - чистая машина состояний SMC-запроса (toggle / смена symbol-timeframe /
  *    ответ / отмена / unmount) — race-safety БЕЗ React, детерминированно
  *    тестируется в scripts/test-smc-panel.ts;
+ *  - commit-гейт (createSmcCommitter): применяет переход к ref-state и
+ *    React-сеттерам, отменяет активный запрос и НЕ пишет React state из
+ *    cleanup после unmount;
  *  - построитель URL GET /api/chart/smc (ТОЛЬКО symbol + timeframe);
  *  - view-model панели из ФАКТИЧЕСКИХ полей SmcChartProjection (P1-A);
  *  - презентационный React-компонент панели (без собственного state/fetch).
+ *
+ * UX: PROGRESSIVE DISCLOSURE. Default view компактный (вердикт, note,
+ * подтверждение, оценено/участников, выбранная биржа, скоуп, горизонт);
+ * «Почему» каждой биржи и «Технические детали» (полный statusReason с
+ * relative/absolute lag, голоса, asOf, gate refusals, per-exchange
+ * statusReason) — в native <details>, collapsed по умолчанию. Internal
+ * reason.code, raw deterministic value (SMC1|…) и factIds в UI не
+ * показываются, но сохраняются в view-model без изменений (P1-D).
  *
  * ЧЕГО ЗДЕСЬ НЕТ (границы P1-C):
  *  - второго DTO/контракта нет: все поля берутся из
@@ -33,7 +44,7 @@
  * делает CandleChart), без Date.now и localStorage; импорты — только
  * React-типы и type-only принятый DTO.
  */
-import type { CSSProperties, ReactElement, ReactNode } from "react";
+import type { CSSProperties, ReactElement } from "react";
 import type {
   SmcAggregateSummaryDto,
   SmcChartProjection,
@@ -439,6 +450,87 @@ export function reduceSmcState(
 }
 
 // ------------------------------------------------------------------
+// 4b. Commit-гейт: применение перехода к ref-state и React-сеттерам
+// ------------------------------------------------------------------
+
+/**
+ * Точка подключения машины состояний к React (host передаётся
+ * CandleChart'ом): два стабильных setState и отмена активного запроса.
+ */
+export interface SmcCommitHost {
+  setEnabled(enabled: boolean): void;
+  setPanel(panel: SmcPanelState): void;
+  /** AbortController активного запроса — вызывается ВСЕГДА, даже после unmount. */
+  abortActive(): void;
+}
+
+export interface SmcCommitter {
+  /** Source of truth для следующего dispatch (переживает unmount). */
+  getState(): SmcControllerState;
+  commit(transition: SmcTransition): void;
+  /** Cleanup: React-записи запрещены, abort и ref-state продолжают работать. */
+  markUnmounted(): void;
+  /** Remount (dev StrictMode double-invoke): React-записи снова разрешены. */
+  markMounted(): void;
+  isMounted(): boolean;
+}
+
+/**
+ * LIFECYCLE-РЕШЕНИЕ (fix по ревью P1-C): unmount обязан
+ *  1) отменить активный SMC-запрос — abort выполняется независимо от
+ *     mounted-флага, поэтому in-flight запрос действительно отменён;
+ *  2) не дать устаревшему async-ответу что-либо изменить — переход
+ *     "unmount" переводит ref-state в enabled=false, а ответ
+ *     принимается только при enabled && requestId === activeRequestId
+ *     (двойной гард поверх abort);
+ *  3) НЕ делать лишних React setState из cleanup — после
+ *     markUnmounted() commit обновляет только ref-state и не вызывает
+ *     сеттеры (setState размонтированному компоненту не нужен).
+ *
+ * Request/race-семантика reduceSmcState при этом не меняется вовсе:
+ * гейт решает ТОЛЬКО «писать ли в React state».
+ */
+export function createSmcCommitter(
+  initial: SmcControllerState,
+  host: SmcCommitHost
+): SmcCommitter {
+  let state = initial;
+  let mounted = true;
+
+  return {
+    getState: () => state,
+    isMounted: () => mounted,
+    markMounted: () => {
+      mounted = true;
+    },
+    markUnmounted: () => {
+      mounted = false;
+    },
+    commit(transition: SmcTransition): void {
+      // Отмена запроса — всегда (в том числе после unmount).
+      if (transition.abortPrevious) {
+        host.abortActive();
+      }
+
+      if (!transition.changed) {
+        return;
+      }
+
+      // Ref-state обновляется всегда: это гард для поздних ответов.
+      state = transition.state;
+
+      // После unmount React state не пишем.
+      if (!mounted) {
+        return;
+      }
+
+      host.setEnabled(state.enabled);
+      host.setPanel(state.panel);
+    },
+  };
+}
+
+// ------------------------------------------------------------------
 // 5. View-model: ТОЛЬКО фактические поля SmcChartProjection
 // ------------------------------------------------------------------
 
@@ -728,6 +820,46 @@ export interface SmcPanelViewModel {
   selectedExchangeExcluded: boolean;
   selectedExchangeExcludedNote: string | null;
   hasWhy: boolean;
+  /**
+   * Краткая БЕЗОПАСНАЯ причина отказа — только для cannot-evaluate,
+   * чтобы его нельзя было спутать с NEUTRAL в компактном view.
+   * Строится из фактических полей DTO (status/evaluatedCount/
+   * gateAllowed/direction), без новых trading-объяснений; полная
+   * диагностика (statusReason, gateRefusalReasons, lag, asOf) остаётся
+   * в модели и показывается в collapsed «Технические детали».
+   */
+  refusalSummary: string | null;
+}
+
+/**
+ * Краткая причина cannot-evaluate для default view. Приоритет — по
+ * фактическому полю DTO, которое привело к отказу:
+ *  1. unusable/не-ok общий горизонт → русский label статуса;
+ *  2. ни одна биржа не оценена → короткая честная формулировка;
+ *  3. отказ aggregation gate → отсылка к техническим деталям;
+ *  4. direction null/CANNOT_EVALUATE → направление не определено.
+ */
+export function buildSmcRefusalSummary(
+  aggregate: SmcAggregateSummaryDto,
+  verdict: SmcAggregateVerdict
+): string | null {
+  if (verdict !== "cannot-evaluate") {
+    return null;
+  }
+
+  if (!aggregate.usable || aggregate.status !== "ok") {
+    return smcHorizonStatusLabel(aggregate.status);
+  }
+
+  if (aggregate.evaluatedCount === 0) {
+    return "ни одна биржа не дала оценку на общем горизонте";
+  }
+
+  if (!aggregate.gateAllowed) {
+    return "агрегация отклонена gate — причина в технических деталях";
+  }
+
+  return "агрегированное направление не определено";
 }
 
 /**
@@ -771,12 +903,32 @@ export function buildSmcPanelViewModel(
         `показываются на графике.`
       : null,
     hasWhy: exchanges.some((row) => row.why.length > 0),
+    refusalSummary: buildSmcRefusalSummary(aggregate, verdict),
   };
 }
 
 // ------------------------------------------------------------------
-// 6. Презентационный компонент (без собственного state и fetch)
+// 6. Презентационный компонент: progressive disclosure
 // ------------------------------------------------------------------
+//
+// UX-FIX P1-C: default view компактный — вердикт, краткая русская
+// note, подтверждение и оценено/участников (только из DTO), выбранная
+// биржа свечей, скоуп «Smart Money = мультибиржевая агрегированная
+// оценка» и одна строка общего горизонта.
+//
+// Всё остальное — под native <details> (collapsed по умолчанию, без
+// новой зависимости):
+//  - «Почему» каждой биржи: русский label reason + баллы LONG/SHORT.
+//    Internal reason.code, raw deterministic value (SMC1|…) и factIds
+//    пользователю НЕ показываются — они сохранены в view-model без
+//    изменений для диагностики и будущего P1-D;
+//  - «Технические детали»: полный statusReason (включая технический
+//    relative/absolute lag), голоса, asOf движка, отставание,
+//    отфильтрованные рынки, gate refusal details и per-exchange
+//    statusReason.
+//
+// При cannot-evaluate краткая безопасная причина отказа (refusalSummary)
+// показывается В DEFAULT VIEW — спутать с NEUTRAL нельзя.
 
 const PANEL_STYLE: CSSProperties = {
   marginTop: 12,
@@ -798,6 +950,14 @@ const HEADER_STYLE: CSSProperties = {
   justifyContent: "space-between",
 };
 
+const LINE_STYLE: CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 4,
+  alignItems: "baseline",
+  fontSize: 13,
+};
+
 const STACK_STYLE: CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
@@ -806,48 +966,43 @@ const STACK_STYLE: CSSProperties = {
   fontSize: 12,
 };
 
-const GRID_STYLE: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
-  gap: 8,
-};
-
-const CELL_STYLE: CSSProperties = {
-  border: "1px solid var(--line)",
-  borderRadius: 10,
-  padding: "6px 8px",
-  background: "var(--panel)",
-};
-
-const CELL_TITLE_STYLE: CSSProperties = {
+const TITLE_STYLE: CSSProperties = {
   color: "var(--muted)",
   fontSize: 11,
-  marginBottom: 2,
 };
 
+/** Компактная карточка одной биржи: одна строка + collapsed «Почему». */
 const EXCHANGE_STYLE: CSSProperties = {
   border: "1px solid var(--line)",
   borderRadius: 10,
-  padding: "8px 10px",
+  padding: "6px 10px",
   background: "var(--panel)",
   display: "flex",
   flexDirection: "column",
   gap: 4,
 };
 
+const DETAILS_STYLE: CSSProperties = {
+  border: "1px solid var(--line)",
+  borderRadius: 10,
+  padding: "6px 10px",
+  background: "var(--panel)",
+};
+
+const SUMMARY_STYLE: CSSProperties = {
+  cursor: "pointer",
+  color: "var(--muted)",
+  fontSize: 12,
+};
+
 const WHY_LIST_STYLE: CSSProperties = {
-  margin: 0,
+  margin: "6px 0 0",
   paddingLeft: 18,
   display: "flex",
   flexDirection: "column",
   gap: 2,
+  fontSize: 12,
 };
-
-/**
- * Deterministic payload факта (reason.value) бывает длинным ключом
- * SMC1|… — переносим его целиком, без обрезки смысла.
- */
-const WHY_VALUE_STYLE: CSSProperties = { wordBreak: "break-all" };
 
 /** Цвет предупреждения (тот же, что у .freshBadge.delayed в globals.css). */
 const BLOCKED_COLOR = "#e8b34b";
@@ -865,47 +1020,25 @@ function verdictColor(tone: SmcVerdictTone): string {
   }
 }
 
-function Cell({
-  title,
-  children,
-}: {
-  title: string;
-  children: ReactNode;
-}): ReactElement {
-  return (
-    <div style={CELL_STYLE}>
-      <div style={CELL_TITLE_STYLE}>{title}</div>
-      <div>{children}</div>
-    </div>
-  );
-}
-
-/** «Почему» — существующие reasons DTO: label, код, баллы, value. */
+/**
+ * WHY одной биржи в user-виде: только русский label и баллы.
+ * code/value/factIds намеренно НЕ рендерятся (в модели они есть).
+ * reason.code используется лишь как React key — в разметку не попадает.
+ */
 function WhyList({ rows }: { rows: SmcWhyRow[] }): ReactElement {
   return (
-    <div>
-      <div style={CELL_TITLE_STYLE}>Почему</div>
-
-      <ul style={WHY_LIST_STYLE}>
-        {rows.map((reason, index) => (
-          <li key={`${reason.code}:${index}`}>
-            <span>{reason.label}</span>
-            <span className="muted"> · {reason.code}</span>
-            <span className="muted">
-              {" "}
-              · баллы LONG {reason.longPoints}, SHORT {reason.shortPoints}{" "}
-              (максимум {reason.maxPoints})
-            </span>
-            {reason.value !== null && (
-              <span className="muted" style={WHY_VALUE_STYLE}>
-                {" "}
-                · {reason.value}
-              </span>
-            )}
-          </li>
-        ))}
-      </ul>
-    </div>
+    <ul style={WHY_LIST_STYLE}>
+      {rows.map((reason, index) => (
+        <li key={`${reason.code}:${index}`}>
+          <span>{reason.label}</span>
+          <span className="muted">
+            {" "}
+            · баллы LONG {reason.longPoints}, SHORT {reason.shortPoints}{" "}
+            (максимум {reason.maxPoints})
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -957,18 +1090,67 @@ export function SmartMoneyPanel({
 
       {panel.status === "ready" && viewModel !== null && (
         <>
-          <div style={STACK_STYLE}>
-            <span className="muted">
-              {viewModel.assetSymbol} · {timeframeLabelOf(viewModel.timeframe)}{" "}
-              · рассчитано {viewModel.generatedAtLabel}
+          {/* ---------- компактный default view ---------- */}
+          <div style={LINE_STYLE}>
+            <strong>
+              {viewModel.assetSymbol} ·{" "}
+              {timeframeLabelOf(viewModel.timeframe)}
+            </strong>
+          </div>
+
+          <div style={LINE_STYLE}>
+            <span
+              className="freshBadge"
+              style={{
+                color: verdictColor(viewModel.verdictTone),
+                fontSize: 13,
+              }}
+            >
+              {viewModel.verdictLabel}
             </span>
 
+            <span className="muted">{viewModel.verdictNote}</span>
+          </div>
+
+          {viewModel.refusalSummary !== null && (
+            <div style={{ color: BLOCKED_COLOR }}>
+              Причина: {viewModel.refusalSummary}
+            </div>
+          )}
+
+          <div style={LINE_STYLE} className="muted">
+            {viewModel.aggregate.gateAllowed && (
+              <span>
+                Подтверждение{" "}
+                {viewModel.aggregate.confirmation ?? "—"} · порог
+                minExchanges {viewModel.aggregate.minExchanges}
+              </span>
+            )}
+
+            <span>
+              Оценено {viewModel.aggregate.evaluatedCount} / участников{" "}
+              {viewModel.aggregate.participantCount}
+            </span>
+
+            {viewModel.aggregate.exchangeExcluded.length > 0 && (
+              <span>
+                Исключены eligibility:{" "}
+                {viewModel.aggregate.exchangeExcluded.join(", ")}
+              </span>
+            )}
+
+            {viewModel.aggregate.horizonLabel !== null && (
+              <span>Общий горизонт: {viewModel.aggregate.horizonLabel}</span>
+            )}
+          </div>
+
+          <div style={STACK_STYLE}>
             <span className="muted">{viewModel.candlesScopeLabel}</span>
 
             <span className="muted">{viewModel.smcScopeLabel}</span>
 
             <span className="muted">
-              Результат выбранной биржи НЕ является агрегатом — агрегат ниже,
+              Результат выбранной биржи НЕ является агрегатом — агрегат выше,
               биржи перечислены отдельно.
             </span>
 
@@ -979,100 +1161,10 @@ export function SmartMoneyPanel({
             )}
           </div>
 
-          <div style={HEADER_STYLE}>
-            <span
-              className="freshBadge"
-              style={{ color: verdictColor(viewModel.verdictTone), fontSize: 13 }}
-            >
-              {viewModel.verdictLabel}
-            </span>
-
-            <span className="muted">{viewModel.verdictNote}</span>
-          </div>
-
-          <div style={GRID_STYLE}>
-            <Cell title="Статус агрегации">
-              {viewModel.aggregate.statusLabel}
-              <span className="muted"> ({viewModel.aggregate.status})</span>
-            </Cell>
-
-            <Cell title="Причина статуса">
-              {viewModel.aggregate.statusReason}
-            </Cell>
-
-            {/* Направление/подтверждение/голоса существуют ТОЛЬКО когда
-                aggregation gate пустил агрегат. При отказе (unsafe
-                alignment / anchor / unusable horizon) этих данных в DTO
-                нет, и показывать их нельзя: отказ не должен выглядеть
-                успешным агрегатом или NEUTRAL. */}
-            {viewModel.aggregate.gateAllowed && (
-              <>
-                <Cell title="Направление агрегата">
-                  {viewModel.aggregate.directionLabel}
-                </Cell>
-
-                <Cell title="Подтверждение биржами">
-                  {viewModel.aggregate.confirmation ?? "—"}
-                  <span className="muted">
-                    {" "}
-                    (порог minExchanges {viewModel.aggregate.minExchanges})
-                  </span>
-                </Cell>
-
-                <Cell title="Голоса бирж">
-                  LONG {viewModel.aggregate.longVotes} · SHORT{" "}
-                  {viewModel.aggregate.shortVotes} · NEUTRAL{" "}
-                  {viewModel.aggregate.neutralVotes}
-                  {viewModel.aggregate.conflict && (
-                    <span style={{ color: BLOCKED_COLOR }}>
-                      {" "}
-                      · конфликт направлений
-                    </span>
-                  )}
-                </Cell>
-              </>
-            )}
-
-            <Cell title="Оценено / не оценено">
-              {viewModel.aggregate.evaluatedCount} /{" "}
-              {viewModel.aggregate.cannotEvaluateCount}
-              <span className="muted">
-                {" "}
-                · участников {viewModel.aggregate.participantCount} ·{" "}
-                отфильтровано {viewModel.aggregate.filteredCount}
-              </span>
-            </Cell>
-
-            <Cell title="Общий горизонт (H)">
-              {viewModel.aggregate.horizonLabel ?? "—"}
-            </Cell>
-
-            <Cell title="asOf движка (H + таймфрейм)">
-              {viewModel.aggregate.engineAsOfLabel ?? "—"}
-            </Cell>
-
-            <Cell title="Отставание горизонта">
-              {viewModel.aggregate.lagLabel ?? "—"}
-            </Cell>
-
-            <Cell title="Исключены eligibility">
-              {viewModel.aggregate.exchangeExcluded.length > 0
-                ? viewModel.aggregate.exchangeExcluded.join(", ")
-                : "нет"}
-            </Cell>
-          </div>
-
-          {!viewModel.aggregate.gateAllowed && (
-            <div style={{ color: BLOCKED_COLOR }}>
-              Агрегация запрещена gate:{" "}
-              {viewModel.aggregate.gateRefusalReasons.length > 0
-                ? viewModel.aggregate.gateRefusalReasons.join("; ")
-                : "причина не передана"}
-            </div>
-          )}
-
-          <div style={CELL_TITLE_STYLE}>
-            Результаты по биржам ({viewModel.exchanges.length})
+          {/* ---------- компактный список бирж ---------- */}
+          <div style={TITLE_STYLE}>
+            Результаты по биржам ({viewModel.exchanges.length}) · баллы
+            стратегии
           </div>
 
           {viewModel.exchanges.length === 0 ? (
@@ -1081,36 +1173,39 @@ export function SmartMoneyPanel({
             </div>
           ) : (
             viewModel.exchanges.map((row) => (
-              <div key={`${row.exchange}:${row.marketId}`} style={EXCHANGE_STYLE}>
-                <div>
+              <div
+                key={`${row.exchange}:${row.marketId}`}
+                style={EXCHANGE_STYLE}
+              >
+                <div style={LINE_STYLE}>
                   <strong>{row.exchange}</strong>
-                  <span className="muted"> · {row.market}</span>
+
+                  <span>
+                    ·{" "}
+                    {row.status === "evaluated"
+                      ? row.directionLabel
+                      : row.statusLabel}
+                  </span>
+
                   <span className="muted">
-                    {" "}
-                    · {row.statusLabel} ({row.status})
+                    · LONG {formatSmcScore(row.longScore)} · SHORT{" "}
+                    {formatSmcScore(row.shortScore)}
                   </span>
 
                   {row.isSelectedCandleExchange && (
-                    <span className="freshBadge missing" style={{ marginLeft: 6 }}>
+                    <span className="freshBadge missing">
                       биржа свечей на графике
                     </span>
                   )}
                 </div>
 
-                <div className="muted">
-                  направление {row.directionLabel} · баллы LONG{" "}
-                  {formatSmcScore(row.longScore)} · баллы SHORT{" "}
-                  {formatSmcScore(row.shortScore)}
-                  {row.horizonLabel !== null && (
-                    <> · горизонт {row.horizonLabel}</>
-                  )}
-                </div>
+                {row.why.length > 0 && (
+                  <details>
+                    <summary style={SUMMARY_STYLE}>Почему</summary>
 
-                {row.statusReason !== null && (
-                  <div className="muted">причина: {row.statusReason}</div>
+                    <WhyList rows={row.why} />
+                  </details>
                 )}
-
-                {row.why.length > 0 && <WhyList rows={row.why} />}
               </div>
             ))
           )}
@@ -1121,6 +1216,68 @@ export function SmartMoneyPanel({
               этом горизонте.
             </div>
           )}
+
+          {/* ---------- полная диагностика: collapsed ---------- */}
+          <details style={DETAILS_STYLE}>
+            <summary style={SUMMARY_STYLE}>Технические детали</summary>
+
+            <div style={STACK_STYLE}>
+              <span className="muted">
+                Рассчитано: {viewModel.generatedAtLabel}
+              </span>
+
+              <span className="muted">
+                Статус агрегации: {viewModel.aggregate.statusLabel} (
+                {viewModel.aggregate.status})
+              </span>
+
+              <span className="muted">
+                Причина статуса: {viewModel.aggregate.statusReason}
+              </span>
+
+              {viewModel.aggregate.gateAllowed ? (
+                <span className="muted">
+                  Голоса бирж: LONG {viewModel.aggregate.longVotes} · SHORT{" "}
+                  {viewModel.aggregate.shortVotes} · NEUTRAL{" "}
+                  {viewModel.aggregate.neutralVotes}
+                  {viewModel.aggregate.conflict
+                    ? " · конфликт направлений"
+                    : ""}
+                </span>
+              ) : (
+                <span style={{ color: BLOCKED_COLOR }}>
+                  Агрегация запрещена gate:{" "}
+                  {viewModel.aggregate.gateRefusalReasons.length > 0
+                    ? viewModel.aggregate.gateRefusalReasons.join("; ")
+                    : "причина не передана"}
+                </span>
+              )}
+
+              <span className="muted">
+                asOf движка (H + таймфрейм):{" "}
+                {viewModel.aggregate.engineAsOfLabel ?? "—"}
+              </span>
+
+              <span className="muted">
+                Отставание горизонта: {viewModel.aggregate.lagLabel ?? "—"}
+              </span>
+
+              <span className="muted">
+                Отфильтровано стратегией: {viewModel.aggregate.filteredCount}
+              </span>
+
+              {viewModel.exchanges
+                .filter((row) => row.statusReason !== null)
+                .map((row) => (
+                  <span
+                    key={`${row.exchange}:${row.marketId}:reason`}
+                    className="muted"
+                  >
+                    {row.exchange}: {row.statusReason}
+                  </span>
+                ))}
+            </div>
+          </details>
         </>
       )}
     </div>

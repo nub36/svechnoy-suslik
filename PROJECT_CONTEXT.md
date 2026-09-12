@@ -2131,9 +2131,11 @@ SELECTED EXCHANGE VS AGGREGATE:
   список бирж и confirmation никогда не хардкодятся.
 
 WHY:
-- раздел «Почему» по каждой бирже из существующих reasons DTO: label,
-  code, longPoints/shortPoints/maxPoints, value. Ничего не добавляется
-  и не выдумывается; если причин нет — так и пишется.
+- раздел «Почему» по каждой бирже из существующих reasons DTO: view-model
+  сохраняет label, code, longPoints/shortPoints/maxPoints и value
+  (passthrough), а пользователю показываются ТОЛЬКО русский label и баллы
+  (см. UX-FIX ниже). Ничего не добавляется и не выдумывается; если причин
+  нет — так и пишется.
 - score называется баллами («баллы LONG / SHORT»); формулировок
   «вероятность», «шанс роста», процентов в UI нет.
 - factIds — passthrough без реконструкции/мутации (OB_FVG_CONFLUENCE
@@ -2180,6 +2182,55 @@ phase3d-config 70), strategy-runtime --self-test 56 и
 page data» из-за непрогенерированного @prisma/client (binaries.prisma.sh
 недоступен в изолированном окружении) — идентично падает и нетронутый
 baseline 642ebf1, то есть причина environment-only, а не P1-C.
+
+UX-FIX P1-C (12.09.2026): PROGRESSIVE DISCLOSURE — UI-only, semantics
+не менялись (scoring/evaluation/eligibility/common horizon/DTO те же).
+Панель на /coin/[symbol] стала компактной по умолчанию:
+- DEFAULT VIEW: «Смарт Мани», актив + timeframe, вердикт
+  (LONG/SHORT/NEUTRAL/«Нет оценки») с короткой русской note,
+  confirmation и minExchanges (только из DTO и только когда gate
+  разрешил агрегацию), «Оценено N / участников N», исключённые
+  eligibility биржи, компактная строка общего горизонта, биржа свечей
+  на графике, explainer «Smart Money — агрегированная оценка актива по
+  всем биржам-участникам» и явное разделение «выбранная биржа ≠ агрегат».
+- СПИСОК БИРЖ: одна компактная строка на биржу
+  «EXCHANGE · DIRECTION · LONG n · SHORT n» (не оценённая биржа —
+  «не оценён · LONG — · SHORT —»); выбранная биржа свечей помечена
+  бейджем; исключённые eligibility (например BINGX для 1d) берутся
+  только из DTO, хардкода нет.
+- РАСКРЫТИЕ ПО ДЕЙСТВИЮ: native <details> (новой зависимости нет) —
+  «Почему» каждой биржи (русский label + баллы LONG/SHORT) и
+  «Технические детали» (полный statusReason с relative/absolute lag,
+  голоса, asOf движка, отставание горизонта, отфильтрованные рынки,
+  gate refusal reasons, per-exchange statusReason). Все <details>
+  закрыты по умолчанию (атрибута open нет), ничего из модели не удалено.
+- ТЕХНИЧЕСКИЕ ИДЕНТИФИКАТОРЫ НЕ ПОКАЗЫВАЮТСЯ: internal reason.code
+  (SWING_TREND, RECENT_SWING_BOS, …), raw deterministic value
+  (SMC1|FVG|…) и factIds не рендерятся ни в default view, ни в
+  раскрытом; в view-model они сохранены без изменений (нужны для
+  диагностики и P1-D). Краткая безопасная причина отказа
+  (refusalSummary, строится из фактических полей DTO) показывается при
+  cannot-evaluate сразу — спутать с NEUTRAL нельзя.
+- LIFECYCLE-ФИКС: появился commit-гейт createSmcCommitter(initial, host)
+  в SmartMoneyPanel.tsx. Cleanup CandleChart вызывает markUnmounted() и
+  затем dispatch { type: "unmount" }: активный SMC-запрос отменяется
+  (host.abortActive выполняется всегда), ref-state гаснет (поздний
+  async-ответ отсекается двойным гардом enabled + requestId), но React
+  setState размонтированному компоненту из cleanup больше не
+  отправляется. markMounted() в теле эффекта делает это StrictMode-safe.
+  Request/race-семантика reduceSmcState не менялась; refactor всей
+  машины состояний не проводился.
+- TESTS: scripts/test-smc-panel.ts — 2872 проверки, 0 провалов
+  (добавлены: compact default view, WHY и «Технические детали» закрыты,
+  reason.code/value/factIds/SMC1 не рендерятся, 1d counts и BINGX
+  только из DTO, cannot-evaluate ≠ NEUTRAL с видимой краткой причиной,
+  LONG/SHORT семантика, OFF/ON/race без изменений, unmount = abort без
+  лишнего setState, StrictMode remount, DTO не мутируется рендером).
+  Все прежние P1-C гарды сохранены. npx tsc --noEmit — exit 0,
+  git diff --check — чисто, регрессия (api-service/projection/chart/
+  common-horizon/eligibility/lookahead/evaluate/smart-money) без
+  изменений; npm run build падает только по environment-причине
+  (@prisma/client), идентично baseline.
 
 
 ==================================================

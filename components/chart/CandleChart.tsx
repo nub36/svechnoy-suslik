@@ -43,14 +43,14 @@ import {
   SMC_NETWORK_ERROR_MESSAGE,
   SmartMoneyPanel,
   buildSmcPanelViewModel,
+  createSmcCommitter,
   createSmcControllerState,
   isSmcAbortError,
   reduceSmcState,
-  type SmcControllerState,
+  type SmcCommitter,
   type SmcEvent,
   type SmcPanelState,
-  type SmcPanelViewModel,
-  type SmcTransition
+  type SmcPanelViewModel
 } from "@/components/chart/SmartMoneyPanel";
 
 /**
@@ -1768,52 +1768,46 @@ export default function CandleChart({
 
   /* ---------- Smart Money (P1-C): UI-only toggle + read-only fetch ---------- */
 
-  // Состояние SMC-запроса живёт в ref (машина состояний
-  // components/chart/SmartMoneyPanel.tsx), а в React-стейте —
-  // только то, что нужно для рендера: enabled и панель.
-  // Это ТОТ ЖЕ подход, что и у свечей: AbortController +
-  // requestId-identity, поэтому устаревший ответ не может
-  // перезаписать новый state.
-  const smcControllerRef = useRef<SmcControllerState>(
-    createSmcControllerState()
-  );
+  // Состояние SMC-запроса живёт в commit-гейте (машина состояний —
+  // components/chart/SmartMoneyPanel.tsx), а в React-стейте только то,
+  // что нужно для рендера: enabled и панель. Это ТОТ ЖЕ подход, что и у
+  // свечей: AbortController + requestId-identity, поэтому устаревший
+  // ответ не может перезаписать новый state.
   const smcAbortRef = useRef<AbortController | null>(null);
 
   const [smcEnabled, setSmcEnabled] = useState(false);
-  const [smcPanel, setSmcPanel] = useState<SmcPanelState>(
-    { status: "off" }
-  );
+  const [smcPanel, setSmcPanel] = useState<SmcPanelState>({
+    status: "off"
+  });
 
-  // Применяет переход машины состояний: отмена предыдущего
-  // in-flight запроса, затем ref + React-state. No-op переход
-  // (устаревший ответ, aborted, параметры при OFF) state не пишет —
-  // в том числе после размонтирования.
-  const commitSmc = useCallback(
-    (transition: SmcTransition) => {
-      if (transition.abortPrevious) {
-        smcAbortRef.current?.abort();
-        smcAbortRef.current = null;
+  // Ленивая инициализация гейта (один раз на экземпляр компонента):
+  // host замыкает стабильные React-сеттеры и отмену активного запроса.
+  const smcCommitterRef = useRef<SmcCommitter | null>(null);
+
+  if (smcCommitterRef.current === null) {
+    smcCommitterRef.current = createSmcCommitter(
+      createSmcControllerState(),
+      {
+        setEnabled: setSmcEnabled,
+        setPanel: setSmcPanel,
+        abortActive: () => {
+          smcAbortRef.current?.abort();
+          smcAbortRef.current = null;
+        }
       }
+    );
+  }
 
-      if (!transition.changed) {
-        return;
-      }
-
-      smcControllerRef.current = transition.state;
-      setSmcEnabled(transition.state.enabled);
-      setSmcPanel(transition.state.panel);
-    },
-    []
-  );
+  const smcCommitter = smcCommitterRef.current;
 
   const dispatchSmc = useCallback(
     (event: SmcEvent) => {
       const transition = reduceSmcState(
-        smcControllerRef.current,
+        smcCommitter.getState(),
         event
       );
 
-      commitSmc(transition);
+      smcCommitter.commit(transition);
 
       if (transition.fetch === null) {
         return;
@@ -1825,10 +1819,10 @@ export default function CandleChart({
 
       smcAbortRef.current = controller;
 
-      // Ответ/ошибка возвращаются в ту же машину состояний:
-      // событие принимается, только если панель всё ещё
-      // включена И requestId совпал с активным. Отмена
-      // (abort) не меняет ничего — stale-панель не остаётся.
+      // Ответ/ошибка возвращаются в ту же машину состояний: событие
+      // принимается, только если панель всё ещё включена И requestId
+      // совпал с активным. Отмена (abort) не меняет ничего — stale
+      // панель не остаётся.
       void (async () => {
         try {
           const response = await fetch(url, {
@@ -1839,8 +1833,8 @@ export default function CandleChart({
             .json()
             .catch(() => null);
 
-          commitSmc(
-            reduceSmcState(smcControllerRef.current, {
+          smcCommitter.commit(
+            reduceSmcState(smcCommitter.getState(), {
               type: "http-response",
               requestId,
               ok: response.ok,
@@ -1850,8 +1844,8 @@ export default function CandleChart({
           );
         } catch (error) {
           if (isSmcAbortError(error)) {
-            commitSmc(
-              reduceSmcState(smcControllerRef.current, {
+            smcCommitter.commit(
+              reduceSmcState(smcCommitter.getState(), {
                 type: "aborted",
                 requestId
               })
@@ -1862,8 +1856,8 @@ export default function CandleChart({
 
           // Ошибка Smart Money изолирована: status/errorMessage
           // свечного графика здесь НЕ трогаются.
-          commitSmc(
-            reduceSmcState(smcControllerRef.current, {
+          smcCommitter.commit(
+            reduceSmcState(smcCommitter.getState(), {
               type: "network-error",
               requestId,
               message: SMC_NETWORK_ERROR_MESSAGE
@@ -1872,23 +1866,31 @@ export default function CandleChart({
         }
       })();
     },
-    [commitSmc]
+    [smcCommitter]
   );
 
-  // Смена symbol/timeframe при включённом Smart Money — новый
-  // запрос (старый отменяется). Смена exchange запрос НЕ создаёт:
-  // Smart Money — asset-level, а не данные выбранной биржи.
+  // Смена symbol/timeframe при включённом Smart Money — новый запрос
+  // (старый отменяется). Смена exchange запрос НЕ создаёт: Smart Money
+  // — asset-level, а не данные выбранной биржи.
   useEffect(() => {
     dispatchSmc({ type: "params", symbol, timeframe });
   }, [symbol, timeframe, dispatchSmc]);
 
-  // Unmount: тот же путь машины состояний — in-flight SMC-запрос
-  // отменяется, панель гасится (как у свечей в cleanup эффекта).
+  // Lifecycle-фикс: на mount React-записи разрешаются (dev StrictMode
+  // монтирует компонент дважды, поэтому флаг поднимается в теле
+  // эффекта, а не только при создании гейта). В cleanup флаг сначала
+  // опускается и лишь затем отправляется unmount-переход: активный
+  // SMC-запрос отменяется, ref-state гаснет (поздний ответ не проходит
+  // enabled/requestId-гард), а setState уже размонтированному
+  // компоненту из cleanup НЕ отправляется.
   useEffect(() => {
+    smcCommitter.markMounted();
+
     return () => {
+      smcCommitter.markUnmounted();
       dispatchSmc({ type: "unmount" });
     };
-  }, [dispatchSmc]);
+  }, [smcCommitter, dispatchSmc]);
 
   const smcViewModel = useMemo<SmcPanelViewModel | null>(
     () =>
