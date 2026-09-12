@@ -8,10 +8,15 @@
  * правило."
  *
  * То есть:
- * - generic data plane: все рынки eligible (сырое покрытие)
- * - Smart Money runner: применяем isSmartMoneyExchangeEligible
+ * - generic data plane (raw coverage): все рынки eligible (сырое покрытие)
+ * - Smart Money runner: применяем isSmartMoneyExchangeEligible (fail-closed unknown)
  *
- * Этот файл — тонкая обёртка, не новый набор констант.
+ * Этот файл — тонкая обёртка, не новый набор констант. Единственный
+ * источник truth для Smart Money — lib/strategies/smart-money-eligibility.ts
+ *
+ * Различие raw vs Smart Money eligibility:
+ * - raw: все рынки eligible, покрытие считается для всех
+ * - Smart Money: фильтруется через isSmartMoneyExchangeEligible, unknown exchange/timeframe → fail-closed false
  */
 
 import {
@@ -36,7 +41,7 @@ export function isGenericEligible(): boolean {
  *
  * @param market — Market row с exchange
  * @param timeframe — timeframe string (5m/15m/1h/4h/1d)
- * @param isSmartMoneyRunner — если true, применяем Smart Money политику
+ * @param isSmartMoneyRunner — если true, применяем Smart Money политику fail-closed
  */
 export function isMarketEligible(
   market: { exchange: string },
@@ -64,31 +69,35 @@ export function filterEligibleMarkets(
 }
 
 /**
- * Разделение на eligible / ineligible с причиной.
+ * Разделение на eligible / ineligible с причиной — Smart Money version (fail-closed).
+ * Используется в data-plan для Smart Money runner, чтобы не дублировать BINGX+1d.
  */
 export function partitionByEligibility(
   markets: readonly BacktestMarketRow[],
   timeframe: string,
-  isSmartMoneyRunner: boolean
+  isSmartMoneyRunner?: boolean
 ): {
   eligible: BacktestMarketRow[];
   ineligible: { market: BacktestMarketRow; reason: string }[];
 } {
+  // If called with 2 args, assume Smart Money context (as used in data-plan)
+  const isSM = isSmartMoneyRunner === undefined ? true : isSmartMoneyRunner;
+
   const eligible: BacktestMarketRow[] = [];
   const ineligible: { market: BacktestMarketRow; reason: string }[] = [];
 
   for (const m of markets) {
-    if (isMarketEligible(m, timeframe, isSmartMoneyRunner)) {
+    if (isMarketEligible(m, timeframe, isSM)) {
       eligible.push(m);
     } else {
       const reason =
         m.exchange === "BINGX" && timeframe === "1d"
           ? "BINGX excluded for 1d in Smart Money (off-grid 16:00 UTC)"
-          : `Exchange ${m.exchange} not eligible for ${timeframe} in Smart Money`;
+          : `Exchange ${m.exchange} not eligible for ${timeframe} in Smart Money (fail-closed unknown)`;
 
       ineligible.push({ market: m, reason });
     }
   }
 
-  return { eligible, ineligible };
+  return { eligible: Object.freeze(eligible) as BacktestMarketRow[], ineligible: Object.freeze(ineligible) as { market: BacktestMarketRow; reason: string }[] };
 }

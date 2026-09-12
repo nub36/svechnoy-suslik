@@ -3789,3 +3789,188 @@ Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC*
 **Files changed (один коммит):** `lib/backtest/contract.ts`, `lib/backtest/validate.ts`, `lib/backtest/costs.ts`, `lib/backtest/engine.ts`, `lib/backtest/metrics.ts`, `lib/backtest/splits.ts`, `lib/backtest/serialize.ts`, `lib/backtest/no-lookahead.ts` (все — новые), `scripts/test-backtest-engine.ts`, `scripts/test-backtest-metrics.ts`, `scripts/test-backtest-splits.ts` (новые), `PROJECT_CONTEXT.md` (этот §43 + статус в roadmap §7).
 
 **Deliverable:** ОДИН логический коммит ровно поверх `0d4b652edb8c6cf92df3df5cef3c68fc361106a1` (не amend), push только в `arena/01a09406-svechnoy-suslik`. БД/workers/Strategy/деплой/Signal Engine не тронуты. После коммита и отчёта — STOP.
+
+==================================================
+44. P2-B HARDENING — DATA PLANE HARDENING (12.09.2026)
+==================================================
+
+**Baseline exact:** `a0e94a15d8475cc7cf4072ee2ad8db6d140e6185` (P2-B initial implementation, parent verified). Branch `arena/01a094cb-svechnoy-suslik` reset to origin/a0e94a1 after stash of dirty main files. ONE hardening commit exact parent a0e94a1, do NOT amend a0e94a1, do NOT integrate P2-A hardening, do NOT touch P2-C, no Prisma schema change, no real PG, no DB reads/writes, no workers, no exchange network, no prod deploy, no Signal Engine.
+
+**Initial audit verdict: FAIL — adversarial findings.**
+
+BLOCKER:
+- computeMarketCoverage ignored requestedRange, reported 100% when truncated. Example: requested 2024-01-01→11, available 05→10, reported 6/0/100% — unacceptable. Must compute requested expected as from + k*D where >=from and <to, explicit grid alignment validation, report requestedExpectedCount/availableInRequestedRange/missingTotal/missingLeading/missingInternal/missingTrailing/coverageRatio/firstAvailable/lastAvailable/internal continuity, empty from>=to fail.
+
+HIGH:
+- pagination termination can loop forever/OOM ignoring cursor/repeating page/non-advancing/descending/shuffled/duplicate/ignores cursor/maxRows/maxPages, no spread push huge, structured failure not loop/OOM, do not silently sort.
+- aggregateCoverage/data-plan order dependence when expectedCount null — order-dependent algorithm, identical aggregate any market order, never overallCoverageRatio>1 healthy.
+- unknown timeframe fail-open producing hasAnomaly false/isOrdered true/gaps 0/isCanonical true and fabricating interval — must be explicit invalid/unknown never healthy, CLI unknown exit non-zero, no arbitrary timeframe, reuse supported timeframe source.
+- eligibility divergence data-plan reimplements BINGX+1d — remove duplicate, use P2-B wrapper/upstream Smart Money eligibility, unknown exchange/timeframe fail-closed, raw vs Smart Money distinct.
+- closed/provider echo validation — post-fetch validate marketId exactly requested, timeframe exactly, closed===true, openTime>=from, <to, strict ASC, no duplicate, fail closed with context, do not silently pass closed=false.
+
+HISTORICAL AS-OF:
+- P2-B may load historical range all closed TODAY as raw, no-lookahead at evaluation time P2-A only, do NOT filter historical dataset using wall-clock now, preserve timestamp, document BacktestBar.time=open time, causally closed at time+D, no Date.now.
+
+MEDIUM:
+- adapter validation fail closed invalid Date/missing openTime/unsafe timestamp/NaN/Infinity OHLCV/invalid OHLC geometry/negative volume, do not rely only P2-A, test ALL OHLC fields, fix OHLC preserved only open/high, test sub-second exact no rounding.
+- contiguous range contract indices refer internal sorted copy end inclusive conflicts P2-A Segment — require strictly ordered input, refuse interval generation if malformed, start inclusive end exclusive matching P2-A, do not silently sort anomalies into usable, common intervals do not silently discard below minBars return isUsable/reason.
+- CLI parser fail closed missing value/unknown flag/duplicate flag/invalid timeframe/date/timezone-less ambiguous datetime/from>=to/pageSize <=0/fractional/excessive, require ISO Z/offset or date-only UTC documented, current CLI always mock markets do not imply live DB, label SIMULATED/NO DB, no mock counts as PG discovery, no DATABASE_URL/DB connection.
+- read-only claim assertReadOnlyDeps diagnostic not JS sandbox, document honestly, expand denylist $executeRawUnsafe, real safety architectural narrow read interface, do not claim runtime inspection proves immutability.
+- immutability/determinism where deterministic immutable claimed freeze/copy sufficiently prevent caller mutation silently changing certified report, test source mutation after computation does not change returned report and mutation of returned core prevented/unsupported.
+- P2-A certification interaction: do NOT wire broken assertDecisionInvariance as security certificate, P2-A false-passes closure lookahead, P2-A hardening separate, update P2-B docs causal certification pending hardened P2-A, P2-B only honest historical data delivery.
+
+TEST QUALITY: mutation testing ~40% strengthen, must kill close→open, low→high, timestamp rounding, adapter sort/dedup, orderBy asc→desc, cursor >→>=, missing closed filter, requested-range basis, aggregate reordering, unknown timeframe fail-open, minBars off-by-one, contiguous endIndex convention, pageSize guards.
+
+**Hardening changes implemented:**
+
+1. **coverage.ts — requested-range basis rewrite:**
+- requestedExpectedCount = ceil((to-from)/D), expected timestamps = from + k*D where >=from and <to (anchored at from, not silently shifted)
+- requestedAlignment validation: fromAligned, toAligned, remainder, isAligned explicit, no silent shift
+- availableInRequestedRange = distinct timestamps in [from,to), not total rows
+- missingTotal = requestedExpected - available, missingLeading = first present index, missingTrailing = last present, missingInternal = gaps inside
+- coverageRatio = available / requestedExpected, capped <=1 using distinct
+- firstAvailable/lastAvailable from min/max, internalContiguous from internal missing
+- empty DB: requestedExpected defined, available 0, missingTotal = expected, ratio 0 never 100%
+- from>=to throws, invalid Date throws
+- expectedCount/missingCount (old first→last) kept for internal continuity but new fields primary
+- contiguousRanges filtered to requested range if provided, computed only on strictly ordered input
+- anomalies: unknown timeframe explicit invalid hasAnomaly true, isTimeframeValid false, grid isCanonical false never healthy true
+- freeze/copy: MarketCoverage and AggregatedCoverage frozen, arrays frozen
+
+2. **aggregateCoverage — order-independent, never >1:**
+- sort by marketId for deterministic iteration, sums commutative
+- if any market requestedExpectedCount null and isRequestedRangeValid, totalRequestedExpected = null (order-independent, not dependent on hasExpected flag order)
+- totalAvailableInRequested sums only when isRequestedRangeValid
+- totalDistinctReturned used for ratio, distinct prevents >1
+- overallCoverageRatio = totalAvailable / totalRequestedExpected, capped min 0 max 1, never >1 healthy
+- identical aggregate for any market order permutation verified
+
+3. **data-plan.ts — remove duplicate aggregate, use upstream eligibility:**
+- planBacktestRun now uses shared aggregateCoverage from coverage.ts, not manual loop
+- eligibility via partitionByEligibility (wraps isSmartMoneyExchangeEligible fail-closed unknown), no manual BINGX+1d
+- isSmartMoneyRunner true → partitionByEligibility, false → all eligible (raw vs Smart Money distinct)
+- formatDataPlanReport labeled SIMULATED / NO DB, no DATABASE_URL mention, note no live DB connection
+- coverageSummary now includes totalDistinctReturned, totalRequestedExpected, totalAvailableInRequested, isTimeframeValid
+- freeze return
+
+4. **gaps.ts — unknown timeframe fail-closed:**
+- isValidTimeframeMs helper
+- detectGaps returns [] if timeframe invalid, not fabricating gaps
+- checkGrid returns isCanonical false, isTimeframeValid false for invalid timeframe, not healthy true
+- analyzeMarketAnomalies returns hasAnomaly true, isTimeframeValid false, grid isCanonical false when timeframe null/invalid
+- duplicates, ordering still checked even when timeframe unknown
+- freeze results
+
+5. **intervals.ts — contiguous contract fix:**
+- isStrictlyOrdered helper
+- findContiguousIntervals requires strictly ordered input, returns [] if malformed, do not silently sort
+- startIndex inclusive, endIndexExclusive exclusive matching P2-A Segment convention, endIndex = exclusive-1 for convenience
+- isUsable based on minBars, reason when not usable, do not silently discard
+- findCommonContiguousIntervals returns [] if timeframe invalid (fail-open fix), does not fabricate continuous interval
+- common intervals do not silently discard below minBars, return with isUsable/reason
+- freeze results
+
+6. **adapter.ts — fail-closed validation:**
+- validateCandleRow checks marketId integer >0, timeframe non-empty, openTime Date valid, ms integer >0 safe integer, ALL OHLCV fields finite, volume >=0, open/high/low/close >0, high >= max(open,close), low <= min(open,close), high >= low, closed boolean
+- candleRowToBacktestBar throws structured error if invalid, preserves ms exactly no rounding, sub-second preserved, returns frozen bar
+- candleRowsToBacktestBars frozen
+- assertTimestampPreserved checks exact equality
+- Historical as-of documented: time=open, closed at time+D, no Date.now, causal certification pending hardened P2-A
+
+7. **data-source.ts — pagination termination hardening:**
+- Constants MAX_PAGE_SIZE 5000, DEFAULT_PAGE_SIZE 1000, DEFAULT_MAX_PAGES 10000, DEFAULT_MAX_ROWS 1_000_000
+- validateCommonFetchArgs checks marketId, timeframe, from<to, pageSize integer >0 <=MAX, throws structured
+- Old API fetchCandlesPaginated now hardened: strict ASC per page, marketId/timeframe/closed/range per row, cursor strictly advancing, duplicate reject via Set, maxPages/maxRows bounded, no spread push (loop), final ASC check, frozen rows, pages counts only data pages (empty not counted) for deterministic termination
+- New V2 API fetchCandlesPaginatedV2 with object args same safety, meta includes pagesFetched, totalRows, lastCursor
+- assertReadOnlyDeps expanded denylist includes $executeRawUnsafe, diagnostic not sandbox documented, checks nested objects
+- getMarketsForAsset, fetchBarsForMarkets preserved for compatibility
+- No Date.now
+
+8. **timeframe.ts — sole source, unknown explicit invalid:**
+- SMCTIMEFRAME_MS sole source, CANONICAL_TIMEFRAMES frozen
+- isCanonicalTimeframe false for unknown (fail-closed)
+- assertCanonicalTimeframe throws explicit invalid never healthy, lists supported
+
+9. **CLI scripts/backtest-data-plan.ts — fail-closed parser:**
+- Strict parseArgs: unknown flag → exit 1, duplicate flag → exit 1, missing value → exit 1
+- isDateOnlyUTC YYYY-MM-DD treated as 00:00:00Z documented, hasExplicitTimezone requires Z or offset, ambiguous datetime like 2024-01-01T00:00:00 rejected
+- parseISODateStrict requires explicit timezone or date-only, throws if NaN
+- timeframe validation via isCanonicalTimeframe fail-closed unknown → exit non-zero
+- from>=to fail, pageSize integer >0 <=MAX, fractional/excessive fail
+- Labels SIMULATED / NO DB prominently, mock markets labeled SIMULATED not discovered from PostgreSQL, no DATABASE_URL env usage, no DB connection
+- No DB writes, no workers, no exchange API
+
+10. **Immutability/determinism:**
+- All coverage, gaps, intervals, adapter, data-source, data-plan return frozen objects/arrays
+- Tests verify source mutation after computation does not change report, returned core mutation prevented
+
+11. **P2-A certification interaction:**
+- Docs updated: causal strategy-provider certification pending hardened P2-A contract (known finding assertDecisionInvariance false-passes closure cheater), P2-B only honest historical data delivery, no broken certificate wiring
+
+**Tests — hardened, mutation killing:**
+
+- scripts/test-backtest-p2b.ts rewritten 228/228:
+  - timeframe sole source, unknown fail-closed
+  - adapter: ALL OHLC fields NaN/Infinity, geometry high<max, low>min, high<low, negative volume, invalid Date, missing openTime, unsafe timestamp, sub-second exact 123ms, frozen, batch order preserved not sorted, mutation close→open, low→high, timestamp rounding
+  - read-only denylist $executeRawUnsafe
+  - coverage: perfect, blocker 2024-01-01→11 available 05→10 ratio 0.6 not 100%, missing leading/trailing/both, one middle of ten, empty DB ratio 0, single middle, internal gap, boundary inclusive exclusive, from>=to fail, grid alignment off-grid detected
+  - pagination: empty 0 rows 0 pages, exact 10/10 1 page, multi 25/10 3 pages, partial, closed filter, deterministic, repeated/non-advancing/descending/shuffled/duplicate/ignores cursor/maxRows/maxPages/pageSize upper/fractional/0, marketId/timeframe/closed/range validation, V2 API
+  - aggregate: order-independent permutations, never >1 with duplicates distinct, unknown timeframe total null order-independent, shared aggregate used in data-plan
+  - unknown timeframe: hasAnomaly true, isCanonical false, gaps empty, isTimeframeValid false, common intervals empty not fabricated
+  - eligibility: generic BINGX 1d eligible, SM BINGX 1d not, unknown exchange/timeframe fail-closed, partition, raw vs SM distinct
+  - gaps/ordering/grid, no silent fix
+  - contiguous: 2 ranges, start inclusive end exclusive, malformed unordered returns [], duplicate time returns [], minBars off-by-one count==min usable, without min all usable, common not silently discard returns isUsable/reason, endIndexExclusive = start+count convention
+  - P2-A validation integration duplicate/non-monotonic fails
+  - no-lookahead causal history allowed future blocked fetch respects to
+  - plan: SIMULATED/NO DB label, no DATABASE_URL in report, asset/marketsCount/readTasks/estimatedPages, 1d SM eligible 1 ineligible BINGX, coverageSummary, warnings, header
+  - immutability: frozen coverage, contiguousRanges, anomalies, source mutation after computation does not change report, returned core mutation prevented, fetched rows frozen, adapter bar frozen
+  - CLI spawn: unknown flag, duplicate flag, missing value, invalid timeframe, ambiguous datetime, from>=to, pageSize 0/fractional/excessive fail non-zero, date-only UTC and ISO Z pass labeled SIMULATED/NO DB
+  - mutation killing explicit checks
+
+- P2-A regressions: test-backtest-engine 277/277, test-backtest-splits 108/108, test-backtest-metrics 123/123
+
+- tsc --noEmit exit 0
+
+- npm run build: Compiled successfully in 11.1s, then fails collecting page data for /api/register due to @prisma/client not initialized (binaries.prisma.sh network blocked in sandbox) — identical to baseline 0d4b652 and fa43d2f etc, environment-only not code. Full build exit code 1 reported honestly.
+
+- git diff --check exit 0
+
+- Signal ancestry: edf3732da81a8916efc7e63f5608401ee6e2668c fetched via git fetch origin <full SHA>, git merge-base --is-ancestor edf3732 HEAD → exit 1 (NOT ancestor, not 128), verified before and after commit. edf3732 is Signal Engine dry-run, forbidden to port, remains NOT ancestor.
+
+**Remaining limitations / honest reporting:**
+
+- Real PostgreSQL verification NOT performed, no DB connection/writes, no .env/secrets, no workers, no exchange network, no production deployment — as required by hardening task constraints.
+- P2-A certification pending hardened P2-A contract (assertDecisionInvariance false-passes closure cheater) — P2-B docs say causal certification pending, not wired as security certificate.
+- P2-C sibling separately, no implementation until P2-A SHA — not touched.
+- No prod acceptance — hardening commit is data-plane only, not acceptance.
+- Build needs prisma generate which requires network to binaries.prisma.sh blocked in sandbox — tsc passes, build compiles successfully but fails page data collection identical to baseline.
+
+**Integration with hardened P2-A:**
+
+- P2-B hardening is independent of P2-A hardening (task says do NOT integrate P2-A hardening yet). P2-B now delivers honest historical data with requested-range coverage, safe pagination, order-independent aggregate, explicit unknown timeframe invalid, upstream eligibility, closed/provider validation, fail-closed adapter, ordered intervals with exclusive end, fail-closed CLI, frozen immutability. When hardened P2-A is ready, P2-B can be integrated via assertDecisionInvariance for provider certification and shared timeframe source remains SMCTIMEFRAME_MS.
+
+**Files changed in hardening commit (exact parent a0e94a1):**
+
+- lib/backtest/adapter.ts — fail-closed validation ALL fields, frozen, sub-second exact, historical as-of docs
+- lib/backtest/coverage.ts — requested-range rewrite, alignment, leading/trailing/internal, distinct, ratio capped, freeze, order-independent aggregate
+- lib/backtest/data-plan.ts — shared aggregate, upstream eligibility, SIMULATED/NO DB label, freeze
+- lib/backtest/data-source.ts — pagination hardening strict ASC, provider echo, cursor advancing, duplicate reject, maxPages/maxRows, pageSize upper bound, no spread push, frozen, assertReadOnlyDeps expanded, V2 API
+- lib/backtest/eligibility.ts — wrapper uses upstream isSmartMoneyExchangeEligible fail-closed, partitionByEligibility 2-arg overload assumes SM, frozen
+- lib/backtest/gaps.ts — unknown timeframe explicit invalid never healthy, isValidTimeframeMs, freeze
+- lib/backtest/intervals.ts — ordered input required, exclusive end, isUsable/reason not silent discard, unknown timeframe empty not fabricated, freeze
+- lib/backtest/timeframe.ts — sole source, frozen CANONICAL_TIMEFRAMES, assertCanonicalTimeframe throws explicit invalid
+- scripts/backtest-data-plan.ts — fail-closed parser duplicate/unknown/missing, ISO Z/offset or date-only UTC, timezone-less rejected, pageSize guards, SIMULATED/NO DB label, no DATABASE_URL usage
+- scripts/test-backtest-p2b.ts — rewritten 228 tests covering blocker/high/medium, mutation killing
+- PROJECT_CONTEXT.md — this §44
+
+**Verification summary:**
+
+- P2-B hardened tests: 228/228
+- P2-A regressions: engine 277/277, splits 108/108, metrics 123/123
+- tsc --noEmit: exit 0
+- npm run build: Compiled successfully in 11.1s (or 3.0s) then Error @prisma/client did not initialize yet — page data collection fails due to sandbox network blocked binaries.prisma.sh, identical to baseline, not code regression — full exit code 1
+- git diff --check: exit 0
+- Signal ancestry: git merge-base --is-ancestor edf3732da81a8916efc7e63f5608401ee6e2668c <HARDENING_SHA> → exit 1 (NOT ancestor, not 128) — edf3732 fetched before check
+- No DB writes, no .env, no secrets, no workers, no deploy, no Signal Engine, no Prisma schema change
+
+**Deliverable:** ONE hardening commit exact parent a0e94a15d8475cc7cf4072ee2ad8db6d140e6185 (a0e94a1), push arena/01a094cb-svechnoy-suslik, STOP.

@@ -1,7 +1,7 @@
 /**
  * P2-B — обнаружение дыр, дубликатов, порядка и сетки.
  *
- * Чистый детерминированный слой, без БД, без сети.
+ * Чистый детерминированный слой, без БД, без сети, без Date.now().
  * Работает поверх REAL P2-A BacktestBar (time ms).
  *
  * Источник длительности таймфрейма — единственный: SMCTIMEFRAME_MS
@@ -17,26 +17,20 @@
  *   (off-multiple)
  * - off-grid: time % timeframeMs !=0 (BINGX 1d 16:00 UTC → 57600000 mod)
  * - никакого silent fix: только отчёт или ошибка выше по стеку
+ * - unknown/invalid timeframe = explicit invalid, never healthy defaults
  */
 
 import type { BacktestBar } from "./contract";
 
 export interface Gap {
-  /** Индекс предыдущего бара в массиве (по порядку входа). */
   readonly prevIndex: number;
-  /** Индекс следующего бара. */
   readonly nextIndex: number;
   readonly prevTime: number;
   readonly nextTime: number;
-  /** Фактическая дельта ms. */
   readonly deltaMs: number;
-  /** Ожидаемая дельта (timeframeMs). */
   readonly expectedMs: number;
-  /** Сколько баров пропущено, если дельта кратна (floor). */
   readonly missingBars: number;
-  /** Дельта кратна timeframeMs? */
   readonly isMultiple: boolean;
-  /** Дельта < timeframeMs? */
   readonly isShort: boolean;
 }
 
@@ -59,16 +53,21 @@ export interface GridAnomaly {
   readonly remainder: number;
 }
 
+export function isValidTimeframeMs(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value > 0;
+}
+
 /**
  * Обнаружение дыр. Предполагает, что массив уже в том порядке, в каком
  * пришёл из БД (ASC). Если порядок нарушен, gap всё равно считается по
  * фактической паре, а ordering violation ловится отдельно.
+ * Если timeframeMs invalid → возвращает [] и помечает invalid выше.
  */
 export function detectGaps(
   bars: readonly BacktestBar[],
   timeframeMs: number
 ): Gap[] {
-  if (!Number.isFinite(timeframeMs) || timeframeMs <= 0) {
+  if (!isValidTimeframeMs(timeframeMs)) {
     return [];
   }
 
@@ -83,8 +82,6 @@ export function detectGaps(
       continue;
     }
 
-    // Любое отклонение от точного шага — gap/аномалия.
-    // missingBars считается только если delta > 0 и кратно.
     const isMultiple = delta > 0 && delta % timeframeMs === 0;
     const missingBars = isMultiple ? delta / timeframeMs - 1 : 0;
     const isShort = delta < timeframeMs;
@@ -125,14 +122,13 @@ export function detectDuplicates(
 
   for (const [time, indices] of byTime.entries()) {
     if (indices.length > 1) {
-      dups.push({ time, indices, count: indices.length });
+      dups.push({ time, indices: Object.freeze([...indices]), count: indices.length });
     }
   }
 
-  // Детерминированный порядок по времени.
   dups.sort((a, b) => a.time - b.time);
 
-  return dups;
+  return Object.freeze(dups) as DuplicateGroup[];
 }
 
 export function checkOrdering(
@@ -154,15 +150,16 @@ export function checkOrdering(
     }
   }
 
-  return { isOrdered: violations.length === 0, violations };
+  return { isOrdered: violations.length === 0, violations: Object.freeze(violations) as OrderingViolation[] };
 }
 
 export function checkGrid(
   bars: readonly BacktestBar[],
   timeframeMs: number
-): { isCanonical: boolean; offGrid: GridAnomaly[] } {
-  if (!Number.isFinite(timeframeMs) || timeframeMs <= 0) {
-    return { isCanonical: true, offGrid: [] };
+): { isCanonical: boolean; offGrid: GridAnomaly[]; isTimeframeValid: boolean } {
+  if (!isValidTimeframeMs(timeframeMs)) {
+    // unknown/invalid timeframe must NOT return healthy true/zero
+    return { isCanonical: false, offGrid: [], isTimeframeValid: false };
   }
 
   const off: GridAnomaly[] = [];
@@ -176,25 +173,34 @@ export function checkGrid(
     }
   }
 
-  return { isCanonical: off.length === 0, offGrid: off };
+  return { isCanonical: off.length === 0, offGrid: Object.freeze(off) as GridAnomaly[], isTimeframeValid: true };
 }
 
-/**
- * Совокупный отчёт по одному рынку — то, что требуется P2-B для
- * coverage per market×timeframe.
- */
 export interface MarketAnomalies {
   readonly gaps: Gap[];
   readonly duplicates: DuplicateGroup[];
   readonly ordering: { isOrdered: boolean; violations: OrderingViolation[] };
-  readonly grid: { isCanonical: boolean; offGrid: GridAnomaly[] };
+  readonly grid: { isCanonical: boolean; offGrid: GridAnomaly[]; isTimeframeValid: boolean };
   readonly hasAnomaly: boolean;
+  readonly isTimeframeValid: boolean;
 }
 
 export function analyzeMarketAnomalies(
   bars: readonly BacktestBar[],
-  timeframeMs: number
+  timeframeMs: number | null
 ): MarketAnomalies {
+  if (!isValidTimeframeMs(timeframeMs)) {
+    // fail-open fix: unknown timeframe is explicit invalid, never healthy
+    return {
+      gaps: [],
+      duplicates: detectDuplicates(bars),
+      ordering: checkOrdering(bars),
+      grid: { isCanonical: false, offGrid: [], isTimeframeValid: false },
+      hasAnomaly: true,
+      isTimeframeValid: false,
+    };
+  }
+
   const gaps = detectGaps(bars, timeframeMs);
   const duplicates = detectDuplicates(bars);
   const ordering = checkOrdering(bars);
@@ -204,7 +210,15 @@ export function analyzeMarketAnomalies(
     gaps.length > 0 ||
     duplicates.length > 0 ||
     !ordering.isOrdered ||
-    !grid.isCanonical;
+    !grid.isCanonical ||
+    !grid.isTimeframeValid;
 
-  return { gaps, duplicates, ordering, grid, hasAnomaly };
+  return {
+    gaps: Object.freeze(gaps) as Gap[],
+    duplicates,
+    ordering,
+    grid,
+    hasAnomaly,
+    isTimeframeValid: true,
+  };
 }

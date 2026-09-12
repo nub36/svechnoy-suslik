@@ -1,24 +1,34 @@
 /**
  * P2-B — read-only planning interface / CLI contract.
  *
- * Задача: описать будущий прогон без записи в БД, без сети, без workers.
+ * Задача: описать будущий прогон без записи в БД, без сети, без workers,
+ * без DATABASE_URL, без DB connection.
+ *
  * План содержит:
  * - asset, markets, timeframe, requested range
  * - число DB read tasks (по одному на market)
  * - pageSize
  * - coverage/anomaly summary, если данные уже предоставлены через deps
  *   (для --plan режима, где deps может быть реальной Prisma с SELECT)
- * - eligibility summary, если runner для Smart Money (BINGX 1d exclusion)
+ * - eligibility summary, если runner для Smart Money (BINGX 1d exclusion via upstream)
  *
  * Планирование — чистая функция, не ходит в БД сама. Данные для summary
  * передаются извне (через coverage, который уже посчитан).
  *
  * Совместимо с существующей архитектурой --plan для OHLCV worker:
  * отдельный CLI скрипт может вызвать planBacktestRun и вывести отчёт.
+ *
+ * P2-B HARDENING:
+ * - remove duplicate aggregateCoverage implementation, prefer shared lib/backtest/coverage.ts
+ * - remove duplicate BINGX+1d manual check, use P2-B wrapper / upstream Smart Money eligibility
+ * - unknown exchange/timeframe fail-closed
+ * - raw vs Smart Money eligibility distinct
  */
 
 import type { BacktestMarketRow } from "./data-source";
 import type { MarketCoverage } from "./coverage";
+import { aggregateCoverage } from "./coverage";
+import { partitionByEligibility } from "./eligibility";
 
 export interface BacktestDataPlanRequest {
   readonly assetSymbol: string;
@@ -30,7 +40,7 @@ export interface BacktestDataPlanRequest {
   readonly pageSize: number;
   /** Опционально: уже посчитанное покрытие для каждого рынка (для summary). */
   readonly coverages?: readonly MarketCoverage[];
-  /** Является ли runner для Smart Money (применяет BINGX 1d eligibility). */
+  /** Является ли runner для Smart Money (применяет BINGX 1d eligibility via upstream). */
   readonly isSmartMoneyRunner?: boolean;
   /** Минимум баров из P2-A, если есть (для usable ranges). */
   readonly minBarsPerSegment?: number | null;
@@ -57,10 +67,14 @@ export interface BacktestDataPlan {
   }[];
   readonly coverageSummary?: {
     totalReturned: number;
+    totalDistinctReturned: number;
+    totalRequestedExpected: number | null;
+    totalAvailableInRequested: number | null;
     totalExpected: number | null;
     overallCoverageRatio: number | null;
     emptyMarkets: number;
     marketsWithAnomalies: number;
+    isTimeframeValid: boolean;
   };
   readonly warnings: readonly string[];
 }
@@ -82,41 +96,29 @@ export function planBacktestRun(
 
   const warnings: string[] = [];
 
-  // Eligibility: для Smart Money runner применяем существующую политику
-  // isSmartMoneyExchangeEligible, но не хардкодим её здесь — логика в
-  // eligibility.ts. Здесь только BINGX 1d как частный случай для плана,
-  // но источник — та же функция, чтобы не было второго набора констант.
-  // Для generic runner — все eligible.
+  // Eligibility via upstream P2-B wrapper, not manual BINGX check
   const isSmartMoney = req.isSmartMoneyRunner === true;
-  const ineligible: { marketId: number; exchange: string; reason: string }[] =
-    [];
-  let eligibleMarkets = [...req.markets];
+  let eligibleMarkets: readonly BacktestMarketRow[];
+  let ineligible: { marketId: number; exchange: string; reason: string }[] = [];
 
   if (isSmartMoney) {
-    // Ленивый импорт через динамический require невозможен в pure слое,
-    // поэтому применяем правило напрямую, но оно совпадает с
-    // isSmartMoneyExchangeEligible: BINGX + 1d => ineligible.
-    // Чтобы не дублировать константы, мы всё равно проверяем только
-    // это правило, а полный список поддерживаемых бирж — в eligibility.
-    const before = eligibleMarkets.length;
-    eligibleMarkets = eligibleMarkets.filter((m) => {
-      const isBingx1d = m.exchange === "BINGX" && req.timeframe === "1d";
-      if (isBingx1d) {
-        ineligible.push({
-          marketId: m.id,
-          exchange: m.exchange,
-          reason: "BINGX excluded for 1d in Smart Money (off-grid 16:00 UTC)",
-        });
-        return false;
-      }
-      return true;
-    });
+    // Use shared partitionByEligibility which wraps isSmartMoneyExchangeEligible (fail-closed unknown)
+    const partitioned = partitionByEligibility(req.markets, req.timeframe);
+    eligibleMarkets = partitioned.eligible;
+    ineligible = partitioned.ineligible.map((m) => ({
+      marketId: m.market.id,
+      exchange: m.market.exchange,
+      reason: m.reason,
+    }));
 
-    if (eligibleMarkets.length < before) {
+    if (ineligible.length > 0) {
       warnings.push(
-        `Smart Money 1d: excluded ${before - eligibleMarkets.length} BINGX market(s)`
+        `Smart Money ${req.timeframe}: excluded ${ineligible.length} market(s) via upstream eligibility`
       );
     }
+  } else {
+    // Generic runner: all markets eligible (raw data)
+    eligibleMarkets = req.markets;
   }
 
   // Оценка числа страниц на рынок
@@ -134,50 +136,35 @@ export function planBacktestRun(
   let coverageSummary: BacktestDataPlan["coverageSummary"] | undefined;
 
   if (req.coverages && req.coverages.length > 0) {
-    let totalReturned = 0;
-    let totalExpected: number | null = 0;
-    let hasExpected = false;
-    let emptyMarkets = 0;
-    let marketsWithAnomalies = 0;
-
-    for (const c of req.coverages) {
-      totalReturned += c.returnedCount;
-      if (c.isEmpty) emptyMarkets += 1;
-      if (c.anomalies.hasAnomaly) marketsWithAnomalies += 1;
-      if (c.expectedCount !== null) {
-        if (totalExpected !== null) totalExpected += c.expectedCount;
-        hasExpected = true;
-      } else {
-        if (hasExpected) totalExpected = null;
-      }
-    }
-
-    if (!hasExpected) totalExpected = null;
-
-    let overallCoverageRatio: number | null = null;
-
-    if (totalExpected !== null && totalExpected > 0) {
-      overallCoverageRatio = totalReturned / totalExpected;
-    }
+    // Use shared order-independent aggregateCoverage
+    const agg = aggregateCoverage(req.coverages);
 
     coverageSummary = {
-      totalReturned,
-      totalExpected,
-      overallCoverageRatio,
-      emptyMarkets,
-      marketsWithAnomalies,
+      totalReturned: agg.totalReturned,
+      totalDistinctReturned: agg.totalDistinctReturned,
+      totalRequestedExpected: agg.totalRequestedExpected,
+      totalAvailableInRequested: agg.totalAvailableInRequested,
+      totalExpected: agg.totalExpected,
+      overallCoverageRatio: agg.overallCoverageRatio,
+      emptyMarkets: agg.emptyMarkets,
+      marketsWithAnomalies: agg.marketsWithAnomalies,
+      isTimeframeValid: agg.isTimeframeValid,
     };
 
-    if (emptyMarkets > 0) {
-      warnings.push(`${emptyMarkets} market(s) empty — coverage not 100%`);
+    if (agg.emptyMarkets > 0) {
+      warnings.push(`${agg.emptyMarkets} market(s) empty — coverage not 100%`);
     }
 
-    if (marketsWithAnomalies > 0) {
-      warnings.push(`${marketsWithAnomalies} market(s) have anomalies`);
+    if (agg.marketsWithAnomalies > 0) {
+      warnings.push(`${agg.marketsWithAnomalies} market(s) have anomalies`);
+    }
+
+    if (!agg.isTimeframeValid) {
+      warnings.push(`unknown/invalid timeframe — not healthy`);
     }
   }
 
-  return {
+  return Object.freeze({
     assetSymbol: req.assetSymbol,
     timeframe: req.timeframe,
     timeframeMs: req.timeframeMs,
@@ -191,16 +178,16 @@ export function planBacktestRun(
     estimatedPagesPerMarket,
     minBarsPerSegment: req.minBarsPerSegment ?? null,
     isSmartMoneyRunner: isSmartMoney,
-    ineligibleMarkets: ineligible,
+    ineligibleMarkets: Object.freeze([...ineligible]),
     coverageSummary,
-    warnings,
-  };
+    warnings: Object.freeze([...warnings]),
+  });
 }
 
 export function formatDataPlanReport(plan: BacktestDataPlan): string {
   const lines: string[] = [];
 
-  lines.push(`Backtest Data Plan — P2-B`);
+  lines.push(`Backtest Data Plan — P2-B — SIMULATED / NO DB`);
   lines.push(`Asset: ${plan.assetSymbol}`);
   lines.push(`Timeframe: ${plan.timeframe} (${plan.timeframeMs ?? "unknown"} ms)`);
   lines.push(`Range: ${plan.from} → ${plan.to} (${plan.requestedRangeMs} ms)`);
@@ -215,25 +202,33 @@ export function formatDataPlanReport(plan: BacktestDataPlan): string {
   );
 
   if (plan.ineligibleMarkets.length > 0) {
-    lines.push(`Ineligible:`);
+    lines.push(`Ineligible (upstream Smart Money eligibility, fail-closed unknown):`);
     for (const m of plan.ineligibleMarkets) {
       lines.push(`  - marketId ${m.marketId} ${m.exchange}: ${m.reason}`);
     }
   }
 
   if (plan.coverageSummary) {
-    lines.push(`Coverage:`);
+    lines.push(`Coverage (requested-range basis):`);
     lines.push(`  returned: ${plan.coverageSummary.totalReturned}`);
+    lines.push(`  distinct: ${plan.coverageSummary.totalDistinctReturned}`);
     lines.push(
-      `  expected: ${plan.coverageSummary.totalExpected ?? "n/a"}`
+      `  requestedExpected: ${plan.coverageSummary.totalRequestedExpected ?? "n/a"}`
     );
     lines.push(
-      `  ratio: ${plan.coverageSummary.overallCoverageRatio ?? "n/a"}`
+      `  availableInRequested: ${plan.coverageSummary.totalAvailableInRequested ?? "n/a"}`
+    );
+    lines.push(
+      `  expected (first→last): ${plan.coverageSummary.totalExpected ?? "n/a"}`
+    );
+    lines.push(
+      `  ratio (requested): ${plan.coverageSummary.overallCoverageRatio ?? "n/a"}`
     );
     lines.push(`  empty: ${plan.coverageSummary.emptyMarkets}`);
     lines.push(
       `  with anomalies: ${plan.coverageSummary.marketsWithAnomalies}`
     );
+    lines.push(`  timeframeValid: ${plan.coverageSummary.isTimeframeValid}`);
   }
 
   if (plan.warnings.length > 0) {
@@ -242,6 +237,8 @@ export function formatDataPlanReport(plan: BacktestDataPlan): string {
       lines.push(`  - ${w}`);
     }
   }
+
+  lines.push(`NOTE: This report is SIMULATED / NO DB — no live DB connection, no env DB.`);
 
   return lines.join("\n");
 }
