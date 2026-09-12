@@ -21,6 +21,7 @@
  */
 
 import type { BacktestBar } from "./contract";
+import { deepFreeze } from "./immutable";
 
 export interface Gap {
   readonly prevIndex: number;
@@ -99,7 +100,7 @@ export function detectGaps(
     });
   }
 
-  return gaps;
+  return deepFreeze(gaps) as Gap[];
 }
 
 export function detectDuplicates(
@@ -128,7 +129,8 @@ export function detectDuplicates(
 
   dups.sort((a, b) => a.time - b.time);
 
-  return Object.freeze(dups) as DuplicateGroup[];
+  // MANDATORY FIX 4: элементы и их вложенные массивы тоже заморожены.
+  return deepFreeze(dups) as DuplicateGroup[];
 }
 
 export function checkOrdering(
@@ -150,7 +152,10 @@ export function checkOrdering(
     }
   }
 
-  return { isOrdered: violations.length === 0, violations: Object.freeze(violations) as OrderingViolation[] };
+  return deepFreeze({
+    isOrdered: violations.length === 0,
+    violations: violations as OrderingViolation[],
+  });
 }
 
 export function checkGrid(
@@ -173,7 +178,11 @@ export function checkGrid(
     }
   }
 
-  return { isCanonical: off.length === 0, offGrid: Object.freeze(off) as GridAnomaly[], isTimeframeValid: true };
+  return deepFreeze({
+    isCanonical: off.length === 0,
+    offGrid: off as GridAnomaly[],
+    isTimeframeValid: true,
+  });
 }
 
 export interface MarketAnomalies {
@@ -191,14 +200,14 @@ export function analyzeMarketAnomalies(
 ): MarketAnomalies {
   if (!isValidTimeframeMs(timeframeMs)) {
     // fail-open fix: unknown timeframe is explicit invalid, never healthy
-    return {
+    return deepFreeze({
       gaps: [],
       duplicates: detectDuplicates(bars),
       ordering: checkOrdering(bars),
       grid: { isCanonical: false, offGrid: [], isTimeframeValid: false },
       hasAnomaly: true,
       isTimeframeValid: false,
-    };
+    });
   }
 
   const gaps = detectGaps(bars, timeframeMs);
@@ -213,12 +222,12 @@ export function analyzeMarketAnomalies(
     !grid.isCanonical ||
     !grid.isTimeframeValid;
 
-  return {
-    gaps: Object.freeze(gaps) as Gap[],
+  return deepFreeze({
+    gaps: gaps as Gap[],
     duplicates,
     ordering,
     grid,
     hasAnomaly,
     isTimeframeValid: true,
-  };
+  });
 }

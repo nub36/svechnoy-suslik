@@ -15,6 +15,25 @@
  * - CLI fail-closed (tested via child process)
  * - immutability/determinism freeze/copy
  * - mutation killing: close→open, low→high, timestamp rounding, sort/dedup, asc→desc, >→>=, missing closed filter, requested-range basis, aggregate reordering, unknown timeframe fail-open, minBars off-by-one, endIndex convention, pageSize guards
+ *
+ * HARDENING #2 (2026-09-12) — MANDATORY FIX 1..5:
+ * - FIX 1 (§4b/4c/14d): канонический контракт покрытия — каноническая сетка
+ *   openTime % D == 0, а не from-anchored слоты; alignment/canonicalization
+ *   НЕ отбрасываются, а видны в coverage/aggregate/plan/report/CLI; окно
+ *   без канонических слотов → fail closed (CanonicalWindowError).
+ * - FIX 2 (§5b): адверсариальные тесты V2 — каждое семейство guard-ов
+ *   пинится НАБЛЮДАЕМЫМ поведением (throw/успех), а не дублированием
+ *   условий реализации.
+ * - FIX 3 (§5c): maxRows — жёсткая верхняя граница результата в V1 и V2;
+ *   успешный fetch никогда не больше maxRows; превышение → fail closed,
+ *   молчаливое усечение запрещено (регресс аудита: maxRows=1/pageSize=5000).
+ * - FIX 4 (§14b/14d): глубокая заморозка всех публичных структур (включая
+ *   requestedAlignment, requestedRange, элементы gaps/contiguous/anomalies,
+ *   findCommonTimestamps, meta и строки пагинации) + вложенные попытки
+ *   мутации; Date-копии, т.к. Object.freeze не защищает от setTime.
+ * - FIX 5 (§12): no-lookahead — только context-channel-only формулировка:
+ *   структурный барьер SignalContext + контрфакт; утечка через замыкание/
+ *   глобальную переменную документирована как НЕ доказуемо предотвращённая.
  */
 
 import type { BacktestBar } from "../lib/backtest/contract";
@@ -34,6 +53,7 @@ import {
   checkGrid,
   analyzeMarketAnomalies,
   isValidTimeframeMs,
+  type GridAnomaly,
 } from "../lib/backtest/gaps";
 import {
   computeMarketCoverage,
@@ -69,8 +89,20 @@ import {
   CANONICAL_TIMEFRAMES,
   isCanonicalTimeframe,
   assertCanonicalTimeframe,
+  canonicalWindow,
+  countCanonicalSlots,
+  CanonicalWindowError,
 } from "../lib/backtest/timeframe";
 import { isSmartMoneyExchangeEligible } from "../lib/strategies/smart-money-eligibility";
+import { utcDateFromMs } from "../lib/backtest/timeframe";
+import {
+  probeProvider,
+  assertDecisionInvariance,
+  poisonFutureBars,
+} from "../lib/backtest/no-lookahead";
+import { runBacktest } from "../lib/backtest/engine";
+import { entryDecision } from "../lib/backtest/contract";
+import type { SignalProvider, BacktestConfig } from "../lib/backtest/contract";
 import { spawnSync } from "child_process";
 
 let passed = 0;
@@ -246,6 +278,26 @@ function makeV2Deps(candles: BacktestCandleRow[]) {
       res.sort((a, b) => a.openTime.getTime() - b.openTime.getTime());
       return res.slice(0, take);
     },
+  };
+}
+
+/* V2 scripted deps — провайдер под контролем теста (adversarial FIX 2) */
+
+function makeV2ScriptedDeps(
+  handler: (args: any) => BacktestCandleRow[]
+): { deps: any; calls: () => number; lastArgs: () => any } {
+  let callCount = 0;
+  let lastArgs: any = null;
+  return {
+    deps: {
+      findCandlesPage: async (args: any) => {
+        callCount += 1;
+        lastArgs = args;
+        return handler(args);
+      },
+    },
+    calls: () => callCount,
+    lastArgs: () => lastArgs,
   };
 }
 
@@ -505,6 +557,137 @@ ok(!assertReadOnlyDeps(badDeps3).ok, "deps: detects $executeRaw");
   ok(alignedOk.requestedAlignment!.isAligned, "coverage alignment: aligned true when on grid");
 
   /* ------------------------------------------------------------------ */
+  /* 4b. CANONICAL WINDOW CONTRACT — MANDATORY FIX 1                     */
+  /* ------------------------------------------------------------------ */
+  /* Контракт (вариант B): запрос [from, to) валиден, но ожидаемая        */
+  /* занятость считается по КАНОНИЧЕСКОЙ сетке openTime % D == 0, а не по */
+  /* сетке, заякоренной на from. Окно без канонических слотов → fail      */
+  /* closed. Alignment не вычисляется «в никуда»: он виден потребителю.   */
+
+  // (1) Регресс из аудита: 1h [00:30, 03:30) → канонические 01:00/02:00/03:00
+  const nonAlignedFrom = T0 + 30 * 60_000;
+  const nonAlignedTo = T0 + 3 * H1 + 30 * 60_000;
+  const nonAlignedFullBars = [mkBar(T0), mkBar(T0 + H1), mkBar(T0 + 2 * H1), mkBar(T0 + 3 * H1)];
+  const nonAlignedCov = computeMarketCoverage(10, "1h", nonAlignedFullBars, H1, {
+    from: new Date(nonAlignedFrom),
+    to: new Date(nonAlignedTo),
+  });
+  ok(nonAlignedCov.requestedExpectedCount === 3, "FIX1: 1h [00:30,03:30) expected 3 canonical slots (01/02/03), NOT 4 from-anchored");
+  ok(nonAlignedCov.requestedExpectedBasis === "canonical-grid", "FIX1: expected basis declared canonical-grid");
+  ok(nonAlignedCov.requestedAlignment !== null && !nonAlignedCov.requestedAlignment!.isAligned, "FIX1: [00:30,03:30) alignment false (surfaced, not dropped)");
+  ok(nonAlignedCov.requestedAlignment!.canonicalized === true, "FIX1: [00:30,03:30) canonicalized true");
+  ok(nonAlignedCov.requestedAlignment!.effectiveFrom === T0 + H1, "FIX1: effectiveFrom = first canonical opening 01:00");
+  ok(nonAlignedCov.availableInRequestedRange === 3, "FIX1: [00:30,03:30) available 3 (01:00,02:00,03:00 in window)");
+  ok(nonAlignedCov.coverageRatio === 1 && nonAlignedCov.coverageIdentityHolds, "FIX1: ratio 1 on canonicalized window BUT flagged (see aggregate disclosure)");
+  ok(nonAlignedCov.missingTotal === 0, "FIX1: missingTotal 0 for canonicalized full window");
+
+  // (2) Выровненное [00:00, 03:00): 3 слота, канонизация не требуется
+  const alignedThreeCov = computeMarketCoverage(10, "1h", [mkBar(T0), mkBar(T0 + H1), mkBar(T0 + 2 * H1)], H1, {
+    from: new Date(T0),
+    to: new Date(T0 + 3 * H1),
+  });
+  ok(alignedThreeCov.requestedExpectedCount === 3, "FIX1: aligned [00:00,03:00) expected 3");
+  ok(alignedThreeCov.requestedAlignment!.isAligned && !alignedThreeCov.requestedAlignment!.canonicalized, "FIX1: aligned window NOT canonicalized");
+  ok(alignedThreeCov.coverageRatio === 1, "FIX1: aligned full window ratio 1 (plain, no disclosure)");
+  ok(alignedThreeCov.offGridBarsInRequestedRange === 0, "FIX1: aligned window has no off-grid bars in range");
+
+  // (3) 1d [Jan1 12:00, Jan11 12:00): 10 канонических открытий (Jan2..Jan11), авто-выравнивание
+  const d1From = Date.UTC(2024, 0, 1, 12);
+  const d1To = Date.UTC(2024, 0, 11, 12);
+  const d1Bars = makeSequentialBars(9, Date.UTC(2024, 0, 2), D1); // Jan2..Jan10 (9 из 10)
+  const d1Cov = computeMarketCoverage(10, "1d", d1Bars, D1, { from: new Date(d1From), to: new Date(d1To) });
+  ok(d1Cov.requestedExpectedCount === 10, "FIX1: 1d [Jan1 12:00,Jan11 12:00) expected 10 canonical openings");
+  ok(d1Cov.requestedAlignment!.canonicalized === true && !d1Cov.requestedAlignment!.isAligned, "FIX1: 1d 12:00 window canonicalized");
+  ok(d1Cov.availableInRequestedRange === 9, "FIX1: 1d available 9 of 10");
+  ok(d1Cov.coverageRatio === 0.9, "FIX1: 1d ratio 0.9 — NOT 1/0 while alignment=false");
+  // Present: Jan2..Jan10 (9 канонических). Отсутствует Jan11 00:00 — это
+  // ПОСЛЕ последнего присутствующего, то есть trailing, а не leading.
+  ok(d1Cov.missingTrailing === 1 && d1Cov.missingLeading === 0 && d1Cov.missingInternal === 0, "FIX1: 1d missingTrailing 1 (Jan11 00:00 absent), leading 0");
+  ok(d1Cov.coverageIdentityHolds, "FIX1: 1d counter identity holds");
+
+  // (3b) Тот же запрос, но данные покрывают ВСЁ окно: ratio 1 обязан быть
+  //      помечен canonicalized — «100% без оговорки» запрещено.
+  const d1FullBars = makeSequentialBars(10, Date.UTC(2024, 0, 2), D1);
+  const d1FullCov = computeMarketCoverage(10, "1d", d1FullBars, D1, { from: new Date(d1From), to: new Date(d1To) });
+  ok(d1FullCov.coverageRatio === 1 && d1FullCov.missingTotal === 0, "FIX1: 1d full canonicalized window ratio 1, missing 0");
+  ok(d1FullCov.requestedAlignment!.canonicalized === true, "FIX1: ratio 1 is canonicalized → disclosure required (not a plain 100%)");
+  const d1Agg = aggregateCoverage([d1FullCov]);
+  ok(d1Agg.requiresCanonicalWindowDisclosure === true, "FIX1: aggregate requires canonical-window disclosure for 12:00-anchored 1d request");
+  ok(d1Agg.alignedMarkets === 0 && d1Agg.canonicalizedMarkets === 1, "FIX1: aggregate surfaces canonicalizedMarkets=1 / alignedMarkets=0");
+  ok(d1Agg.overallCoverageRatio === 1 && d1Agg.requiresCanonicalWindowDisclosure, "FIX1: 100% + disclosure flag coexist (no silent healthy 100%)");
+
+  // (4) Окно БЕЗ канонических слотов → fail closed (не «coverage 0%»)
+  expectThrow(
+    () => computeMarketCoverage(10, "1h", [mkBar(T0 + H1)], H1, { from: new Date(T0 + 10 * 60_000), to: new Date(T0 + 50 * 60_000) }),
+    "FIX1: window with zero canonical openings fails closed (never ratio 0)"
+  );
+  expectThrow(
+    () => computeMarketCoverage(10, "1d", [], D1, { from: new Date(Date.UTC(2024, 0, 1, 12)), to: new Date(Date.UTC(2024, 0, 1, 23)) }),
+    "FIX1: 1d window before first canonical midnight fails closed"
+  );
+
+  // (5) Пустое окно (нет данных) — счётчики обязаны быть согласованы
+  const emptyWinCov = computeMarketCoverage(10, "1h", [], H1, { from: new Date(T0 + 30 * 60_000), to: new Date(T0 + 2 * H1 + 30 * 60_000) });
+  ok(emptyWinCov.requestedExpectedCount === 2, "FIX1: empty window expected 2 canonical slots (01:00,02:00)");
+  ok(emptyWinCov.availableInRequestedRange === 0 && emptyWinCov.coverageRatio === 0, "FIX1: empty window ratio 0 (never 1)");
+  ok(emptyWinCov.missingTotal === 2 && emptyWinCov.missingLeading === 2 && emptyWinCov.missingTrailing === 0 && emptyWinCov.missingInternal === 0, "FIX1: empty window missingTotal=2 via leading (identity holds)");
+  ok(emptyWinCov.coverageIdentityHolds, "FIX1: empty window counter identity holds");
+  ok(emptyWinCov.isEmpty === true, "FIX1: empty window isEmpty");
+
+  // (6) Бары ВНЕ границ [from,to) не учитываются
+  const outsideBars = [mkBar(T0), mkBar(T0 + H1), mkBar(T0 + 2 * H1), mkBar(T0 + 3 * H1), mkBar(T0 + 4 * H1)];
+  const outsideCov = computeMarketCoverage(10, "1h", outsideBars, H1, { from: new Date(T0 + H1), to: new Date(T0 + 3 * H1) });
+  ok(outsideCov.availableInRequestedRange === 2, "FIX1: bars outside [from,to) excluded (2 of 5)");
+  ok(outsideCov.requestedExpectedCount === 2 && outsideCov.coverageRatio === 1, "FIX1: outside-bounds request still exact");
+
+  // (7) Leading-only / trailing-only / internal-only missing (канонический случай)
+  const leadOnly = computeMarketCoverage(10, "1h", [mkBar(T0 + 2 * H1), mkBar(T0 + 3 * H1), mkBar(T0 + 4 * H1)], H1, { from: new Date(T0), to: new Date(T0 + 5 * H1) });
+  ok(leadOnly.missingLeading === 2 && leadOnly.missingTrailing === 0 && leadOnly.missingInternal === 0, "FIX1: leading-only missing classified as leading");
+  const trailOnly = computeMarketCoverage(10, "1h", [mkBar(T0), mkBar(T0 + H1)], H1, { from: new Date(T0), to: new Date(T0 + 5 * H1) });
+  ok(trailOnly.missingTrailing === 3 && trailOnly.missingLeading === 0 && trailOnly.missingInternal === 0, "FIX1: trailing-only missing classified as trailing");
+  const internalOnly = computeMarketCoverage(10, "1h", [mkBar(T0), mkBar(T0 + H1), mkBar(T0 + 3 * H1), mkBar(T0 + 4 * H1)], H1, { from: new Date(T0), to: new Date(T0 + 5 * H1) });
+  ok(internalOnly.missingInternal === 1 && internalOnly.missingLeading === 0 && internalOnly.missingTrailing === 0, "FIX1: internal-only missing classified as internal");
+  ok(!internalOnly.internalContiguous && internalOnly.coverageIdentityHolds, "FIX1: internal gap → internalContiguous false, identity holds");
+
+  // (8) Off-grid бары внутри окна НЕ считаются доступным покрытием
+  const offGridInsideBars = [mkBar(T0), mkBar(T0 + 30 * 60_000), mkBar(T0 + H1)]; // 00:30 off-grid inside window
+  const offGridCov = computeMarketCoverage(10, "1h", offGridInsideBars, H1, { from: new Date(T0), to: new Date(T0 + 2 * H1) });
+  ok(offGridCov.availableInRequestedRange === 2, "FIX1: off-grid bar NOT counted as available (2 canonical of 3 bars)");
+  ok(offGridCov.offGridBarsInRequestedRange === 1, "FIX1: off-grid bar surfaced separately");
+  ok(offGridCov.coverageIdentityHolds, "FIX1: off-grid case still identity-consistent");
+  const offGridAgg = aggregateCoverage([offGridCov]);
+  ok(offGridAgg.offGridBarsInRequestedRange === 1 && offGridAgg.requiresCanonicalWindowDisclosure, "FIX1: aggregate flags off-grid bars in window");
+
+  // (9) Непротиворечивость: hasAnomaly/contiguous/alignment/counters
+  ok(middleCov.anomalies.hasAnomaly === true, "FIX1: internal gap ⇒ anomalies.hasAnomaly true");
+  ok(internalOnly.missingInternal === 1 && !internalOnly.internalContiguous && internalOnly.anomalies.hasAnomaly, "FIX1: gap reported in counters AND anomalies consistently");
+  ok(nonAlignedCov.requestedAlignment!.fromRemainder === 30 * 60_000 && nonAlignedCov.requestedAlignment!.toRemainder === 30 * 60_000, "FIX1: remainders surfaced for operator");
+  ok(nonAlignedCov.requestedRange.to === nonAlignedTo, "FIX1: requestedRange NOT silently expanded by canonicalization");
+
+  /* ------------------------------------------------------------------ */
+  /* 4c. Canonical window helper — детерминированная арифметика          */
+  /* ------------------------------------------------------------------ */
+
+  const cw1 = canonicalWindow(T0 + 30 * 60_000, T0 + 3 * H1 + 30 * 60_000, H1);
+  ok(cw1.expectedCanonicalSlots === 3 && cw1.effectiveFromMs === T0 + H1, "cw: 1h [00:30,03:30) → 3 slots from 01:00");
+  ok(countCanonicalSlots(T0, T0 + 3 * H1, H1) === 3, "cw: aligned 3");
+  ok(countCanonicalSlots(T0 + 1, T0 + H1, H1) === 0, "cw: [00:00:00.001, 01:00) → 0 slots (01:00 excluded by to-exclusive)");
+  ok(countCanonicalSlots(T0 + 1, T0 + H1 + 1, H1) === 1, "cw: [00:00:00.001, 01:00:00.001) → 1 slot");
+  ok(countCanonicalSlots(T0 + 1, T0 + H1 - 1, H1) === 0, "cw: sub-slot window → 0 slots (caller must fail closed)");
+  expectThrow(() => canonicalWindow(T0 + H1, T0, H1), "cw: from>to throws");
+  expectThrow(() => canonicalWindow(T0, T0, H1), "cw: from==to throws");
+  expectThrow(() => canonicalWindow(T0 + 10, T0 + 20, H1), "cw: window without canonical opening throws (CanonicalWindowError)");
+  expectThrow(() => canonicalWindow(T0, T0 + H1, 0), "cw: timeframeMs 0 throws");
+  expectThrow(() => canonicalWindow(Number.NaN, T0 + H1, H1), "cw: NaN from throws");
+  ok(Object.isFrozen(cw1), "cw: canonicalWindow result frozen");
+
+  // Aggregate must not publish a plain 100% silently on canonicalized input
+  const mixedAgg = aggregateCoverage([nonAlignedCov, alignedThreeCov]);
+  ok(mixedAgg.canonicalizedMarkets === 1 && mixedAgg.alignedMarkets === 1, "cw: aggregate counts canonicalized vs aligned markets");
+  ok(mixedAgg.requiresCanonicalWindowDisclosure === true, "cw: aggregate disclosure true when any market canonicalized");
+  ok(mixedAgg.coverageBasis === "canonical-grid" && mixedAgg.coverageIdentityHolds, "cw: aggregate basis + identity");
+
+  /* ------------------------------------------------------------------ */
   /* 5. Pagination termination safety                                   */
   /* ------------------------------------------------------------------ */
 
@@ -749,18 +932,256 @@ ok(!assertReadOnlyDeps(badDeps3).ok, "deps: detects $executeRaw");
     "pagination: out of range fails"
   );
 
-  // V2 API tests (same safety)
+  /* ------------------------------------------------------------------ */
+  /* 5b. V2 ADVERSARIAL — каждый guard семейства наблюдается поведением  */
+  /* ------------------------------------------------------------------ */
+  /* MANDATORY FIX 2. Раньше здесь было 2 проверки, а независимая         */
+  /* мутация отключения ВСЕХ 14 V2-guards проходила при 228/228. Теперь   */
+  /* каждое семейство пинится наблюдаемым контрактом: либо валидный        */
+  /* результат, либо структурный отказ (throw), а не дублирование условий */
+  /* реализации. Провайдер здесь управляемый: мы задаём страницы сами.    */
+
+  const v2From = new Date(T0);
+  const v2To = new Date(T0 + 10 * H1);
+  const v2Args = { marketId: 10, timeframe: "1h", from: v2From, to: v2To, pageSize: 10 } as const;
+
+  // (0) Валидный путь: 25 строк = 3 страницы (регресс-якорь на реальном провайдере)
   const v2Deps = makeV2Deps(allCandles);
-  const v2Res = await fetchCandlesPaginatedV2({
-    deps: v2Deps as any,
-    marketId: 10,
-    timeframe: "1h",
-    from: new Date(T0),
-    to: new Date(T0 + 25 * H1),
-    pageSize: 10,
-  });
+  const v2Res = await fetchCandlesPaginatedV2({ ...v2Args, deps: v2Deps as any, to: new Date(T0 + 25 * H1) });
   ok(v2Res.rows.length === 25, "pagination V2: 25 rows");
   ok(v2Res.meta.pagesFetched === 3, "pagination V2: 3 pages");
+  ok(v2Res.meta.totalRows === 25 && v2Res.meta.lastCursor === T0 + 24 * H1, "pagination V2: meta totalRows/lastCursor");
+  ok(Object.isFrozen(v2Res.meta), "pagination V2: meta frozen (FIX4)");
+
+  // (1) Невалидные аргументы — fail closed
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: makeV2Deps(allCandles) as any, marketId: 0 }), "V2 adversarial: marketId 0 rejected");
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: makeV2Deps(allCandles) as any, marketId: 1.5 }), "V2 adversarial: non-integer marketId rejected");
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: makeV2Deps(allCandles) as any, timeframe: "" }), "V2 adversarial: empty timeframe rejected");
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: makeV2Deps(allCandles) as any, from: new Date("invalid") }), "V2 adversarial: invalid from Date rejected");
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: makeV2Deps(allCandles) as any, from: v2To, to: v2From }), "V2 adversarial: from>to rejected");
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: makeV2Deps(allCandles) as any, from: v2From, to: v2From }), "V2 adversarial: from==to rejected");
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: makeV2Deps(allCandles) as any, pageSize: 0 }), "V2 adversarial: pageSize 0 rejected");
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: makeV2Deps(allCandles) as any, pageSize: 2.5 }), "V2 adversarial: fractional pageSize rejected");
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: makeV2Deps(allCandles) as any, pageSize: MAX_PAGE_SIZE + 1 }), "V2 adversarial: pageSize > MAX_PAGE_SIZE rejected");
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: makeV2Deps(allCandles) as any, maxPages: 0 }), "V2 adversarial: maxPages 0 rejected");
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: makeV2Deps(allCandles) as any, maxPages: 1.5 }), "V2 adversarial: fractional maxPages rejected");
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: makeV2Deps(allCandles) as any, maxRows: 0 }), "V2 adversarial: maxRows 0 rejected");
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: makeV2Deps(allCandles) as any, maxRows: -5 }), "V2 adversarial: negative maxRows rejected");
+
+  // (2) page.length > pageSize (провайдер отдал больше, чем просили)
+  // ВАЖНО: окно расширено, чтобы все 11 строк были ВНУТРИ [from,to) — иначе
+  // лишнюю строку ловит range-guard и over-return guard не пинится.
+  const overReturn = makeV2ScriptedDeps(() => makeSequentialRows(10, "1h", 11, T0));
+  await expectThrowAsync(
+    () => fetchCandlesPaginatedV2({ ...v2Args, to: new Date(T0 + 20 * H1), deps: overReturn.deps, pageSize: 10 }),
+    "V2 adversarial: page longer than pageSize rejected"
+  );
+  eq(overReturn.calls(), 1, "V2 adversarial: over-return rejected on first page (no accumulation)");
+
+  // (2b) ОДИНОЧНЫЙ over-return: провайдер один раз отдал pageSize+1 строку и
+  // затем пустую страницу. Молчаливое принятие лишней строки недопустимо —
+  // иначе страница, превышающая запрошенный take, портит границы покрытия.
+  const oneShotOverReturn = makeV2ScriptedDeps((args: any) =>
+    args.cursorOpenTime === null ? makeSequentialRows(10, "1h", 11, T0) : []
+  );
+  const oneShotRes = await fetchCandlesPaginatedV2({
+    ...v2Args,
+    to: new Date(T0 + 20 * H1),
+    deps: oneShotOverReturn.deps,
+    pageSize: 10,
+  }).catch((e) => e);
+  ok(oneShotRes instanceof Error, "V2 adversarial: single over-return page then empty → fail closed (no silent accept)");
+
+  // (3) Провайдер не ASC внутри страницы
+  const descPage = makeV2ScriptedDeps(() => [mkRow(10, "1h", T0 + H1), mkRow(10, "1h", T0)]);
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: descPage.deps }), "V2 adversarial: descending page rejected");
+  const equalPage = makeV2ScriptedDeps(() => [mkRow(10, "1h", T0), mkRow(10, "1h", T0)]);
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: equalPage.deps }), "V2 adversarial: equal timestamps in page rejected");
+
+  // (4) Дубликат openTime (в т.ч. повтор уже отданной страницы)
+  const dupeDeps = makeV2ScriptedDeps((args: any) =>
+    args.cursorOpenTime === null
+      ? makeSequentialRows(10, "1h", 2, T0)
+      : [mkRow(10, "1h", T0), mkRow(10, "1h", T0 + 2 * H1)]
+  );
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: dupeDeps.deps, pageSize: 2 }), "V2 adversarial: duplicate openTime across pages rejected");
+  eq(dupeDeps.calls(), 2, "V2 adversarial: duplicate detected on second call");
+
+  // (5) Курсор не продвигается (страница игнорирует cursor, но без дублей)
+  const nonProgress = makeV2ScriptedDeps((args: any) =>
+    args.cursorOpenTime === null
+      ? [mkRow(10, "1h", T0), mkRow(10, "1h", T0 + 2 * H1)]
+      : [mkRow(10, "1h", T0 + H1)]
+  );
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: nonProgress.deps, pageSize: 2 }), "V2 adversarial: non-progressing cursor rejected");
+  eq(nonProgress.calls(), 2, "V2 adversarial: non-progressing cursor detected, loop terminated");
+
+  // (6) Неверное эхо marketId / timeframe
+  const wrongMarket = makeV2ScriptedDeps(() => [mkRow(99, "1h", T0)]);
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: wrongMarket.deps }), "V2 adversarial: wrong marketId echo rejected");
+  const wrongTf = makeV2ScriptedDeps(() => [mkRow(10, "1d", T0)]);
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: wrongTf.deps }), "V2 adversarial: wrong timeframe echo rejected");
+
+  // (7) closed=false недопустим
+  const unclosed = makeV2ScriptedDeps(() => [mkRow(10, "1h", T0, false)]);
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: unclosed.deps }), "V2 adversarial: closed=false rejected");
+
+  // (8) Строки вне [from, to)
+  const beforeFrom = makeV2ScriptedDeps(() => [mkRow(10, "1h", T0 - H1)]);
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: beforeFrom.deps }), "V2 adversarial: row before from rejected");
+  const atTo = makeV2ScriptedDeps(() => [mkRow(10, "1h", v2To.getTime())]);
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: atTo.deps }), "V2 adversarial: row at to (exclusive bound) rejected");
+  const farFuture = makeV2ScriptedDeps(() => [mkRow(10, "1h", v2To.getTime() + 100 * H1)]);
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: farFuture.deps }), "V2 adversarial: row far after to rejected");
+
+  // (9) Malformed / non-finite данные
+  const badOpenTime = makeV2ScriptedDeps(() => [{ ...mkRow(10, "1h", T0), openTime: "2024-01-01" } as any]);
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: badOpenTime.deps }), "V2 adversarial: openTime not a Date rejected");
+  const invalidDate = makeV2ScriptedDeps(() => [{ ...mkRow(10, "1h", T0), openTime: new Date("nope") } as any]);
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: invalidDate.deps }), "V2 adversarial: invalid Date openTime rejected");
+  const nanOpen = makeV2ScriptedDeps(() => [mkRow(10, "1h", T0, true, { open: Number.NaN })]);
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: nanOpen.deps }), "V2 adversarial: NaN open rejected");
+  const infVolume = makeV2ScriptedDeps(() => [mkRow(10, "1h", T0, true, { volume: Number.POSITIVE_INFINITY })]);
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: infVolume.deps }), "V2 adversarial: Infinity volume rejected");
+  const stringLow = makeV2ScriptedDeps(() => [mkRow(10, "1h", T0, true, { low: "99" as any })]);
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: stringLow.deps }), "V2 adversarial: non-numeric low rejected");
+  const nullRow = makeV2ScriptedDeps(() => [null as any]);
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: nullRow.deps }), "V2 adversarial: null row rejected");
+
+  // (10) Терминация пагинации: провайдер вечно возвращает «новые» полные страницы → maxPages
+  let endlessSeq = 0;
+  const endless = makeV2ScriptedDeps(() => {
+    const page = makeSequentialRows(10, "1h", 1, T0 + endlessSeq * H1);
+    endlessSeq += 1;
+    return page;
+  });
+  await expectThrowAsync(() => fetchCandlesPaginatedV2({ ...v2Args, deps: endless.deps, pageSize: 1, maxPages: 3 }), "V2 adversarial: endless provider terminated by maxPages");
+  ok(endless.calls() <= 4, `V2 adversarial: bounded provider calls (${endless.calls()} <= 4)`);
+
+  // (11) Провайдер отдаёт неполную страницу — обычный терминальный случай (успех)
+  const shortPage = makeV2ScriptedDeps((args: any) =>
+    args.cursorOpenTime === null ? makeSequentialRows(10, "1h", 3, T0) : []
+  );
+  const shortRes = await fetchCandlesPaginatedV2({ ...v2Args, deps: shortPage.deps, pageSize: 10 });
+  ok(shortRes.rows.length === 3 && shortRes.meta.pagesFetched === 1, "V2 adversarial: short terminal page is success (3 rows, 1 page)");
+  ok(Object.isFrozen(shortRes.rows) && Object.isFrozen(shortRes.rows[0]), "V2 adversarial: returned rows deep-frozen (FIX4)");
+
+  // Пустой провайдер — валидный пустой результат, не throw
+  const emptyProvider = makeV2ScriptedDeps(() => []);
+  const v2EmptyRes = await fetchCandlesPaginatedV2({ ...v2Args, deps: emptyProvider.deps });
+  ok(v2EmptyRes.rows.length === 0 && v2EmptyRes.meta.pagesFetched === 0, "V2 adversarial: empty provider → empty success (0 pages)");
+
+  /* ------------------------------------------------------------------ */
+  /* 5c. maxRows — ЖЁСТКАЯ ГРАНИЦА РЕЗУЛЬТАТА (MANDATORY FIX 3)          */
+  /* ------------------------------------------------------------------ */
+  /* Контракт: успешный fetch НИКОГДА не возвращает больше maxRows строк;  */
+  /* если данных больше — структурный отказ, а не молчаливое усечение      */
+  /* (усечение выглядело бы как «данных больше нет» и исказило coverage).  */
+  /* Регресс аудита: maxRows=1 + pageSize=5000 возвращал ~4000 строк.      */
+
+  const mrCandles = makeSequentialRows(10, "1h", 7, T0);
+  const mrV2Deps = () => makeV2Deps(mrCandles);
+  const mrV1Deps = () => makeInMemoryDeps(assets, markets, mrCandles);
+
+  // (a) maxRows === объём данных (граница ровно, последняя страница полная)
+  const mrExactV2 = await fetchCandlesPaginatedV2({
+    deps: mrV2Deps() as any, marketId: 10, timeframe: "1h",
+    from: new Date(T0), to: new Date(T0 + 7 * H1), pageSize: 2, maxRows: 4,
+  } as any).catch((e) => e);
+  ok(mrExactV2 instanceof Error, "FIX3 V2: maxRows=4 < 7 rows → fail closed (no truncation)");
+
+  const mrFitV2 = await fetchCandlesPaginatedV2({
+    deps: mrV2Deps() as any, marketId: 10, timeframe: "1h",
+    from: new Date(T0), to: new Date(T0 + 7 * H1), pageSize: 2, maxRows: 7,
+  } as any);
+  ok(mrFitV2.rows.length === 7, "FIX3 V2: maxRows=7 (== data) succeeds with 7 rows (no false failure at exact bound)");
+  ok(mrFitV2.meta.pagesFetched === 4, "FIX3 V2: multi-page 7/2 → 4 pages at exact bound");
+
+  const mrPlusV2 = await fetchCandlesPaginatedV2({
+    deps: mrV2Deps() as any, marketId: 10, timeframe: "1h",
+    from: new Date(T0), to: new Date(T0 + 7 * H1), pageSize: 2, maxRows: 8,
+  } as any);
+  ok(mrPlusV2.rows.length === 7, "FIX3 V2: maxRows=8 (data+1) succeeds with 7 rows");
+
+  // (b) Аудит-репродукция: maxRows=1, pageSize=5000, страница отдаёт 4000 строк
+  const bigPage = makeV2ScriptedDeps(() => makeSequentialRows(10, "1h", 4000, T0));
+  const bigPageRes = await fetchCandlesPaginatedV2({
+    deps: bigPage.deps, marketId: 10, timeframe: "1h",
+    from: new Date(T0), to: new Date(T0 + 4000 * H1), pageSize: MAX_PAGE_SIZE, maxRows: 1,
+  } as any).catch((e) => e);
+  ok(bigPageRes instanceof Error, "FIX3 V2: AUDIT REPRO maxRows=1/pageSize=5000 → fail closed, NOT ~4000 rows");
+
+  // maxRows=1, ровно одна строка — успех
+  const oneRow = makeV2ScriptedDeps(() => [mkRow(10, "1h", T0)]);
+  const oneRowRes = await fetchCandlesPaginatedV2({
+    deps: oneRow.deps, marketId: 10, timeframe: "1h",
+    from: new Date(T0), to: new Date(T0 + H1), pageSize: MAX_PAGE_SIZE, maxRows: 1,
+  } as any);
+  ok(oneRowRes.rows.length === 1, "FIX3 V2: maxRows=1 with exactly 1 row succeeds");
+
+  // maxRows=1, две строки (maxRows+1) — отказ
+  const twoRows = makeV2ScriptedDeps(() => [mkRow(10, "1h", T0), mkRow(10, "1h", T0 + H1)]);
+  const twoRowsRes = await fetchCandlesPaginatedV2({
+    deps: twoRows.deps, marketId: 10, timeframe: "1h",
+    from: new Date(T0), to: new Date(T0 + 2 * H1), pageSize: MAX_PAGE_SIZE, maxRows: 1,
+  } as any).catch((e) => e);
+  ok(twoRowsRes instanceof Error, "FIX3 V2: maxRows=1 vs 2 rows (maxRows+1) → fail closed");
+
+  // (c) Инвариант «успех никогда не больше maxRows» для V1 и V2
+  let v2BoundViolations = 0;
+  let v2Successes = 0;
+  for (let maxRows = 1; maxRows <= 8; maxRows += 1) {
+    try {
+      const r = await fetchCandlesPaginatedV2({
+        deps: mrV2Deps() as any, marketId: 10, timeframe: "1h",
+        from: new Date(T0), to: new Date(T0 + 7 * H1), pageSize: 2, maxRows,
+      } as any);
+      v2Successes += 1;
+      if (r.rows.length > maxRows) v2BoundViolations += 1;
+    } catch {
+      /* fail closed — допустимо */
+    }
+  }
+  eq(v2BoundViolations, 0, "FIX3 V2: success never exceeds maxRows (sweep 1..8)");
+  eq(v2Successes, 2, "FIX3 V2: sweep maxRows 1..8 over 7 rows → exactly 2 successes (maxRows=7,8), остальные fail closed");
+
+  let v1BoundViolations = 0;
+  for (let maxRows = 1; maxRows <= 8; maxRows += 1) {
+    try {
+      const r = await fetchCandlesPaginated(mrV1Deps(), 10, "1h", new Date(T0), new Date(T0 + 7 * H1), 2, { maxRows });
+      if (r.rows.length > maxRows) v1BoundViolations += 1;
+    } catch {
+      /* fail closed — допустимо */
+    }
+  }
+  eq(v1BoundViolations, 0, "FIX3 V1: success never exceeds maxRows (sweep 1..8)");
+
+  // V1: maxRows-1 / maxRows / maxRows+1 (pageSize 2, данные 7)
+  const v1Minus = await fetchCandlesPaginated(mrV1Deps(), 10, "1h", new Date(T0), new Date(T0 + 7 * H1), 2, { maxRows: 6 }).catch((e) => e);
+  ok(v1Minus instanceof Error, "FIX3 V1: maxRows=6 (maxRows-1) → fail closed, no truncation");
+  const v1Exact = await fetchCandlesPaginated(mrV1Deps(), 10, "1h", new Date(T0), new Date(T0 + 7 * H1), 2, { maxRows: 7 });
+  ok(v1Exact.rows.length === 7, "FIX3 V1: maxRows=7 (exact) → 7 rows, 4 pages");
+  ok(v1Exact.pages === 4, "FIX3 V1: exact bound multi-page = 4 pages");
+  const v1Plus = await fetchCandlesPaginated(mrV1Deps(), 10, "1h", new Date(T0), new Date(T0 + 7 * H1), 2, { maxRows: 9 });
+  ok(v1Plus.rows.length === 7, "FIX3 V1: maxRows=9 (maxRows+1) → 7 rows (all data, no padding)");
+
+  // V1 аудит-репродукция: maxRows=1, pageSize=5000
+  const v1BigPage = await fetchCandlesPaginated(
+    makeInMemoryDeps(assets, markets, makeSequentialRows(10, "1h", 4000, T0)),
+    10, "1h", new Date(T0), new Date(T0 + 4000 * H1), MAX_PAGE_SIZE, { maxRows: 1 }
+  ).catch((e) => e);
+  ok(v1BigPage instanceof Error, "FIX3 V1: AUDIT REPRO maxRows=1/pageSize=5000 → fail closed, NOT ~4000 rows");
+
+  // maxRows проверяется НА ДОБАВЛЕНИЕ страницы: ровно maxRows на полной
+  // последней странице не даёт ложного отказа
+  const fitFullPage = makeV2ScriptedDeps((args: any) =>
+    args.cursorOpenTime === null ? makeSequentialRows(10, "1h", 3, T0) : []
+  );
+  const fitFullPageRes = await fetchCandlesPaginatedV2({
+    deps: fitFullPage.deps, marketId: 10, timeframe: "1h",
+    from: new Date(T0), to: new Date(T0 + 3 * H1), pageSize: 3, maxRows: 3,
+  } as any);
+  ok(fitFullPageRes.rows.length === 3, "FIX3: exact maxRows with full terminal page succeeds (no off-by-one fail)");
 
   /* ------------------------------------------------------------------ */
   /* 6. Aggregate — order-independent, never >1                         */
@@ -1001,30 +1422,133 @@ ok(!assertReadOnlyDeps(badDeps3).ok, "deps: detects $executeRaw");
   /* 12. No-lookahead boundary                                          */
   /* ------------------------------------------------------------------ */
 
-  const allBarsForSplit = makeSequentialBars(5, T0, H1);
-  let causalHistoryAllowed = false;
-  let futureBlocked = false;
-  const mockContext = {
-    index: 3,
-    firstVisibleIndex: 1,
-    barAt(i: number) {
-      if (i > 3) throw new Error("future");
-      if (i < 1) throw new Error("before warmup");
-      return allBarsForSplit[i];
-    },
-  };
-  try {
-    mockContext.barAt(1);
-    mockContext.barAt(2);
-    causalHistoryAllowed = true;
-  } catch {}
-  try {
-    mockContext.barAt(4);
-  } catch {
-    futureBlocked = true;
+  /* Честная формулировка контракта (MANDATORY FIX 5). Раньше здесь стоял
+   * самодельный stub mockContext, который бросал исключение из себя же и
+   * «доказывал» собственный throw — тавтология, не проверявшая ничего.
+   *
+   * ЧТО ПРОВЕРЯЕТСЯ СЕЙЧАС (и что это значит):
+   *  (A) СТРУКТУРНЫЙ БАРЬЕР КОНТЕКСТНОГО КАНАЛА. Движок отдаёт провайдеру
+   *      SignalContext: barAt(index + k) при k > 0 бросает, visibleBars ==
+   *      index + 1, бары вне warmup-окна недоступны. Проба probeProvider
+   *      активно пытается читать будущее по офсетам [1, 2, 10, 1000] на
+   *      КАЖДОМ баре: если хоть одна попытка не бросила — проба красная.
+   *  (B) КОНТРФАКТ. Замена всего будущего «отравленной» серией не меняет
+   *      ни одного решения и ни одной сделки до границы — это проверка
+   *      независимости решений от будущих значений данных.
+   *
+   * ЧЕГО ЭТО НЕ ДОКАЗЫВАЕТ (документированное ограничение, см. тесты ниже):
+   *  произвольный внешний канал — замыкание на исходный массив, глобальная
+   *  переменная, файл/сеть/кэш — контекстным барьером НЕ блокируется, и
+   *  контрфакт ловит такую утечку лишь тогда, когда решения реально зависят
+   *  от подменённых данных. Гарантия сформулирована как context-channel-only
+   *  (структурный барьер), а НЕ как «lookahead невозможен в принципе».
+   */
+
+  const nlBars: BacktestBar[] = [];
+  for (let i = 0; i < 40; i += 1) {
+    const drift = ((i % 5) - 2) * 2;
+    const open = 100 + drift;
+    nlBars.push(mkBar(T0 + i * H1, open, open + 3, open - 3, open + (i % 2 === 0 ? 1 : -1)));
   }
-  ok(causalHistoryAllowed, "no-lookahead: causal history allowed");
-  ok(futureBlocked, "no-lookahead: future blocked");
+  const nlConfig: BacktestConfig = {
+    quantity: 1,
+    initialEquity: 10_000,
+    slippage: { kind: "bps", value: 0 },
+    fees: { bps: 0, fixedPerSide: 0 },
+  };
+
+  const compliantProvider: SignalProvider = (context) => {
+    if (context.index < 2) return null;
+    const prev = context.barAt(context.index - 1);
+    const prev2 = context.barAt(context.index - 2);
+    if (context.bar.close > prev.close && prev.close > prev2.close) {
+      return entryDecision("LONG", context.bar.low, context.bar.high + 2);
+    }
+    return null;
+  };
+
+  // (A) Структурная проба: законный провайдер проходит, все попытки чтения
+  //     будущего заблокированы, visibleBars честен на каждом баре.
+  const structuralProbe = probeProvider({ bars: nlBars, provider: compliantProvider, config: nlConfig });
+  ok(structuralProbe.ok, "FIX5 A: probeProvider — context barrier holds for a legitimate provider");
+  ok(structuralProbe.guardFailures.length === 0, "FIX5 A: all 4 future-offset reads blocked on every bar");
+  ok(structuralProbe.windowFailures.length === 0, "FIX5 A: no out-of-window reads leaked");
+  ok(structuralProbe.barsProbed === nlBars.length, `FIX5 A: probe covered every bar (${structuralProbe.barsProbed}/${nlBars.length})`);
+  ok(
+    structuralProbe.decisions.every((d) => d.visibleBars === d.index + 1),
+    "FIX5 A: visibleBars === index + 1 on every decision"
+  );
+
+  // Провайдер, читающий будущее через контекст, обязан упасть fail-closed.
+  const contextCheater: SignalProvider = (context) => {
+    const next = context.barAt(context.index + 1);
+    return next.close > context.bar.close
+      ? entryDecision("LONG", context.bar.low, context.bar.high + 1)
+      : null;
+  };
+  const cheaterOutcome = runBacktest({ bars: nlBars, signals: contextCheater, config: nlConfig });
+  ok(!cheaterOutcome.ok, "FIX5 A: context-channel future read fails closed (no silent fallback)");
+  ok(
+    !cheaterOutcome.ok && cheaterOutcome.stage === "provider" &&
+      cheaterOutcome.errors[0].includes("no-lookahead") && cheaterOutcome.errors[0].includes("barAt(1)"),
+    "FIX5 A: failure named no-lookahead with requested future index"
+  );
+
+  // (B) Контрфакт: будущее подменяется — решения до границы не меняются.
+  const invariance = assertDecisionInvariance({
+    bars: nlBars,
+    provider: compliantProvider,
+    config: nlConfig,
+    boundaryIndex: 20,
+  });
+  ok(invariance.ok, `FIX5 B: poisoned future does not change prefix decisions (${invariance.errors.join("; ")})`);
+  ok(invariance.comparedDecisions === 20, "FIX5 B: every decision before the boundary compared");
+  const poisoned = poisonFutureBars(nlBars, 20, 3.5);
+  ok(poisoned !== nlBars && poisoned.length === nlBars.length && poisoned[19].close === nlBars[19].close && poisoned[20].close === nlBars[20].close * 3.5,
+    "FIX5 B: poisoning replaces only post-boundary bars");
+
+  // ДОКУМЕНТИРОВАННОЕ ОГРАНИЧЕНИЕ (не «гарантия»): утечка через замыкание
+  // или глобальную переменную барьером не блокируется и контрфактом в этом
+  // фикстуре не обнаруживается. Тест пинит именно ограничение: обе проверки
+  // возвращают ok=true, хотя провайдер читает будущее вне SignalContext.
+  const closureLeaker: SignalProvider = (context) => {
+    const future = nlBars[context.index + 2];
+    if (future === undefined) return null;
+    return future.close > context.bar.close
+      ? entryDecision("LONG", context.bar.low, context.bar.high + 1)
+      : entryDecision("SHORT", context.bar.high, context.bar.low - 1);
+  };
+  const closureProbe = probeProvider({ bars: nlBars, provider: closureLeaker, config: nlConfig });
+  const closureInvariance = assertDecisionInvariance({
+    bars: nlBars,
+    provider: closureLeaker,
+    config: nlConfig,
+    boundaryIndex: 20,
+  });
+  ok(
+    closureProbe.ok && closureInvariance.ok,
+    "FIX5 LIMITATION (documented): closure-based future read is NOT blocked/detected — barrier is context-channel-only"
+  );
+
+  (globalThis as { __p2bLeakBars?: BacktestBar[] }).__p2bLeakBars = nlBars;
+  const globalLeaker: SignalProvider = (context) => {
+    const leaked = (globalThis as { __p2bLeakBars?: BacktestBar[] }).__p2bLeakBars?.[context.index + 3];
+    if (leaked === undefined) return null;
+    return leaked.close > context.bar.close
+      ? entryDecision("LONG", context.bar.low, context.bar.high + 1)
+      : entryDecision("SHORT", context.bar.high, context.bar.low - 1);
+  };
+  const globalInvariance = assertDecisionInvariance({
+    bars: nlBars,
+    provider: globalLeaker,
+    config: nlConfig,
+    boundaryIndex: 20,
+  });
+  delete (globalThis as { __p2bLeakBars?: BacktestBar[] }).__p2bLeakBars;
+  ok(
+    globalInvariance.ok,
+    "FIX5 LIMITATION (documented): global-variable future read is NOT detected — no claim beyond the context channel"
+  );
 
   const limitedDeps = makeInMemoryDeps(assets, markets, makeSequentialRows(10, "1h", 10, T0));
   const limitedFetch = await fetchCandlesPaginated(limitedDeps, 10, "1h", new Date(T0), new Date(T0 + 5 * H1), 10);
@@ -1112,6 +1636,306 @@ ok(!assertReadOnlyDeps(badDeps3).ok, "deps: detects $executeRaw");
   // Adapter returns frozen bars
   ok(Object.isFrozen(bar), "immutability: adapter bar frozen");
   ok(Object.isFrozen(barsSeq), "immutability: adapter batch frozen");
+
+  /* ------------------------------------------------------------------ */
+  /* 14b. ВЛОЖЕННАЯ ИММУТАБЕЛЬНОСТЬ — MANDATORY FIX 4                   */
+  /* ------------------------------------------------------------------ */
+  /* Аудит нашёл достижимые мутабельные публичные структуры: shallow      */
+  /* freeze не защищал requestedAlignment, requestedRange, элементы       */
+  /* contiguousRanges/anomalies, результат findCommonTimestamps и meta    */
+  /* пагинации. Проверяем наблюдаемо: мутация ОБЯЗАНА быть отвергнута     */
+  /* (throw в строгом режиме) и значение обязано остаться прежним.        */
+
+  function mutationBlocked(read: () => unknown, write: () => void): boolean {
+    const before = read();
+    let threw = false;
+    try {
+      write();
+    } catch {
+      threw = true;
+    }
+    return threw && read() === before;
+  }
+
+  const mutCov = computeMarketCoverage(10, "1h", [mkBar(T0), mkBar(T0 + H1), mkBar(T0 + 3 * H1)], H1, {
+    from: new Date(T0),
+    to: new Date(T0 + 4 * H1),
+  });
+  ok(mutCov.requestedAlignment !== null, "FIX4: requestedAlignment reachable (was mutable before)");
+  ok(
+    mutationBlocked(
+      () => mutCov.requestedAlignment!.isAligned,
+      () => {
+        (mutCov.requestedAlignment as { isAligned: boolean }).isAligned = true;
+      }
+    ),
+    "FIX4: requestedAlignment.isAligned mutation rejected"
+  );
+  ok(
+    mutationBlocked(
+      () => mutCov.requestedAlignment!.effectiveFrom,
+      () => {
+        (mutCov.requestedAlignment as unknown as { effectiveFrom: number | null }).effectiveFrom = 0;
+      }
+    ),
+    "FIX4: requestedAlignment.effectiveFrom mutation rejected"
+  );
+  ok(
+    mutationBlocked(
+      () => mutCov.requestedRange.from,
+      () => {
+        (mutCov.requestedRange as unknown as { from: Date | null }).from = null;
+      }
+    ),
+    "FIX4: requestedRange.from mutation rejected"
+  );
+  ok(
+    mutationBlocked(
+      () => mutCov.anomalies.grid.offGrid.length,
+      () => {
+        (mutCov.anomalies.grid.offGrid as GridAnomaly[]).push({
+          time: 0,
+          reason: "x",
+        } as unknown as GridAnomaly);
+      }
+    ),
+    "FIX4: anomalies.grid.offGrid push rejected (nested array)"
+  );
+  ok(
+    mutationBlocked(
+      () => mutCov.anomalies.gaps.length,
+      () => {
+        (mutCov.anomalies.gaps as unknown[]).length = 0;
+      }
+    ),
+    "FIX4: anomalies.gaps length mutation rejected"
+  );
+  ok(mutCov.contiguousRanges.length > 0, "FIX4: contiguousRanges present");
+  ok(
+    mutationBlocked(
+      () => mutCov.contiguousRanges[0].count,
+      () => {
+        (mutCov.contiguousRanges[0] as unknown as { count: number }).count = 999;
+      }
+    ),
+    "FIX4: contiguousRanges[0].count mutation rejected (elements frozen)"
+  );
+  ok(
+    mutationBlocked(
+      () => mutCov.contiguousRanges.length,
+      () => {
+        (mutCov.contiguousRanges as unknown as unknown[]).pop();
+      }
+    ),
+    "FIX4: contiguousRanges pop rejected"
+  );
+
+  // gaps.ts публичные функции
+  const fix4GapBars = [mkBar(T0), mkBar(T0 + H1), mkBar(T0 + 3 * H1)];
+  const gapsDetected = detectGaps(fix4GapBars, H1);
+  ok(Object.isFrozen(gapsDetected) && gapsDetected.length === 1 && Object.isFrozen(gapsDetected[0]),
+    "FIX4: detectGaps array + element frozen");
+  ok(
+    mutationBlocked(
+      () => gapsDetected[0].missingBars,
+      () => {
+        (gapsDetected[0] as unknown as { missingBars: number }).missingBars = 42;
+      }
+    ),
+    "FIX4: detectGaps element mutation rejected"
+  );
+  const dupBars = [mkBar(T0), mkBar(T0)];
+  const dupsDetected = detectDuplicates(dupBars);
+  ok(Object.isFrozen(dupsDetected) && dupsDetected.length === 1 && Object.isFrozen(dupsDetected[0].indices),
+    "FIX4: detectDuplicates array + nested indices frozen");
+  const ordering = checkOrdering([mkBar(T0 + H1), mkBar(T0)]);
+  ok(!ordering.isOrdered && Object.isFrozen(ordering.violations) && Object.isFrozen(ordering),
+    "FIX4: checkOrdering result + violations frozen");
+  const gridCheck = checkGrid([mkBar(T0 + 1)], H1);
+  ok(!gridCheck.isCanonical && Object.isFrozen(gridCheck.offGrid) && Object.isFrozen(gridCheck.offGrid[0]),
+    "FIX4: checkGrid offGrid array + elements frozen");
+  const anomalyReport = analyzeMarketAnomalies(fix4GapBars, H1);
+  ok(anomalyReport.hasAnomaly && Object.isFrozen(anomalyReport), "FIX4: analyzeMarketAnomalies frozen");
+  ok(
+    mutationBlocked(
+      () => anomalyReport.grid.isCanonical,
+      () => {
+        (anomalyReport.grid as unknown as { isCanonical: boolean }).isCanonical = true;
+      }
+    ),
+    "FIX4: analyzeMarketAnomalies.grid mutation rejected"
+  );
+
+  // intervals.ts публичные функции
+  const contiguous = findContiguousIntervals(makeSequentialBars(3, T0, H1), H1);
+  ok(Object.isFrozen(contiguous) && Object.isFrozen(contiguous[0]), "FIX4: findContiguousIntervals array + elements frozen");
+  ok(
+    mutationBlocked(
+      () => contiguous[0].endIndex,
+      () => {
+        (contiguous[0] as unknown as { endIndex: number }).endIndex = -1;
+      }
+    ),
+    "FIX4: contiguous range element mutation rejected"
+  );
+
+  // NEW-4: результат findCommonTimestamps раньше был plain mutable array
+  const commonMap = new Map<number, readonly BacktestBar[]>([
+    [10, makeSequentialBars(3, T0, H1)],
+    [11, makeSequentialBars(3, T0 + H1, H1)],
+  ]);
+  const commonSource = new Map<number, BacktestBar[]>(
+    [...commonMap.entries()].map(([id, bars]) => [id, [...bars]])
+  );
+  const commonTimes = findCommonTimestamps(commonMap);
+  ok(Object.isFrozen(commonTimes), "FIX4 NEW-4: findCommonTimestamps result frozen");
+  ok(
+    mutationBlocked(
+      () => commonTimes.length,
+      () => {
+        (commonTimes as unknown as number[]).push(0);
+      }
+    ),
+    "FIX4 NEW-4: findCommonTimestamps push rejected"
+  );
+  ok(
+    mutationBlocked(
+      () => commonTimes[0],
+      () => {
+        (commonTimes as unknown as number[])[0] = 0;
+      }
+    ),
+    "FIX4 NEW-4: findCommonTimestamps element assignment rejected"
+  );
+  // Мутация исходных массивов не меняет уже вычисленный результат
+  const timesBefore = commonTimes.slice();
+  (commonSource.get(10) as unknown as unknown[]).pop();
+  ok(
+    commonTimes.length === timesBefore.length && commonTimes.every((t, i) => t === timesBefore[i]),
+    "FIX4 NEW-4: source mutation after computation does not change result"
+  );
+  const commonIntervals = findCommonContiguousIntervals(commonSource, H1);
+  ok(Object.isFrozen(commonIntervals) && (commonIntervals.length === 0 || Object.isFrozen(commonIntervals[0])),
+    "FIX4: findCommonContiguousIntervals array + elements frozen");
+
+  // Пагинация: строки, meta и Date-инстансы
+  const frozenV2 = await fetchCandlesPaginatedV2({
+    deps: makeV2Deps(allCandles) as any,
+    marketId: 10,
+    timeframe: "1h",
+    from: new Date(T0),
+    to: new Date(T0 + 3 * H1),
+    pageSize: 2,
+  } as any);
+  ok(Object.isFrozen(frozenV2) && Object.isFrozen(frozenV2.rows) && Object.isFrozen(frozenV2.rows[0]),
+    "FIX4: V2 result + rows + nested row frozen");
+  ok(Object.isFrozen(frozenV2.rows[0].openTime), "FIX4: V2 row Date instance frozen (no setTime mutation)");
+  ok(
+    mutationBlocked(
+      () => frozenV2.rows[0].close,
+      () => {
+        (frozenV2.rows[0] as unknown as { close: number }).close = -1;
+      }
+    ),
+    "FIX4: V2 row field mutation rejected"
+  );
+  // Документированное JS-ограничение: Object.freeze НЕ блокирует
+  // `date.setTime(...)` (внутренний слот [[DateValue]]). Защита построена
+  // иначе: наружу отдаётся КОПИЯ даты, поэтому мутация потребителем не
+  // затрагивает ни провайдера, ни последующие выборки — проверяем это.
+  const providerRow = allCandles[0];
+  const providerOpenTimeMs = providerRow.openTime.getTime();
+  const fetchedRow = frozenV2.rows[0];
+  ok(fetchedRow.openTime !== providerRow.openTime, "FIX4: returned Date is a COPY of the provider Date");
+  fetchedRow.openTime.setTime(0);
+  ok(providerRow.openTime.getTime() === providerOpenTimeMs, "FIX4 LIMITATION(documented): setTime on returned Date affects only the consumer copy");
+  const refetchedV2 = await fetchCandlesPaginatedV2({
+    deps: makeV2Deps(allCandles) as any,
+    marketId: 10,
+    timeframe: "1h",
+    from: new Date(T0),
+    to: new Date(T0 + 3 * H1),
+    pageSize: 2,
+  } as any);
+  ok(refetchedV2.rows[0].openTime.getTime() === providerOpenTimeMs, "FIX4 LIMITATION(documented): consumer setTime does not corrupt subsequent fetches");
+  ok(
+    mutationBlocked(
+      () => fetchedRow.openTime,
+      () => {
+        (fetchedRow as unknown as { openTime: Date }).openTime = utcDateFromMs(0);
+      }
+    ),
+    "FIX4: row.openTime property replacement rejected (row object frozen)"
+  );
+  ok(
+    mutationBlocked(
+      () => frozenV2.meta.totalRows,
+      () => {
+        (frozenV2.meta as { totalRows: number }).totalRows = -1;
+      }
+    ),
+    "FIX4: V2 meta mutation rejected"
+  );
+  ok(
+    mutationBlocked(
+      () => frozenV2.rows.length,
+      () => {
+        (frozenV2.rows as unknown as unknown[]).pop();
+      }
+    ),
+    "FIX4: V2 rows array mutation rejected"
+  );
+
+  const frozenV1 = await fetchCandlesPaginated(d, 10, "1h", new Date(T0), new Date(T0 + 5 * H1), 10);
+  ok(Object.isFrozen(frozenV1) && Object.isFrozen(frozenV1.rows) && Object.isFrozen(frozenV1.rows[0]),
+    "FIX4: V1 result + rows + row frozen");
+  ok(Object.isFrozen(frozenV1.bars), "FIX4: V1 bars frozen");
+
+  // data-plan: план и его вложенные структуры
+  ok(Object.isFrozen(planWithCov2) && Object.isFrozen(planWithCov2.warnings), "FIX4: plan + warnings frozen");
+  ok(Object.isFrozen(planWithCov2.ineligibleMarkets), "FIX4: plan ineligibleMarkets array frozen");
+  ok(
+    mutationBlocked(
+      () => planWithCov2.warnings.length,
+      () => {
+        (planWithCov2.warnings as unknown as string[]).push("fake");
+      }
+    ),
+    "FIX4: plan warnings push rejected"
+  );
+  ok(planWithCov2.requestedCanonicalWindow !== null && Object.isFrozen(planWithCov2.requestedCanonicalWindow),
+    "FIX4: plan requestedCanonicalWindow frozen");
+  ok(
+    mutationBlocked(
+      () => planWithCov2.coverageSummary!.coverageIdentityHolds,
+      () => {
+        (planWithCov2.coverageSummary as unknown as { coverageIdentityHolds: boolean }).coverageIdentityHolds = false;
+      }
+    ),
+    "FIX4: plan coverageSummary mutation rejected"
+  );
+
+  /* ------------------------------------------------------------------ */
+  /* 14d. Статические «якоря» новых контрактов (mutation-pinning)        */
+  /* ------------------------------------------------------------------ */
+  /* Эти проверки выбраны так, чтобы отличить ПРАВИЛЬНУЮ реализацию от    */
+  /* конкретных мутаций (см. mutation battery в отчёте commit-а):         */
+  /*  - canonical grid vs from-anchored ceil(rangeMs/D):                  */
+  /*      [00:30, 03:00) → канонических слотов 2 (01:00, 02:00),          */
+  /*      тогда как ceil((03:00−00:30)/1h) = 3 (fake-grid).               */
+  /*  - maxRows: успех ровно на границе, никакого отсечения.              */
+  /*  - immutability: глубокие структуры заморожены.                      */
+
+  ok(countCanonicalSlots(T0 + 30 * 60_000, T0 + 3 * H1, H1) === 2,
+    "mutation-pinning: canonical grid ≠ ceil(rangeMs/D) for [00:30, 03:00) (2 vs 3)");
+  ok(Math.ceil((3 * H1 - 30 * 60_000) / H1) === 3, "mutation-pinning: fake-grid math documented (ceil = 3)");
+  const noAlignSlice = computeMarketCoverage(10, "1h", [mkBar(T0 + H1), mkBar(T0 + 2 * H1)], H1, {
+    from: new Date(T0 + 30 * 60_000),
+    to: new Date(T0 + 3 * H1),
+  });
+  ok(noAlignSlice.requestedExpectedCount === 2 && noAlignSlice.availableInRequestedRange === 2 &&
+     noAlignSlice.coverageRatio === 1 && noAlignSlice.requestedAlignment!.canonicalized,
+    "mutation-pinning: canonicalized partial window counts canonical slots, not from-anchored");
 
   /* ------------------------------------------------------------------ */
   /* 15. CLI fail-closed — spawn tests                                  */

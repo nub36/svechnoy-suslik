@@ -29,6 +29,8 @@ import type { BacktestMarketRow } from "./data-source";
 import type { MarketCoverage } from "./coverage";
 import { aggregateCoverage } from "./coverage";
 import { partitionByEligibility } from "./eligibility";
+import { canonicalWindow, formatIsoUtc, type CanonicalWindow } from "./timeframe";
+import { deepFreeze } from "./immutable";
 
 export interface BacktestDataPlanRequest {
   readonly assetSymbol: string;
@@ -53,6 +55,20 @@ export interface BacktestDataPlan {
   readonly from: string; // ISO
   readonly to: string; // ISO
   readonly requestedRangeMs: number;
+  /**
+   * Каноническое окно запроса (MANDATORY FIX 1): эффективные границы,
+   * ожидаемое число слотов и признак канонизации. Отсутствует только если
+   * timeframeMs неизвестен (fail-closed ветка).
+   */
+  readonly requestedCanonicalWindow: {
+    readonly effectiveFrom: string; // ISO
+    readonly effectiveTo: string; // ISO (exclusive)
+    readonly expectedCanonicalSlots: number;
+    readonly isAligned: boolean;
+    readonly canonicalized: boolean;
+    readonly fromRemainder: number;
+    readonly toRemainder: number;
+  } | null;
   readonly marketsCount: number;
   readonly eligibleMarketsCount: number;
   readonly readTasks: number;
@@ -66,6 +82,12 @@ export interface BacktestDataPlan {
     reason: string;
   }[];
   readonly coverageSummary?: {
+    coverageBasis: "canonical-grid";
+    canonicalizedMarkets: number;
+    alignedMarkets: number | null;
+    offGridBarsInRequestedRange: number;
+    coverageIdentityHolds: boolean;
+    requiresCanonicalWindowDisclosure: boolean;
     totalReturned: number;
     totalDistinctReturned: number;
     totalRequestedExpected: number | null;
@@ -123,14 +145,40 @@ export function planBacktestRun(
 
   // Оценка числа страниц на рынок
   let estimatedPagesPerMarket: number | null = null;
+  let requestedCanonicalWindow: BacktestDataPlan["requestedCanonicalWindow"] = null;
 
   if (
     req.timeframeMs !== null &&
     Number.isFinite(req.timeframeMs) &&
     req.timeframeMs > 0
   ) {
-    const expectedBars = Math.ceil(rangeMs / req.timeframeMs);
-    estimatedPagesPerMarket = Math.ceil(expectedBars / req.pageSize);
+    // MANDATORY FIX 1: и оценка страниц, и отчёт используют КАНОНИЧЕСКОЕ
+    // окно. `ceil(rangeMs / D)` было from-anchored приближением и на
+    // невыровненном окне даёт другое число слотов (например 1h
+    // [00:30, 03:00): 3 против канонических 2).
+    const window: CanonicalWindow = canonicalWindow(fromMs, toMs, req.timeframeMs);
+
+    requestedCanonicalWindow = Object.freeze({
+      effectiveFrom: formatIsoUtc(window.effectiveFromMs),
+      effectiveTo: formatIsoUtc(window.effectiveToMs),
+      expectedCanonicalSlots: window.expectedCanonicalSlots,
+      isAligned: window.isAligned,
+      canonicalized: window.canonicalized,
+      fromRemainder: window.fromRemainder,
+      toRemainder: window.toRemainder,
+    });
+
+    estimatedPagesPerMarket = Math.ceil(window.expectedCanonicalSlots / req.pageSize);
+
+    if (window.canonicalized) {
+      warnings.push(
+        `REQUESTED WINDOW NOT ALIGNED to canonical ${req.timeframe} grid (from remainder ${window.fromRemainder} ms, ` +
+          `to remainder ${window.toRemainder} ms): coverage/anomalies are computed on the CANONICALIZED window ` +
+          `[${formatIsoUtc(window.effectiveFromMs)}, ${formatIsoUtc(window.effectiveToMs)}) ` +
+          `with ${window.expectedCanonicalSlots} canonical slots — NOT a from-anchored grid; ` +
+          `a 100% here means the canonicalized window is fully occupied`
+      );
+    }
   }
 
   let coverageSummary: BacktestDataPlan["coverageSummary"] | undefined;
@@ -140,6 +188,12 @@ export function planBacktestRun(
     const agg = aggregateCoverage(req.coverages);
 
     coverageSummary = {
+      coverageBasis: agg.coverageBasis,
+      canonicalizedMarkets: agg.canonicalizedMarkets,
+      alignedMarkets: agg.alignedMarkets,
+      offGridBarsInRequestedRange: agg.offGridBarsInRequestedRange,
+      coverageIdentityHolds: agg.coverageIdentityHolds,
+      requiresCanonicalWindowDisclosure: agg.requiresCanonicalWindowDisclosure,
       totalReturned: agg.totalReturned,
       totalDistinctReturned: agg.totalDistinctReturned,
       totalRequestedExpected: agg.totalRequestedExpected,
@@ -162,15 +216,36 @@ export function planBacktestRun(
     if (!agg.isTimeframeValid) {
       warnings.push(`unknown/invalid timeframe — not healthy`);
     }
+
+    if (agg.canonicalizedMarkets > 0) {
+      warnings.push(
+        `${agg.canonicalizedMarkets} market(s) have a CANONICALIZED requested window (bounds off the canonical grid) — ` +
+          `coverage ratio is canonical-grid based, not from-anchored`
+      );
+    }
+
+    if (agg.offGridBarsInRequestedRange > 0) {
+      warnings.push(
+        `${agg.offGridBarsInRequestedRange} off-grid bar(s) inside the requested window are NOT counted as available — ` +
+          `check exchange eligibility before claiming broad coverage`
+      );
+    }
+
+    if (!agg.coverageIdentityHolds) {
+      warnings.push(
+        `coverage counter identity violated (available + leading + internal + trailing != expected) — report is not trustworthy`
+      );
+    }
   }
 
-  return Object.freeze({
+  return deepFreeze({
     assetSymbol: req.assetSymbol,
     timeframe: req.timeframe,
     timeframeMs: req.timeframeMs,
     from: req.from.toISOString(),
     to: req.to.toISOString(),
     requestedRangeMs: rangeMs,
+    requestedCanonicalWindow,
     marketsCount: req.markets.length,
     eligibleMarketsCount: eligibleMarkets.length,
     readTasks: eligibleMarkets.length,
@@ -181,7 +256,7 @@ export function planBacktestRun(
     ineligibleMarkets: Object.freeze([...ineligible]),
     coverageSummary,
     warnings: Object.freeze([...warnings]),
-  });
+  }) as BacktestDataPlan;
 }
 
 export function formatDataPlanReport(plan: BacktestDataPlan): string {
@@ -191,6 +266,24 @@ export function formatDataPlanReport(plan: BacktestDataPlan): string {
   lines.push(`Asset: ${plan.assetSymbol}`);
   lines.push(`Timeframe: ${plan.timeframe} (${plan.timeframeMs ?? "unknown"} ms)`);
   lines.push(`Range: ${plan.from} → ${plan.to} (${plan.requestedRangeMs} ms)`);
+
+  if (plan.requestedCanonicalWindow) {
+    const w = plan.requestedCanonicalWindow;
+    lines.push(
+      `Canonical window (${plan.timeframe} grid, contract: from <= openTime < to): ` +
+        `${w.effectiveFrom} → ${w.effectiveTo} (exclusive), expected canonical slots: ${w.expectedCanonicalSlots}`
+    );
+    lines.push(
+      `Requested bounds aligned: ${w.isAligned ? "YES" : "NO"} ` +
+        `(from remainder ${w.fromRemainder} ms, to remainder ${w.toRemainder} ms)`
+    );
+    if (w.canonicalized) {
+      lines.push(
+        `!! CANONICALIZED WINDOW: requested bounds are NOT on the ${plan.timeframe} grid — ` +
+          `expected slots/coverage are computed on the canonical grid, not on a from-anchored grid.`
+      );
+    }
+  }
   lines.push(`Markets: ${plan.marketsCount} total, ${plan.eligibleMarketsCount} eligible`);
   lines.push(`Read tasks: ${plan.readTasks}, pageSize: ${plan.pageSize}`);
   lines.push(
@@ -229,6 +322,22 @@ export function formatDataPlanReport(plan: BacktestDataPlan): string {
       `  with anomalies: ${plan.coverageSummary.marketsWithAnomalies}`
     );
     lines.push(`  timeframeValid: ${plan.coverageSummary.isTimeframeValid}`);
+    lines.push(`  coverageBasis: ${plan.coverageSummary.coverageBasis}`);
+    lines.push(
+      `  alignment: alignedMarkets=${plan.coverageSummary.alignedMarkets ?? "n/a"}, ` +
+        `canonicalizedMarkets=${plan.coverageSummary.canonicalizedMarkets}`
+    );
+    lines.push(
+      `  offGrid bars inside window (not available): ${plan.coverageSummary.offGridBarsInRequestedRange}`
+    );
+    lines.push(
+      `  counter identity holds: ${plan.coverageSummary.coverageIdentityHolds}`
+    );
+    if (plan.coverageSummary.requiresCanonicalWindowDisclosure) {
+      lines.push(
+        `  !! disclosure required: canonicalized window and/or off-grid bars — ratio is NOT a plain 100% claim`
+      );
+    }
   }
 
   if (plan.warnings.length > 0) {

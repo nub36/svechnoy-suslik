@@ -4,24 +4,51 @@
  * Чистый детерминированный слой, без Date.now(). Не ходит в БД, работает поверх
  * BacktestBar[] и timeframeMs (единственный источник — SMCTIMEFRAME_MS).
  *
- * БЛОКЕР FIX: computeMarketCoverage теперь отвечает на вопрос
- * "Сколько запрошенного [from,to) диапазона присутствует?" а не
- * "сколько от first→last присутствует?".
+ * ══════════════════════════════════════════════════════════════════
+ * КОНТРАКТ ПОКРЫТИЯ (P2-B HARDENING #2, MANDATORY FIX 1)
+ * ══════════════════════════════════════════════════════════════════
  *
- * Для фиксированного таймфрейма D:
- * requested expected timestamps = from + k*D where timestamp >= from and timestamp < to
- * Это определение работает даже если from не выровнен по канонической сетке,
- * но мы отдельно валидируем выравнивание requested bounds и репортим off-grid.
+ * Выбран ОДИН детерминированный контракт: (B) ожидаемая занятость окна
+ * считается по КАНОНИЧЕСКОЙ СЕТКЕ таймфрейма, а не по искусственной
+ * сетке, заякоренной на `from` (см. lib/backtest/timeframe.ts:
+ * canonicalWindow). Вариант (A) «fail closed на любой невыровненный
+ * bound» отклонён сознательно: запросы с произвольными timestamp'ами
+ * остаются допустимыми, но их семантика жёстко зафиксирована и видима —
+ * «молчаливого healthy 100%» на невыровненном запросе нет.
  *
- * Report минимум:
- * - requestedExpectedCount
- * - availableInRequestedRange (distinct timestamps in [from,to))
- * - missingTotal, missingLeading, missingInternal, missingTrailing
- * - coverageRatio = available / requestedExpected
- * - firstAvailable, lastAvailable
- * - internal continuity (gaps inside requested)
+ *   from <= openTime < to          (to exclusive, конвенция сохранена)
+ *   бар = [openTime, openTime + D), каузально закрыт в openTime + D
+ *   канонический слот: t % D == 0
+ *   effectiveFrom = ceil(from / D) * D  — первое каноническое открытие окна
+ *   requestedExpectedCount = |{ t : t % D == 0 ∧ from <= t < to }|
+ *   availableInRequestedRange = число DISTINCT канонических слотов окна,
+ *                               реально присутствующих в данных
+ *   off-grid бары внутри окна (t % D != 0) в available НЕ входят:
+ *       они репортятся отдельно (offGridBarsInRequestedRange) и в
+ *       anomalies.grid.offGrid — иначе чужая сетка (BINGX 1d 16:00 UTC)
+ *       выглядела бы как покрытие канонического окна.
+ *   missingLeading  = канонические слоты до первого присутствующего
+ *   missingTrailing = канонические слоты после последнего присутствующего
+ *   missingInternal = expected − available − leading − trailing
+ *   coverageIdentityHolds = (available + leading + internal + trailing == expected)
+ *   coverageRatio = available / requestedExpectedCount  (0..1, никогда >1)
  *
- * Empty requested range / from>=to must fail.
+ * ИНВАРИАНТ (проверяется тестами и полем coverageIdentityHolds):
+ * счётчики, alignment, contiguous и anomaly статусы не противоречат друг
+ * другу: available + leading + internal + trailing === expected.
+ *
+ * FAIL CLOSED:
+ * - requestedRange отсутствует            → requested-числа = null (легаси-режим);
+ * - from/to невалидны или from >= to      → throw (как и раньше);
+ * - окно БЕЗ канонических слотов          → CanonicalWindowError (это не «0%»);
+ * - unknown timeframe                     → explicit invalid (не healthy).
+ *
+ * ALIGNMENT НЕ ВЫЧИСЛЯЕТСЯ И НЕ ОТБРАСЫВАЕТСЯ: `requestedAlignment`
+ * содержит isAligned/canonicalized и эффективные границы окна; aggregate,
+ * data-plan, report и CLI обязаны его показывать (иначе 100% на
+ * невыровненном запросе вводит в заблуждение).
+ *
+ * Пустой requested range / from>=to — ошибка вызывающего кода.
  */
 
 import type { BacktestBar } from "./contract";
@@ -31,6 +58,8 @@ import {
   type MarketAnomalies,
 } from "./gaps";
 import { findContiguousIntervals, type ContiguousRange } from "./intervals";
+import { canonicalWindow } from "./timeframe";
+import { deepFreeze, freezeCopy } from "./immutable";
 
 export interface RequestedRange {
   readonly from: number | null; // ms inclusive
@@ -43,6 +72,16 @@ export interface RequestedAlignment {
   readonly fromRemainder: number | null;
   readonly toRemainder: number | null;
   readonly isAligned: boolean;
+  /**
+   * Bounds не на канонической сетке → ожидаемая занятость считалась по
+   * канонической сетке (см. контракт в шапке). ОБЯЗАТЕЛЬНО к показу
+   * потребителю: canonicalized coverage ≠ coverage произвольной сетки.
+   */
+  readonly canonicalized: boolean;
+  /** Первое каноническое открытие >= from (ms). null, если не применимо. */
+  readonly effectiveFrom: number | null;
+  /** Граница окна (exclusive, ms); запрос не расширяется. */
+  readonly effectiveTo: number | null;
 }
 
 export interface MarketCoverage {
@@ -51,7 +90,16 @@ export interface MarketCoverage {
   readonly timeframeMs: number | null;
   readonly requestedRange: RequestedRange;
   readonly requestedAlignment: RequestedAlignment | null;
+  /** Явная база ожидаемых слотов — каноническая сетка таймфрейма. */
+  readonly requestedExpectedBasis: "canonical-grid";
   readonly requestedExpectedCount: number | null;
+  /** Бары внутри окна, НЕ лежащие на канонической сетке (в available не входят). */
+  readonly offGridBarsInRequestedRange: number;
+  /**
+   * Инвариант счётчиков: available + leading + internal + trailing === expected.
+   * false — только при невалидном timeframe/окне (там все числа null).
+   */
+  readonly coverageIdentityHolds: boolean;
   readonly availableInRequestedRange: number;
   readonly returnedCount: number;
   readonly distinctReturnedCount: number;
@@ -83,34 +131,6 @@ function toMs(value: Date | number | null | undefined): number | null {
     return value;
   }
   return null;
-}
-
-function computeRequestedExpected(fromMs: number, toMs: number, timeframeMs: number): number {
-  // count k where from + k*D < to
-  // = ceil((to-from)/D)
-  const diff = toMs - fromMs;
-  return Math.ceil(diff / timeframeMs);
-}
-
-function buildExpectedSet(fromMs: number, toMs: number, timeframeMs: number): Set<number> {
-  const expected = new Set<number>();
-  const count = computeRequestedExpected(fromMs, toMs, timeframeMs);
-  // safety upper bound: avoid OOM for huge ranges
-  if (count > 1_000_000) {
-    // too large to materialize, return empty set and let caller handle via count only
-    // but for coverage we need leading/trailing detection, we can still compute via math without full set if count huge?
-    // For safety, we return set with only first and last? Instead, we return set up to 1M and mark as truncated.
-    // Here we implement truncated set: only generate up to 1M, caller must handle missing as count-based.
-    // For now, generate up to 1M to avoid OOM, and let missing calculations use count.
-    for (let k = 0; k < Math.min(count, 1_000_000); k += 1) {
-      expected.add(fromMs + k * timeframeMs);
-    }
-    return expected;
-  }
-  for (let k = 0; k < count; k += 1) {
-    expected.add(fromMs + k * timeframeMs);
-  }
-  return expected;
 }
 
 /**
@@ -188,6 +208,7 @@ export function computeMarketCoverage(
   // new requested based
   let requestedExpectedCount: number | null = null;
   let availableInRequestedRange = 0;
+  let offGridBarsInRequestedRange = 0;
   let missingTotal: number | null = null;
   let missingLeading: number | null = null;
   let missingTrailing: number | null = null;
@@ -196,115 +217,86 @@ export function computeMarketCoverage(
   let requestedAlignment: RequestedAlignment | null = null;
   let isTimeframeValid = isValidTimeframeMs(timeframeMs);
   let internalContiguous = true;
+  let coverageIdentityHolds = true;
 
   if (isRequestedRangeValid && fromMs !== null && toMsVal !== null && isTimeframeValid) {
     const tf = timeframeMs as number;
 
-    // alignment validation
-    const fromRem = fromMs % tf;
-    const toRem = toMsVal % tf;
-    const fromAligned = fromRem === 0;
-    const toAligned = toRem === 0;
+    // Fail-closed: окно без канонических слотов — ошибка запроса, а не «0%».
+    // canonicalWindow бросает CanonicalWindowError и НЕ подменяет границы.
+    const window = canonicalWindow(fromMs, toMsVal, tf);
 
-    requestedAlignment = {
-      fromAligned,
-      toAligned,
-      fromRemainder: fromRem,
-      toRemainder: toRem,
-      isAligned: fromAligned && toAligned,
-    };
+    requestedAlignment = freezeCopy<RequestedAlignment>({
+      fromAligned: window.fromAligned,
+      toAligned: window.toAligned,
+      fromRemainder: window.fromRemainder,
+      toRemainder: window.toRemainder,
+      isAligned: window.isAligned,
+      canonicalized: window.canonicalized,
+      effectiveFrom: window.effectiveFromMs,
+      effectiveTo: window.effectiveToMs,
+    });
 
-    requestedExpectedCount = computeRequestedExpected(fromMs, toMsVal, tf);
+    requestedExpectedCount = window.expectedCanonicalSlots;
 
-    // availableInRequestedRange = distinct timestamps within [from,to)
+    // available = DISTINCT канонические слоты окна; off-grid — отдельно.
     let available = 0;
-    for (const t of distinctSet) {
-      if (t >= fromMs && t < toMsVal) available += 1;
-    }
-    availableInRequestedRange = available;
+    let offGrid = 0;
+    let firstPresent: number | null = null;
+    let lastPresent: number | null = null;
 
-    missingTotal = requestedExpectedCount - availableInRequestedRange;
-    if (missingTotal < 0) missingTotal = 0; // distinct should never exceed expected, but guard
+    for (const t of distinctSet) {
+      if (t < fromMs || t >= toMsVal) continue;
+
+      if (t % tf !== 0) {
+        offGrid += 1;
+        continue;
+      }
+
+      available += 1;
+      if (firstPresent === null || t < firstPresent) firstPresent = t;
+      if (lastPresent === null || t > lastPresent) lastPresent = t;
+    }
+
+    availableInRequestedRange = available;
+    offGridBarsInRequestedRange = offGrid;
+    missingTotal = Math.max(requestedExpectedCount - available, 0);
+
+    let leading: number;
+    let trailing: number;
+
+    if (firstPresent === null || lastPresent === null) {
+      // Ни одного канонического слота окна в данных: всё окно «leading».
+      leading = requestedExpectedCount;
+      trailing = 0;
+    } else {
+      leading = Math.floor((firstPresent - window.effectiveFromMs) / tf);
+      trailing = Math.floor((toMsVal - 1 - lastPresent) / tf);
+    }
+
+    missingLeading = leading;
+    missingTrailing = trailing;
+    missingInternal = Math.max(
+      requestedExpectedCount - available - leading - trailing,
+      0
+    );
 
     if (requestedExpectedCount > 0) {
-      coverageRatio = availableInRequestedRange / requestedExpectedCount;
-      // Never >1 for healthy distinct count
+      coverageRatio = available / requestedExpectedCount;
       if (coverageRatio > 1) coverageRatio = 1;
-    } else {
-      coverageRatio = null;
     }
 
-    // missingLeading / trailing / internal
-    // Build expected list in order
-    if (requestedExpectedCount <= 1_000_000) {
-      const expectedList: number[] = [];
-      for (let k = 0; k < requestedExpectedCount; k += 1) {
-        expectedList.push(fromMs + k * tf);
-      }
+    internalContiguous = missingInternal === 0;
 
-      // Find first present index
-      let firstPresentIdx = -1;
-      let lastPresentIdx = -1;
-      for (let i = 0; i < expectedList.length; i += 1) {
-        if (distinctSet.has(expectedList[i])) {
-          if (firstPresentIdx === -1) firstPresentIdx = i;
-          lastPresentIdx = i;
-        }
-      }
-
-      if (firstPresentIdx === -1) {
-        // none present
-        missingLeading = requestedExpectedCount;
-        missingTrailing = 0;
-        missingInternal = 0;
-      } else {
-        missingLeading = firstPresentIdx;
-        missingTrailing = expectedList.length - 1 - lastPresentIdx;
-
-        // internal missing = total - leading - trailing
-        let internalMissing = 0;
-        for (let i = firstPresentIdx; i <= lastPresentIdx; i += 1) {
-          if (!distinctSet.has(expectedList[i])) internalMissing += 1;
-        }
-        missingInternal = internalMissing;
-
-        // internal continuity: true if no internal missing
-        internalContiguous = internalMissing === 0;
-      }
-    } else {
-      // huge range, cannot materialize full list, use approximations for leading/trailing based on first/last available
-      if (firstAvailable === null || lastAvailable === null) {
-        missingLeading = requestedExpectedCount;
-        missingTrailing = 0;
-        missingInternal = 0;
-        internalContiguous = false;
-      } else {
-        // leading = number of expected slots before firstAvailable
-        if (firstAvailable < fromMs) {
-          missingLeading = 0;
-        } else if (firstAvailable >= toMsVal) {
-          missingLeading = requestedExpectedCount;
-        } else {
-          missingLeading = Math.floor((firstAvailable - fromMs) / tf);
-        }
-
-        if (lastAvailable < fromMs) {
-          missingTrailing = requestedExpectedCount;
-        } else if (lastAvailable >= toMsVal) {
-          missingTrailing = 0;
-        } else {
-          missingTrailing = Math.floor((toMsVal - 1 - lastAvailable) / tf);
-        }
-
-        const remaining = (missingTotal ?? 0) - (missingLeading ?? 0) - (missingTrailing ?? 0);
-        missingInternal = remaining > 0 ? remaining : 0;
-        internalContiguous = missingInternal === 0;
-      }
-    }
+    // Инвариант контракта: счётчики обязаны складываться в expected.
+    coverageIdentityHolds =
+      available + leading + (missingInternal ?? 0) + trailing ===
+      requestedExpectedCount;
   } else if (isRequestedRangeValid && !isTimeframeValid) {
     // unknown timeframe → explicit invalid, never healthy
     requestedExpectedCount = null;
     availableInRequestedRange = 0;
+    offGridBarsInRequestedRange = 0;
     missingTotal = null;
     missingLeading = null;
     missingTrailing = null;
@@ -312,9 +304,11 @@ export function computeMarketCoverage(
     coverageRatio = null;
     requestedAlignment = null;
     internalContiguous = false;
+    coverageIdentityHolds = false;
   } else {
     // no requested range provided → old behavior for internal continuity only
     availableInRequestedRange = distinctReturnedCount;
+    offGridBarsInRequestedRange = 0;
     requestedExpectedCount = null;
     missingTotal = null;
     missingLeading = null;
@@ -323,6 +317,7 @@ export function computeMarketCoverage(
     coverageRatio = null;
     requestedAlignment = null;
     internalContiguous = true;
+    coverageIdentityHolds = true;
     if (isValidTimeframeMs(timeframeMs)) {
       // compute internal gaps for continuity
       if (!isEmpty) {
@@ -334,17 +329,6 @@ export function computeMarketCoverage(
           }
         }
       }
-    }
-  }
-
-  if (isEmpty) {
-    coverageRatio = isRequestedRangeValid ? 0 : null;
-    availableInRequestedRange = 0;
-    if (isRequestedRangeValid && requestedExpectedCount !== null) {
-      missingTotal = requestedExpectedCount;
-      missingLeading = requestedExpectedCount;
-      missingTrailing = 0;
-      missingInternal = 0;
     }
   }
 
@@ -371,14 +355,16 @@ export function computeMarketCoverage(
     contiguousRanges = findContiguousIntervals(barsForContiguous, timeframeMs);
   }
 
-  return Object.freeze({
+  return deepFreeze({
     marketId,
     timeframe,
     timeframeMs,
-    requestedRange: { from: fromMs, to: toMsVal },
+    requestedRange: deepFreeze({ from: fromMs, to: toMsVal }),
     requestedAlignment,
+    requestedExpectedBasis: "canonical-grid" as const,
     requestedExpectedCount,
     availableInRequestedRange,
+    offGridBarsInRequestedRange,
     returnedCount,
     distinctReturnedCount,
     firstAvailable,
@@ -390,11 +376,12 @@ export function computeMarketCoverage(
     missingTrailing,
     missingInternal,
     coverageRatio,
+    coverageIdentityHolds,
     isEmpty,
     isRequestedRangeValid,
     isTimeframeValid,
-    anomalies: Object.freeze(anomalies),
-    contiguousRanges: Object.freeze(contiguousRanges),
+    anomalies: deepFreeze(anomalies),
+    contiguousRanges: deepFreeze([...contiguousRanges]),
     internalContiguous,
   });
 }
@@ -412,6 +399,24 @@ export interface AggregatedCoverage {
   readonly emptyMarkets: number;
   readonly marketsWithAnomalies: number;
   readonly isTimeframeValid: boolean;
+  /** Явная база ожидаемых слотов агрегата (каноническая сетка). */
+  readonly coverageBasis: "canonical-grid";
+  /** Рынки, у которых окно было канонизировано (bounds не на сетке). */
+  readonly canonicalizedMarkets: number;
+  /** Рынки с валидным alignment И выровненным окном. Null — alignment недоступен. */
+  readonly alignedMarkets: number | null;
+  /** Сумма off-grid баров внутри окна (в available они не входят). */
+  readonly offGridBarsInRequestedRange: number;
+  /**
+   * Агрегатный инвариант счётчиков: у ВСЕХ рынков с валидным окном
+   * available + leading + internal + trailing === expected.
+   */
+  readonly coverageIdentityHolds: boolean;
+  /**
+   * Итоговое предупреждение: агрегат НЕ является «просто 100%», если окно
+   * было канонизировано или есть off-grid бары внутри окна.
+   */
+  readonly requiresCanonicalWindowDisclosure: boolean;
 }
 
 /**
@@ -436,6 +441,11 @@ export function aggregateCoverage(
   let emptyMarkets = 0;
   let marketsWithAnomalies = 0;
   let isTimeframeValid = true;
+  let canonicalizedMarkets = 0;
+  let alignedMarkets = 0;
+  let marketsWithAlignment = 0;
+  let offGridBarsInRequestedRange = 0;
+  let coverageIdentityHolds = true;
 
   for (const c of sorted) {
     totalReturned += c.returnedCount;
@@ -444,6 +454,15 @@ export function aggregateCoverage(
     if (c.isEmpty) emptyMarkets += 1;
     if (c.anomalies.hasAnomaly) marketsWithAnomalies += 1;
     if (!c.isTimeframeValid) isTimeframeValid = false;
+
+    offGridBarsInRequestedRange += c.offGridBarsInRequestedRange;
+
+    if (c.isRequestedRangeValid && c.isTimeframeValid) {
+      marketsWithAlignment += 1;
+      if (c.requestedAlignment?.canonicalized === true) canonicalizedMarkets += 1;
+      if (c.requestedAlignment?.isAligned === true) alignedMarkets += 1;
+      if (!c.coverageIdentityHolds) coverageIdentityHolds = false;
+    }
 
     // requested based
     if (c.requestedExpectedCount !== null) {
@@ -506,8 +525,15 @@ export function aggregateCoverage(
     if (totalMissingOld < 0) totalMissingOld = 0;
   }
 
-  return Object.freeze({
+  return deepFreeze({
     markets: Object.freeze([...sorted]),
+    coverageBasis: "canonical-grid" as const,
+    canonicalizedMarkets,
+    alignedMarkets: marketsWithAlignment > 0 ? alignedMarkets : null,
+    offGridBarsInRequestedRange,
+    coverageIdentityHolds,
+    requiresCanonicalWindowDisclosure:
+      canonicalizedMarkets > 0 || offGridBarsInRequestedRange > 0,
     totalReturned,
     totalDistinctReturned,
     totalRequestedExpected,

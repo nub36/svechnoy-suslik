@@ -26,6 +26,20 @@
  *   no-lookahead enforced в P2-A evaluation time (SignalContext.barAt), а не фильтрацией по wall-clock now.
  *   Никакого Date.now() / new Date() без аргументов.
  *
+ * HARDENING #2 (this commit):
+ * - maxRows — ЖЁСТКАЯ ВЕРХНЯЯ ГРАНИЦА РЕЗУЛЬТАТА (см. ниже) в обеих версиях API;
+ * - V2 валидирует форму строки (openTime/OHLCV) fail-closed;
+ * - публичные результаты глубоко заморожены; строки копируются, чтобы
+ *   заморозка не меняла объекты, принадлежащие провайдеру (Prisma).
+ *
+ * maxRows КОНТРАКТ:
+ * - успешный fetch НИКОГДА не возвращает больше maxRows строк;
+ * - если очередная страница вывела бы результат за границу — fail closed
+ *   (структурированный throw), а НЕ молчаливое усечение: частичный
+ *   результат выглядел бы как «данных больше нет» и исказил бы coverage
+ *   и бэктест. Границы: ровно maxRows — успех; maxRows − 1 — успех, если
+ *   данных ровно столько; maxRows + 1 (лишняя строка) — отказ.
+ *
  * HARDENING pagination termination:
  * - assert strict ASC per page and overall
  * - assert marketId/timeframe/closed/range for each row
@@ -41,6 +55,8 @@
 import type { BacktestBar } from "./contract";
 import { candleRowsToBacktestBars, type BacktestCandleRow } from "./adapter";
 import { isValidTimeframeMs } from "./gaps";
+import { deepFreeze } from "./immutable";
+import { utcDateFromMs } from "./timeframe";
 
 /* ------------------------------------------------------------------ */
 /* Типы строк, совместимые с Prisma schema                            */
@@ -180,6 +196,61 @@ export function assertReadOnlyDeps(deps: unknown): { ok: boolean; errors: string
 /* Hardened pagination — old signature (for existing callers)         */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Публичная копия строки Candle: собственная shallow-копия, СОБСТВЕННЫЕ
+ * копии Date-полей и глубокая заморозка.
+ *
+ * Дата копируется (`utcDateFromMs` — из уже полученного ms, без чтения
+ * часов), потому что Object.freeze не защищает Date от `setTime`; копия
+ * гарантирует, что мутация потребителем не затронет ни объект провайдера
+ * (Prisma row), ни последующие выборки. Сам объект строки заморожен, так
+ * что подмена поля `openTime` бросает исключение в строгом режиме.
+ */
+function copyFrozenRow(row: BacktestCandleRow): BacktestCandleRow {
+  return deepFreeze({
+    marketId: row.marketId,
+    timeframe: row.timeframe,
+    openTime: utcDateFromMs(row.openTime.getTime()),
+    closeTime: row.closeTime ? utcDateFromMs(row.closeTime.getTime()) : null,
+    open: row.open,
+    high: row.high,
+    low: row.low,
+    close: row.close,
+    volume: row.volume,
+    closed: row.closed,
+  }) as BacktestCandleRow;
+}
+
+function copyFrozenRows(rows: readonly BacktestCandleRow[]): BacktestCandleRow[] {
+  const out: BacktestCandleRow[] = new Array(rows.length);
+  for (let i = 0; i < rows.length; i += 1) {
+    out[i] = copyFrozenRow(rows[i]);
+  }
+  return Object.freeze(out) as unknown as BacktestCandleRow[];
+}
+
+/** Минимальная форма строки: fail-closed ДО любых чтений полей. */
+function assertRowShape(row: unknown, context: string): asserts row is BacktestCandleRow {
+  if (row === null || typeof row !== "object") {
+    throw new Error(`${context}: строка не объект (${String(row)})`);
+  }
+
+  const r = row as Partial<BacktestCandleRow>;
+
+  if (!(r.openTime instanceof Date) || !Number.isFinite(r.openTime.getTime())) {
+    throw new Error(
+      `${context}: openTime должен быть валидным Date, получено ${String(r.openTime)}`
+    );
+  }
+
+  for (const field of ["open", "high", "low", "close", "volume"] as const) {
+    const v = r[field];
+    if (typeof v !== "number" || !Number.isFinite(v)) {
+      throw new Error(`${context}: ${field} должен быть конечным числом, получено ${String(v)}`);
+    }
+  }
+}
+
 export interface FetchCandlesOptions {
   readonly pageSize: number;
   readonly from: Date;
@@ -274,12 +345,6 @@ export async function fetchCandlesPaginated(
         `fetchCandlesPaginated: превышен maxPages ${maxPages} marketId=${marketId} timeframe=${timeframe} pages=${pages} rows=${allRows.length}`
       );
     }
-    if (allRows.length >= maxRows) {
-      throw new Error(
-        `fetchCandlesPaginated: превышен maxRows ${maxRows} marketId=${marketId} timeframe=${timeframe}`
-      );
-    }
-
     const where: {
       marketId: number;
       timeframe: string;
@@ -315,6 +380,16 @@ export async function fetchCandlesPaginated(
     if (page.length > pageSize) {
       throw new Error(
         `fetchCandlesPaginated: page returned ${page.length} > take ${pageSize} marketId=${marketId}`
+      );
+    }
+
+    // MANDATORY FIX 3: maxRows — жёсткая граница вывода.
+    // Проверяем ДО накопления, поэтому успешный результат физически не
+    // может превысить maxRows; лишняя страница → отказ, не усечение.
+    if (allRows.length + page.length > maxRows) {
+      throw new Error(
+        `fetchCandlesPaginated: maxRows ${maxRows} exceeded marketId=${marketId} timeframe=${timeframe} ` +
+          `already=${allRows.length} page=${page.length} — fail closed, усечение запрещено`
       );
     }
 
@@ -384,7 +459,14 @@ export async function fetchCandlesPaginated(
 
   const bars = candleRowsToBacktestBars(allRows);
 
-  return { rows: Object.freeze([...allRows]) as unknown as BacktestCandleRow[], bars, pages, hasMore: false };
+  // MANDATORY FIX 4: строки копируются (включая Date-поля) и замораживаются
+  // глубоко; объекты провайдера при этом НЕ мутируются.
+  return deepFreeze({
+    rows: copyFrozenRows(allRows),
+    bars,
+    pages,
+    hasMore: false,
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -448,9 +530,8 @@ export async function fetchCandlesPaginatedV2(
     if (pagesFetched >= maxPages) {
       throw new Error(`fetchCandlesPaginatedV2: превышен maxPages ${maxPages} marketId=${marketId} timeframe=${timeframe}`);
     }
-    if (allRows.length >= maxRows) {
-      throw new Error(`fetchCandlesPaginatedV2: превышен maxRows ${maxRows} marketId=${marketId}`);
-    }
+    // maxRows проверяется НА ДОБАВЛЕНИЕ страницы (ниже), а не на входе в цикл: входная проверка
+    // ложно падала бы, когда данных ровно maxRows и последняя страница полная (page.length == pageSize).
 
     const page = await deps.findCandlesPage({
       marketId,
@@ -466,6 +547,14 @@ export async function fetchCandlesPaginatedV2(
       throw new Error(`fetchCandlesPaginatedV2: page ${page.length} > take ${pageSize}`);
     }
 
+    // MANDATORY FIX 3: maxRows — жёсткая граница вывода (см. контракт в шапке).
+    if (allRows.length + page.length > maxRows) {
+      throw new Error(
+        `fetchCandlesPaginatedV2: maxRows ${maxRows} exceeded marketId=${marketId} timeframe=${timeframe} ` +
+          `already=${allRows.length} page=${page.length} — fail closed, усечение запрещено`
+      );
+    }
+
     for (let i = 1; i < page.length; i += 1) {
       if (page[i].openTime.getTime() <= page[i - 1].openTime.getTime()) {
         throw new Error(`fetchCandlesPaginatedV2: page not strictly ASC at ${i} marketId=${marketId}`);
@@ -474,6 +563,9 @@ export async function fetchCandlesPaginatedV2(
 
     for (let i = 0; i < page.length; i += 1) {
       const row = page[i];
+      // MANDATORY FIX 2 (guard family: malformed/non-finite candle data):
+      // форма строки проверяется ДО любых чтений, включая openTime.
+      assertRowShape(row, `fetchCandlesPaginatedV2: строка ${i}`);
       const t = row.openTime.getTime();
       if (row.marketId !== marketId) throw new Error(`fetchCandlesPaginatedV2: marketId mismatch expected ${marketId} got ${row.marketId}`);
       if (row.timeframe !== timeframe) throw new Error(`fetchCandlesPaginatedV2: timeframe mismatch expected ${timeframe} got ${row.timeframe}`);
@@ -508,8 +600,8 @@ export async function fetchCandlesPaginatedV2(
     }
   }
 
-  return {
-    rows: Object.freeze([...allRows]) as unknown as BacktestCandleRow[],
+  return deepFreeze({
+    rows: copyFrozenRows(allRows),
     meta: {
       marketId,
       timeframe,
@@ -520,7 +612,7 @@ export async function fetchCandlesPaginatedV2(
       totalRows: allRows.length,
       lastCursor: lastCursorMs,
     },
-  };
+  });
 }
 
 /**

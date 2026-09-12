@@ -24,6 +24,7 @@
  */
 
 import { planBacktestRun, formatDataPlanReport } from "../lib/backtest/data-plan";
+import { canonicalWindow, CanonicalWindowError } from "../lib/backtest/timeframe";
 import { getTimeframeMs, CANONICAL_TIMEFRAMES, isCanonicalTimeframe } from "../lib/backtest/timeframe";
 import type { BacktestMarketRow } from "../lib/backtest/data-source";
 import { MAX_PAGE_SIZE } from "../lib/backtest/data-source";
@@ -248,6 +249,21 @@ async function main(): Promise<void> {
   console.log(`=== SIMULATED / NO DB — P2-B Backtest Data Plan ===`);
   console.log(`NOTE: Mock markets below are SIMULATED, NOT discovered from live DB. No DB connection, no env DB.`);
 
+  // Fail-closed: окно без канонических слотов — ошибка запроса, не «0%».
+  try {
+    canonicalWindow(fromDate.getTime(), toDate.getTime(), timeframeMs);
+  } catch (err) {
+    if (err instanceof CanonicalWindowError) {
+      fail(
+        `Canonical window rejected (fail closed): ${err.message}. ` +
+          `Provide a window containing at least one canonical ${timeframe} opening (openTime % ${timeframeMs}ms == 0).`
+      );
+    }
+    throw err;
+  }
+
+  const canonical = canonicalWindow(fromDate.getTime(), toDate.getTime(), timeframeMs);
+
   const plan = planBacktestRun({
     assetSymbol: asset,
     timeframe,
@@ -261,6 +277,39 @@ async function main(): Promise<void> {
   });
 
   console.log(formatDataPlanReport(plan));
+
+  // CLI-level disclosure (MANDATORY FIX 1): canonicalized windows and
+  // off-grid bars inside the window must never look like a plain 100%.
+  console.log(`\n-- Requested-window alignment (canonical ${timeframe} grid) --`);
+  console.log(
+    `bounds aligned: ${canonical.isAligned ? "YES" : "NO"} | canonicalized: ${
+      canonical.canonicalized ? "YES" : "NO"
+    } | effective window: ${new Date(canonical.effectiveFromMs).toISOString()} -> ${new Date(
+      canonical.effectiveToMs
+    ).toISOString()} (exclusive) | expected canonical slots: ${canonical.expectedCanonicalSlots}`
+  );
+
+  if (canonical.canonicalized) {
+    console.log(
+      `NOTE: requested bounds are NOT on the ${timeframe} canonical grid. The expected-slot count and coverage ` +
+        `ratio are canonical-grid based (first canonical opening ${new Date(canonical.effectiveFromMs).toISOString()}). ` +
+        `A 100% here means "the canonicalized window is fully occupied", NOT "every requested bound is covered".`
+    );
+  }
+
+  const summary = plan.coverageSummary;
+  if (summary) {
+    if (summary.canonicalizedMarkets > 0 || summary.offGridBarsInRequestedRange > 0) {
+      console.log(
+        `WARNING: canonicalizedMarkets=${summary.canonicalizedMarkets}, offGridBarsInRequestedRange=${summary.offGridBarsInRequestedRange} ` +
+          `— overall ratio ${summary.overallCoverageRatio ?? "n/a"} is conditional; do NOT publish it as plain coverage.`
+      );
+    }
+    if (!summary.coverageIdentityHolds) {
+      console.log(`WARNING: coverage counter identity violated — numbers are not trustworthy.`);
+    }
+  }
+
   console.log(`\n-- SIMULATED / NO DB dry-run completed, read-only, no writes, no DB connection`);
 }
 

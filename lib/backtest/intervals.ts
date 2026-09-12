@@ -21,6 +21,7 @@
 
 import type { BacktestBar } from "./contract";
 import { isValidTimeframeMs } from "./gaps";
+import { deepFreeze } from "./immutable";
 
 export interface ContiguousRange {
   readonly startTime: number;
@@ -110,7 +111,8 @@ export function findContiguousIntervals(
     reason: lastUsable ? undefined : `count ${lastCount} < minBars ${minApplied}`,
   });
 
-  return Object.freeze(ranges) as ContiguousRange[];
+  // MANDATORY FIX 4: элементы тоже заморожены (mutation attempts обязаны падать).
+  return deepFreeze(ranges) as ContiguousRange[];
 }
 
 export interface CommonInterval {
@@ -153,7 +155,8 @@ export function findCommonTimestamps(
   const result = Array.from(common);
   result.sort((a, b) => a - b);
 
-  return result;
+  // MANDATORY FIX 4: результат публичный и раньше был мутабельным.
+  return Object.freeze(result) as number[];
 }
 
 export function findCommonContiguousIntervals(
@@ -212,5 +215,5 @@ export function findCommonContiguousIntervals(
     });
   }
 
-  return Object.freeze(intervals) as CommonInterval[];
+  return deepFreeze(intervals) as CommonInterval[];
 }
