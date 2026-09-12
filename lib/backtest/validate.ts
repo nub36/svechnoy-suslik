@@ -19,6 +19,8 @@ import {
   type BacktestBar,
   type EntryDecision,
   type ResolvedBacktestConfig,
+  type SignalAdapter,
+  type SignalDecision,
   isFiniteNumber
 } from "./contract";
 
@@ -165,9 +167,29 @@ export function validateBars(
     };
   }
 
-  bars.forEach((bar, index) => {
+  // forEach ПРОПУСКАЕТ дыры разреженного массива, поэтому обход явный:
+  // null/undefined/дыра — это невалидный бар, а не повод для TypeError.
+  let malformed = 0;
+
+  for (let index = 0; index < bars.length; index += 1) {
+    const bar: unknown = bars[index];
+
+    if (bar === null || bar === undefined || typeof bar !== "object") {
+      malformed += 1;
+      pushLimited(
+        errors,
+        `bars[${String(index)}]: не объект (получено ${
+          bar === undefined && !(index in (bars as unknown as object))
+            ? "дыра разреженного массива"
+            : String(bar)
+        }) — прогон не выполняется`
+      );
+
+      continue;
+    }
+
     validateBarShape(bar, index, errors);
-  });
+  }
 
   let timeframeMs: number | null = null;
   let uniform = true;
@@ -176,22 +198,30 @@ export function validateBars(
   let minGap: number | null = null;
 
   for (let i = 1; i < bars.length; i += 1) {
-    const prev = bars[i - 1];
-    const curr = bars[i];
+    const prev: unknown = bars[i - 1];
+    const curr: unknown = bars[i];
 
+    // Любая невалидная запись уже попала в errors выше: здесь важно не
+    // разыменовать null/undefined (fail closed, без uncaught TypeError).
     if (
-      !isFiniteNumber(prev.time) ||
-      !isFiniteNumber(curr.time)
+      prev === null ||
+      curr === null ||
+      typeof prev !== "object" ||
+      typeof curr !== "object" ||
+      !isFiniteNumber((prev as BacktestBar).time) ||
+      !isFiniteNumber((curr as BacktestBar).time)
     ) {
       continue;
     }
 
-    const delta = curr.time - prev.time;
+    const prevBar = prev as BacktestBar;
+    const currBar = curr as BacktestBar;
+    const delta = currBar.time - prevBar.time;
 
     if (delta === 0) {
       pushLimited(
         errors,
-        `bars[${String(i)}]: дубликат time=${String(curr.time)} — вход не дедуплицируется молча`
+        `bars[${String(i)}]: дубликат time=${String(currBar.time)} — вход не дедуплицируется молча`
       );
       uniform = false;
 
@@ -201,7 +231,7 @@ export function validateBars(
     if (delta < 0) {
       pushLimited(
         errors,
-        `bars[${String(i)}]: немонотонность time (${String(prev.time)} → ${String(curr.time)}) — вход не сортируется молча`
+        `bars[${String(i)}]: немонотонность time (${String(prevBar.time)} → ${String(currBar.time)}) — вход не сортируется молча`
       );
       uniform = false;
 
@@ -237,7 +267,8 @@ export function validateBars(
   if (
     config.expectedTimeframeMs !== null &&
     timeframeMs !== null &&
-    minGap !== null
+    minGap !== null &&
+    malformed === 0
   ) {
     // Ожидаемый шаг: КАЖДАЯ дельта обязана быть ему кратна и не меньше.
     for (let i = 1; i < bars.length; i += 1) {
@@ -264,18 +295,183 @@ export function validateBars(
   return {
     ok: errors.length === 0,
     errors,
-    timeframeMs: uniform ? timeframeMs : null,
+    timeframeMs: uniform && malformed === 0 ? timeframeMs : null,
     gridGaps: gaps,
     maxGapMs: maxGap,
     minGapMs: minGap,
-    firstBarTime: bars.length > 0 ? bars[0].time : null,
-    lastBarTime: bars.length > 0 ? bars[bars.length - 1].time : null
+    firstBarTime: timeOfOrNull(bars[0]),
+    lastBarTime: timeOfOrNull(bars[bars.length - 1])
   };
+}
+
+/** Время бара либо null, если запись невалидна (fail closed, без TypeError). */
+function timeOfOrNull(bar: unknown): number | null {
+  if (bar === null || bar === undefined || typeof bar !== "object") {
+    return null;
+  }
+
+  const time = (bar as Partial<BacktestBar>).time;
+
+  return isFiniteNumber(time) ? time : null;
 }
 
 export type DecisionShapeCheck =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: "invalid-decision"; readonly detail: string };
+
+/**
+ * Проверка ЛЮБОГО решения (LONG/SHORT/NEUTRAL/CANNOT_EVALUATE) на баре
+ * сигнала: скаляры конечны, label — строка (если задан), facts — массив
+ * строк (если задан). Пункт 22 политики: решение проверяется и
+ * снэпшотится в момент принятия, поэтому późнейшая мутация объекта
+ * вызывающим кодом не меняет запланированную сделку.
+ */
+export function validateDecisionObject(
+  decision: SignalDecision
+): DecisionShapeCheck {
+  if (decision === null || typeof decision !== "object") {
+    return {
+      ok: false,
+      reason: "invalid-decision",
+      detail: "решение должно быть объектом"
+    };
+  }
+
+  const candidate = decision as { label?: unknown; facts?: unknown };
+
+  if (candidate.label !== undefined && typeof candidate.label !== "string") {
+    return {
+      ok: false,
+      reason: "invalid-decision",
+      detail: `label должен быть строкой (получено ${typeof candidate.label})`
+    };
+  }
+
+  if (candidate.facts !== undefined) {
+    if (!Array.isArray(candidate.facts)) {
+      return {
+        ok: false,
+        reason: "invalid-decision",
+        detail: `facts должен быть массивом строк (получено ${typeof candidate.facts})`
+      };
+    }
+
+    for (const fact of candidate.facts as unknown[]) {
+      if (typeof fact !== "string") {
+        return {
+          ok: false,
+          reason: "invalid-decision",
+          detail: `facts должен содержать только строки (получено ${typeof fact})`
+        };
+      }
+    }
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Проверка адаптера источника решений (пункт 19 политики): идентичность
+ * объявлена, требуемая история — целое ≥ 1, решающая функция на месте.
+ */
+export function validateSignalAdapter(adapter: SignalAdapter): readonly string[] {
+  const errors: string[] = [];
+
+  if (adapter === null || typeof adapter !== "object" || Array.isArray(adapter)) {
+    return ["adapter: ожидается объект"];
+  }
+
+  if (typeof adapter.adapterId !== "string" || adapter.adapterId.trim().length === 0) {
+    errors.push("adapter.adapterId: непустая строка (идентичность источника решений)");
+  }
+
+  if (typeof adapter.version !== "string" || adapter.version.trim().length === 0) {
+    errors.push("adapter.version: непустая строка");
+  }
+
+  if (
+    !Number.isInteger(adapter.requiredLookbackBars) ||
+    adapter.requiredLookbackBars < 1
+  ) {
+    errors.push(
+      "adapter.requiredLookbackBars: целое ≥ 1 (1 — только текущий бар; требование истории ОБЯЗАНО быть явным)"
+    );
+  }
+
+  if (typeof adapter.decide !== "function") {
+    errors.push("adapter.decide: функция (context) → решение");
+  }
+
+  const known = ["adapterId", "version", "requiredLookbackBars", "decide"];
+
+  for (const key of Object.keys(adapter)) {
+    if (!known.includes(key)) {
+      errors.push(
+        `adapter: неизвестный ключ "${key}" (допустимы: ${known.join(", ")})`
+      );
+    }
+  }
+
+  return errors;
+}
+
+/**
+ * Поиск неконечных чисел в структуре результата (пункт 17 политики).
+ *
+ * Возвращает пути до значений (не более limit), чтобы отказ был
+ * diagnosable: «NaN в metrics.maxDrawdown» вместо молчаливого
+ * «красивого» результата, который затем роняет сериализацию.
+ *
+ * Исключений нет: успешный результат (ok = true) обязан быть конечным
+ * ЦЕЛИКОМ, иначе serializeResult бросил бы исключение на «успешном»
+ * прогоне. Неконечные уровни входного решения нормализуются в null ещё
+ * при записи отказа (engine.ts), а причина сохраняется в detail.
+ */
+export function findNonFiniteNumbers(
+  value: unknown,
+  path = "result",
+  limit = 20
+): readonly string[] {
+  const found: string[] = [];
+
+  const walk = (node: unknown, nodePath: string, depth: number): void => {
+    if (found.length >= limit || depth > 8) {
+      return;
+    }
+
+    if (typeof node === "number") {
+      if (!Number.isFinite(node)) {
+        found.push(`${nodePath} = ${String(node)}`);
+      }
+
+      return;
+    }
+
+    if (node === null || typeof node !== "object") {
+      return;
+    }
+
+    if (Array.isArray(node)) {
+      for (let i = 0; i < node.length; i += 1) {
+        walk(node[i], `${nodePath}[${String(i)}]`, depth + 1);
+      }
+
+      return;
+    }
+
+    for (const key of Object.keys(node as Record<string, unknown>)) {
+      walk(
+        (node as Record<string, unknown>)[key],
+        `${nodePath}.${key}`,
+        depth + 1
+      );
+    }
+  };
+
+  walk(value, path, 0);
+
+  return found;
+}
 
 /**
  * Структурная проверка LONG/SHORT-решения: конечные положительные цены,
@@ -285,11 +481,20 @@ export type DecisionShapeCheck =
 export function validateEntryDecisionShape(
   decision: EntryDecision
 ): DecisionShapeCheck {
+  const common = validateDecisionObject(decision);
+
+  if (!common.ok) {
+    return common;
+  }
+
   if (!isFiniteNumber(decision.stopLoss) || decision.stopLoss <= 0) {
     return {
       ok: false,
       reason: "invalid-decision",
-      detail: "stopLoss должен быть конечным числом > 0"
+      // Значение приводится в тексте: в записи отказа неконечные уровни
+      // нормализуются в null (пункт 17), поэтому причина обязана быть
+      // видна здесь.
+      detail: `stopLoss должен быть конечным числом > 0 (получено ${String(decision.stopLoss)})`
     };
   }
 
@@ -297,7 +502,7 @@ export function validateEntryDecisionShape(
     return {
       ok: false,
       reason: "invalid-decision",
-      detail: "takeProfit должен быть конечным числом > 0"
+      detail: `takeProfit должен быть конечным числом > 0 (получено ${String(decision.takeProfit)})`
     };
   }
 

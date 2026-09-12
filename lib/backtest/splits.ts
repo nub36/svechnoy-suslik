@@ -12,8 +12,14 @@
  *    сегмента (engine.ts отбрасывает сигнал на последнем баре сегмента),
  *    открытая позиция на границе закрывается по close последнего бара
  *    сегмента (exitReason "SEGMENT_END");
- *  - чтение истории ДО начала сегмента разрешено в пределах warmupBars
- *    (это прошлое, а не будущее) и фиксируется в warmupStart;
+ *  - чтение истории ДО начала сегмента разрешено (это прошлое, а не
+ *    будущее) и фиксируется в warmupStart: число баров разгона =
+ *    max(config.warmupBars, requiredLookbackBars − 1), то есть явное
+ *    требование адаптера учитывается и в сегментном прогоне — без
+ *    искусственного «обрезания» истории и без утечки;
+ *  - отказ сегментного прогона сохраняет ВНУТРЕННЮЮ стадию (bars,
+ *    provider, arithmetic, adapter, config), а не сваливает всё в
+ *    "provider": некорректные бары обязаны читаться как "bars";
  *  - assertNoSegmentLeakage — проверяемый инвариант результата: любая
  *    сделка целиком внутри окна сегмента, entryIndex = signalIndex + 1.
  *
@@ -31,13 +37,14 @@ import {
   type ChronologicalSplitConfig,
   type SegmentRun,
   type SegmentedBacktest,
-  type SignalDecisionList,
-  type SignalProvider,
+  type SignalSource,
   type SplitName,
   BACKTEST_SPLIT_DEFAULTS,
+  isSignalAdapter,
   resolveBacktestConfig
 } from "./contract";
 import { runBacktest } from "./engine";
+import { validateSignalAdapter } from "./validate";
 
 export const SPLIT_NAMES: readonly SplitName[] = ["TRAIN", "VALIDATION", "OOS"];
 
@@ -250,17 +257,41 @@ export function assertNoSegmentLeakage(
 /* Сегментный прогон                                                    */
 /* ------------------------------------------------------------------ */
 
+type SegmentedFailureStage =
+  | "config"
+  | "adapter"
+  | "bars"
+  | "split"
+  | "provider"
+  | "arithmetic"
+  | "leakage";
+
 export type SegmentedBacktestOutcome =
   | { readonly ok: true; readonly value: SegmentedBacktest }
   | {
       readonly ok: false;
-      readonly stage: "config" | "bars" | "split" | "provider" | "leakage";
+      /**
+       * Стадия отказа. Стадии внутренних прогонов (config / adapter /
+       * bars / provider / arithmetic) сохраняются как есть; если
+       * сегменты упали на РАЗНЫХ стадиях, сообщается стадия ПЕРВОГО
+       * упавшего сегмента в порядке TRAIN → VALIDATION → OOS, а стадии
+       * остальных видны в errors (префикс `[stage=…]`). Схлопывания в
+       * одну стадию больше нет.
+       */
+      readonly stage:
+        | "config"
+        | "adapter"
+        | "bars"
+        | "split"
+        | "provider"
+        | "arithmetic"
+        | "leakage";
       readonly errors: readonly string[];
     };
 
 export interface SegmentedBacktestInput {
   readonly bars: readonly BacktestBar[];
-  readonly signals: SignalProvider | SignalDecisionList;
+  readonly signals: SignalSource;
   readonly config?: BacktestInput["config"];
   readonly splitConfig?: Partial<ChronologicalSplitConfig>;
 }
@@ -295,11 +326,36 @@ export function runSegmentedBacktest(
     return { ok: false, stage: "config", errors: resolved.errors };
   }
 
+  const adapter = isSignalAdapter(input.signals) ? input.signals : null;
+
+  if (adapter !== null) {
+    const adapterErrors = validateSignalAdapter(adapter);
+
+    if (adapterErrors.length > 0) {
+      return { ok: false, stage: "adapter", errors: adapterErrors };
+    }
+  }
+
+  /**
+   * Требуемая история источника решений. Для провайдера/списка —
+   * только config.warmupBars (чужое требование не выдумывается), для
+   * адаптера — max(warmupBars, requiredLookbackBars − 1): сегментный
+   * прогон обязан дать адаптеру столько прошлых баров, сколько он
+   * заявил, иначе реалистичный провайдер «ломается» именно в
+   * VALIDATION/OOS, а не в TRAIN.
+   */
+  const requiredLookbackBars =
+    adapter === null ? 1 : adapter.requiredLookbackBars;
+  const historyBars = Math.max(
+    resolved.config.warmupBars,
+    Math.max(0, requiredLookbackBars - 1)
+  );
+
   const barsCount = Array.isArray(input.bars) ? input.bars.length : 0;
   const splitCheck = chronologicalSplit(
     barsCount,
     input.splitConfig,
-    resolved.config.warmupBars
+    historyBars
   );
 
   if (!splitCheck.ok) {
@@ -318,10 +374,20 @@ export function runSegmentedBacktest(
   const runs: readonly SegmentRun[] = [train, validation, oos];
   const errors: string[] = [];
 
+  let innerStage: SegmentedFailureStage | null = null;
+
   for (const run of runs) {
     if (!run.outcome.ok) {
+      // Внутренняя стадия сохраняется и в сводном stage, и в тексте
+      // ошибки: «провайдер» больше не объясняет некорректные бары.
+      if (innerStage === null) {
+        innerStage = run.outcome.stage;
+      }
+
       errors.push(
-        `${run.segment}: ${run.outcome.errors.join("; ") || "прогон не выполнен"}`
+        `${run.segment} [stage=${run.outcome.stage}]: ${
+          run.outcome.errors.join("; ") || "прогон не выполнен"
+        }`
       );
 
       continue;
@@ -335,9 +401,7 @@ export function runSegmentedBacktest(
   }
 
   if (errors.length > 0) {
-    const stage = runs.some((run) => !run.outcome.ok) ? "provider" : "leakage";
-
-    return { ok: false, stage, errors };
+    return { ok: false, stage: innerStage ?? "leakage", errors };
   }
 
   return { ok: true, value: { split, train, validation, oos } };

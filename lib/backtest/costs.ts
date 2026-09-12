@@ -90,9 +90,24 @@ export function grossPnl(
 }
 
 /**
- * Знаменатель R: риск в валюте счёта между ФАКТИЧЕСКОЙ ценой входа и
- * ПЛАНОВЫМ уровнем SL. Именно он делает R-кратности сопоставимыми
- * между сделками с разным слиппеджем.
+ * ПЛАНОВЫЙ риск — первичный знаменатель R (пункт 11 политики).
+ *
+ * Считается от опорной цены, известной НА МОМЕНТ СИГНАЛА (close бара
+ * сигнала), до планового уровня SL. Он не зависит от слиппеджа и гэпа
+ * на входе, поэтому не может схлопнуться в ноль и дать R в тысячи крат.
+ */
+export function plannedRiskAmount(
+  plannedEntryReference: number,
+  stopLoss: number,
+  quantity: number
+): number {
+  return Math.abs(plannedEntryReference - stopLoss) * quantity;
+}
+
+/**
+ * ДИАГНОСТИКА (не первичная метрика): риск между ФАКТИЧЕСКОЙ ценой
+ * входа и плановым SL. Публикуется, чтобы было видно, сколько риска
+ * съели слиппедж и гэп, но заголовный R считается по plannedRisk.
  */
 export function riskAmount(
   entryPrice: number,
@@ -102,19 +117,22 @@ export function riskAmount(
   return Math.abs(entryPrice - stopLoss) * quantity;
 }
 
-/** Задуманное reward/risk по плановым уровням. */
+/**
+ * Задуманное reward/risk ПО ПЛАНОВЫМ уровням: от опорной цены сигнала
+ * (а не от фактического исполнения).
+ */
 export function plannedRewardRisk(
-  entryPrice: number,
+  plannedEntryReference: number,
   stopLoss: number,
   takeProfit: number
 ): number {
-  const risk = Math.abs(entryPrice - stopLoss);
+  const risk = Math.abs(plannedEntryReference - stopLoss);
 
   if (risk === 0) {
     return 0;
   }
 
-  return Math.abs(takeProfit - entryPrice) / risk;
+  return Math.abs(takeProfit - plannedEntryReference) / risk;
 }
 
 /**

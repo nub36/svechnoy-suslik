@@ -33,6 +33,7 @@ import {
 import { runBacktest } from "../lib/backtest/engine";
 import {
   assertDecisionInvariance,
+  diagnoseDecisionInvariance,
   poisonFutureBars,
   probeProvider
 } from "../lib/backtest/no-lookahead";
@@ -498,10 +499,42 @@ ok(
 );
 ok(entryTrade?.barsHeld === 2, "entry: barsHeld считает бар входа первым");
 near(entryTrade?.grossPnl, 10, "LONG TP: gross = (110 − 100) × 1");
-near(entryTrade?.riskAmount, 5, "LONG TP: risk = |100 − 95| × 1");
-near(entryTrade?.grossR, 2, "LONG TP: grossR = 10 / 5");
-near(entryTrade?.rMultiple, 2, "LONG TP: при нулевой комиссии rMultiple = grossR");
-near(entryTrade?.plannedRewardRisk, 2, "LONG TP: плановый R/R = |110 − 100| / |100 − 95| = 2");
+near(
+  entryTrade?.plannedEntryReference,
+  99.5,
+  "LONG TP: опорная цена решения = close бара СИГНАЛА (99.5), а не open входа"
+);
+near(
+  entryTrade?.plannedRisk,
+  4.5,
+  "LONG TP: ПЛАНОВЫЙ риск = |99.5 − 95| × 1 — знаменатель R"
+);
+near(
+  entryTrade?.riskAmount,
+  5,
+  "LONG TP: riskAmount — ДИАГНОСТИКА по фактическому входу |100 − 95| × 1"
+);
+near(entryTrade?.grossR, 10 / 4.5, "LONG TP: grossR = gross / плановый риск = 10 / 4.5");
+near(
+  entryTrade?.rMultiple,
+  10 / 4.5,
+  "LONG TP: при нулевой комиссии rMultiple = grossR"
+);
+near(
+  entryTrade?.grossRActualFill,
+  2,
+  "LONG TP: диагностика по фактическому входу = 10 / 5 = 2"
+);
+near(
+  entryTrade?.rMultipleActualFill,
+  2,
+  "LONG TP: диагностика по фактическому входу (net) = 2"
+);
+near(
+  entryTrade?.plannedRewardRisk,
+  10.5 / 4.5,
+  "LONG TP: плановый R/R = |110 − 99.5| / |99.5 − 95| (от опорной цены сигнала)"
+);
 ok(
   entryTrade !== undefined && entryTrade.netPnl === entryTrade.grossPnl,
   "entry: при нулевой комиссии net = gross"
@@ -523,11 +556,32 @@ const slipLong = tradeOf(
 near(slipLong?.entryPrice, 100.1, "slippage LONG вход: цена сдвинута ВВЕРХ (против сделки)");
 near(slipLong?.exitPrice, 109.89, "slippage LONG выход: цена сдвинута ВНИЗ (против сделки)");
 near(slipLong?.grossPnl, 9.79, "slippage LONG: gross уменьшился на 0.21");
-near(slipLong?.riskAmount, 5.1, "slippage LONG: risk считается от ФАКТИЧЕСКОЙ цены входа");
+near(
+  slipLong?.riskAmount,
+  5.1,
+  "slippage LONG: riskAmount (ДИАГНОСТИКА) считается от ФАКТИЧЕСКОЙ цены входа"
+);
+near(
+  slipLong?.plannedRisk,
+  4.5,
+  "slippage LONG: ПЛАНОВЫЙ знаменатель R не зависит от слиппеджа"
+);
 near(slipLong?.slippageCost, 0.21, "slippage LONG: slippageCost = 0.1 + 0.11");
+near(
+  slipLong?.rMultiple,
+  9.79 / 4.5,
+  "slippage LONG: rMultiple = net / ПЛАНОВЫЙ риск (слиппедж бьёт по числителю)"
+);
 ok(
-  slipLong !== undefined && slipLong.rMultiple < 2,
+  slipLong !== undefined &&
+    entryTrade !== undefined &&
+    slipLong.rMultiple < entryTrade.rMultiple,
   "slippage LONG: R ухудшился относительно нулевых издержек"
+);
+near(
+  slipLong?.grossRActualFill,
+  9.79 / 5.1,
+  "slippage LONG: диагностика по фактическому входу = 9.79 / 5.1"
 );
 
 const slipShortBars: BacktestBar[] = [
@@ -588,9 +642,23 @@ near(feeTrade?.feeExit, 1.22, "fees: выход 220 × 10 bp + 1 = 1.22");
 near(feeTrade?.feesTotal, 2.42, "fees: комиссия считается по КАЖДОЙ стороне");
 near(feeTrade?.grossPnl, 20, "fees: gross = (110 − 100) × 2");
 near(feeTrade?.netPnl, 17.58, "fees: net = 20 − 2.42");
-near(feeTrade?.riskAmount, 10, "fees: risk = |100 − 95| × 2");
-near(feeTrade?.rMultiple, 1.758, "fees: rMultiple — ЧИСТЫЙ R (net / risk)");
-near(feeTrade?.grossR, 2, "fees: grossR — валовый R (gross / risk)");
+near(
+  feeTrade?.plannedRisk,
+  9,
+  "fees: ПЛАНОВЫЙ риск = |99.5 − 95| × 2 — знаменатель R"
+);
+near(
+  feeTrade?.riskAmount,
+  10,
+  "fees: riskAmount — диагностика по фактическому входу |100 − 95| × 2"
+);
+near(feeTrade?.rMultiple, 17.58 / 9, "fees: rMultiple — ЧИСТЫЙ R (net / плановый риск)");
+near(feeTrade?.grossR, 20 / 9, "fees: grossR — валовый R (gross / плановый риск)");
+near(
+  feeTrade?.rMultipleActualFill,
+  1.758,
+  "fees: rMultipleActualFill — диагностика (net / риск фактического входа)"
+);
 
 /* ---------- издержки никогда не улучшают результат ---------- */
 
@@ -997,29 +1065,81 @@ ok(
   "reject: отказ объяснён текстом"
 );
 
-const breached = resultOf(
-  run(
-    [mk(0, 100, 101, 99, 100), mk(1, 94, 95, 93, 94), mk(2, 94, 95, 93, 94)],
-    [entryDecision("LONG", 95, 110)],
-    ZERO
-  )
-);
+/* Аудит (HIGH 1): гэп на входе больше НЕ отклоняет сделку. Позиция
+ * открывается по open бара N+1 и тут же закрывается по тому же open
+ * общим гэповым правилом (пункт 7 политики): валовый PnL = 0, чистый —
+ * минус издержки. Класс убыточных исходов остаётся в выборке, поэтому
+ * winRate/PF/drawdown/expectancy больше не подкрашиваются. Коды отказов
+ * entry-levels-breached-at-open и entry-fill-outside-levels отправлены
+ * в отставку (в типе RejectReason сохранены, счётчики всегда 0). */
+const breachedBars: BacktestBar[] = [
+  mk(0, 100, 101, 99, 100),
+  mk(1, 94, 95, 93, 94),
+  mk(2, 94, 95, 93, 94)
+];
+const breachedOutcome = run(breachedBars, [entryDecision("LONG", 95, 110)], ZERO);
+const breached = resultOf(breachedOutcome);
+const breachedTrade = tradeOf(breachedOutcome);
 
 ok(
-  breached?.rejectedSignals[0]?.reason === "entry-levels-breached-at-open",
-  "reject: гэп open за уровень — entry-levels-breached-at-open"
+  breached?.rejectedSignals.length === 0,
+  "gap-entry: отказов нет — гэп на входе больше не удаляет сделку"
 );
 ok(
-  breached?.rejectedSignals[0]?.entryIndex === 1,
-  "reject: зафиксирован бар входа, на котором вынесен отказ"
+  breached?.metrics.trades === 1,
+  "gap-entry: сделка учтена в метриках (выборка не подчищена)"
 );
 ok(
-  breached?.rejectedSignals[0]?.referencePrice === 94,
-  "reject: опорная цена — open бара входа"
+  breachedTrade?.entryIndex === 1 && breachedTrade.entryPrice === 94,
+  "gap-entry: вход по open бара N+1 (94)"
 );
 ok(
-  breached?.metrics.trades === 0,
-  "reject: мгновенно выбитая гэпом сделка НЕ фабрикуются"
+  breachedTrade?.exitIndex === 1 && breachedTrade.exitReason === "STOP_LOSS",
+  "gap-entry: закрытие по тому же open, exitReason = STOP_LOSS"
+);
+ok(
+  breachedTrade?.gapThrough === true,
+  "gap-entry: исполнение помечено gapThrough"
+);
+ok(
+  breachedTrade?.barsHeld === 1,
+  "gap-entry: бар входа считается первым (barsHeld = 1)"
+);
+near(breachedTrade?.grossPnl, 0, "gap-entry: валовый PnL = 0 (вход и выход по одной цене)");
+near(breachedTrade?.netPnl, 0, "gap-entry: при нулевых издержках net = 0");
+ok(
+  breached?.metrics.breakeven === 1 && breached?.metrics.losses === 0,
+  "gap-entry: нулевой net — breakeven (не win и не loss)"
+);
+near(
+  breachedTrade?.plannedEntryReference,
+  100,
+  "gap-entry: опорная цена = close бара сигнала"
+);
+near(breachedTrade?.plannedRisk, 5, "gap-entry: плановый риск |100 − 95| × 1 = 5");
+near(breachedTrade?.riskAmount, 1, "gap-entry: фактический риск |94 − 95| × 1 = 1 (диагностика)");
+near(breachedTrade?.rMultiple, 0, "gap-entry: R = 0 — знаменатель не схлопнулся");
+
+const breachedCostly = tradeOf(
+  run(breachedBars, [entryDecision("LONG", 95, 110)], {
+    ...ZERO,
+    slippage: { kind: "bps", value: 10 },
+    fees: { bps: 5, fixedPerSide: 0.1 }
+  })
+);
+
+near(
+  breachedCostly?.grossPnl,
+  -0.188,
+  "gap-entry с издержками: вход 94.094, выход 93.906 → gross = −0.188"
+);
+ok(
+  breachedCostly !== undefined && breachedCostly.netPnl < breachedCostly.grossPnl,
+  "gap-entry с издержками: комиссия ухудшает net"
+);
+ok(
+  breachedCostly !== undefined && breachedCostly.netPnl < 0,
+  "gap-entry с издержками: честный убыток вместо «исчезнувшей» сделки"
 );
 
 const invalidLevels = resultOf(
@@ -1056,22 +1176,50 @@ ok(
 );
 
 // Уровни согласованы с close бара сигнала (99 < 99.5 < 100.2), но
-// слиппедж 100 bp поднимает цену входа до 101 — за TP.
-const fillOutside = resultOf(
-  run(
-    LONG_BARS,
-    [entryDecision("LONG", 99, 100.2)],
-    { ...ZERO, slippage: { kind: "bps", value: 100 } }
-  )
+// слиппедж 100 bp поднимает ФАКТИЧЕСКУЮ цену входа до 101 — за TP.
+// Аудит (HIGH 1): такая сделка больше не удаляется из выборки. open
+// бара (100) не выходит за уровни, поэтому мгновенного закрытия нет;
+// бар входа касается и SL, и TP → при пессимистичной политике выход по
+// SL. Итог — честный убыток −2.99 вместо «отсутствующей» сделки.
+const fillOutsideOutcome = run(
+  LONG_BARS,
+  [entryDecision("LONG", 99, 100.2)],
+  { ...ZERO, slippage: { kind: "bps", value: 100 } }
 );
+const fillOutside = resultOf(fillOutsideOutcome);
+const fillOutsideTrade = tradeOf(fillOutsideOutcome);
 
 ok(
-  fillOutside?.rejectedSignals[0]?.reason === "entry-fill-outside-levels",
-  "reject: экстремальный слиппедж вынес цену входа за уровни"
+  fillOutside?.rejectedSignals.length === 0,
+  "fill-outside-levels: отказ отправлен в отставку — сделка зафиксирована"
 );
 ok(
-  fillOutside?.metrics.trades === 0,
-  "reject: сделка за собственным TP не открывается"
+  fillOutside?.metrics.trades === 1,
+  "fill-outside-levels: сделка учтена в метриках"
+);
+near(fillOutsideTrade?.entryPrice, 101, "fill-outside-levels: вход 100 + 100 bp = 101");
+ok(
+  fillOutsideTrade?.exitReason === "STOP_LOSS" &&
+    fillOutsideTrade?.sameBarAmbiguity === true,
+  "fill-outside-levels: бар входа касается обоих уровней → пессимистичный SL (а не «удаление» сделки)"
+);
+near(
+  fillOutsideTrade?.grossPnl,
+  99 * 0.99 - 101,
+  "fill-outside-levels: gross = 99 × 0.99 − 101 = −2.99 (слиппедж на входе и на выходе)"
+);
+ok(
+  fillOutsideTrade !== undefined && fillOutsideTrade.netPnl < 0,
+  "fill-outside-levels: вход за собственным TP — УБЫТОК, а не отсутствие сделки"
+);
+near(
+  fillOutsideTrade?.plannedRewardRisk,
+  0.7 / 0.5,
+  "fill-outside-levels: плановый R/R = |100.2 − 99.5| / |99.5 − 99| = 1.4"
+);
+ok(
+  fillOutside?.metrics.losses === 1 && fillOutside?.metrics.winRate === 0,
+  "fill-outside-levels: метрики видят убыток (winRate = 0)"
 );
 
 /* ------------------------------------------------------------------ */
@@ -1239,10 +1387,15 @@ ok(
   probe.guardFailures.length === 0,
   "no-lookahead: все попытки чтения будущего (index+1, +2, +10, +1000) заблокированы"
 );
-ok(probe.errors.length === 0, "no-lookahead: visibleBars = index + 1 на каждом баре");
 ok(
-  probe.decisions.every((item) => item.visibleBars === item.index + 1),
-  "no-lookahead: видимая история растёт строго на один бар"
+  probe.errors.length === 0,
+  "no-lookahead: visibleBars = index − firstVisibleIndex + 1 на каждом баре"
+);
+ok(
+  probe.decisions.every(
+    (item) => item.visibleBars === item.index - item.firstVisibleIndex + 1
+  ),
+  "no-lookahead: видимая история = числу баров, достижимых через barAt"
 );
 ok(
   probe.decisions.every((item, index) => item.index === index),
@@ -1334,9 +1487,13 @@ ok(
   "no-lookahead контрфакт: читающий будущее провайдер НЕ проходит проверку"
 );
 
-/* Провайдер, заглядывающий в будущее в обход barAt (замыкание на массив),
- * обязан быть пойман контрфактической проверкой: его решения зависят от
- * будущих баров, поэтому «отравление» будущего их изменит. */
+/* Провайдер, заглядывающий в будущее в обход barAt: замыкание на массив,
+ * который движку НЕ передавался. Это ДОКАЗАННЫЙ ПРЕДЕЛ контрфактической
+ * диагностики (аудит, BLOCKER 1): poisonFutureBars подменяет только
+ * массив, переданный движку, а замыкание держит исходный — решения не
+ * меняются, и проверка проходит ЗЕЛЁНОЙ. Поэтому диагностика больше не
+ * выдаётся за сертификацию no-lookahead: она публикует guarantee =
+ * "counterfactual-diagnostic" и непустой список ограничений. */
 const closureCheater: SignalProvider = (context) => {
   const future = bars60[context.index + 2];
 
@@ -1348,7 +1505,7 @@ const closureCheater: SignalProvider = (context) => {
     ? entryDecision("LONG", context.bar.low, context.bar.high + 1, "cheat")
     : entryDecision("SHORT", context.bar.high, context.bar.low - 1, "cheat");
 };
-const closureInvariance = assertDecisionInvariance({
+const closureInvariance = diagnoseDecisionInvariance({
   bars: bars60,
   provider: closureCheater,
   config: ZERO,
@@ -1356,8 +1513,48 @@ const closureInvariance = assertDecisionInvariance({
 });
 
 ok(
-  !closureInvariance.ok,
-  "no-lookahead контрфакт: читер через замыкание на массив ОБНАРУЖЕН"
+  closureInvariance.ok,
+  "предел контрфакта: читер с замыканием на собственный массив НЕ обнаруживается (ok=true — это НЕ доказательство отсутствия lookahead)"
+);
+ok(
+  closureInvariance.guarantee === "counterfactual-diagnostic",
+  "предел контрфакта: отчёт честно помечен как ДИАГНОСТИКА, а не сертификация"
+);
+ok(
+  closureInvariance.limitations.length > 0,
+  "предел контрфакта: ограничения публикуются вместе с отчётом (даже при ok=true)"
+);
+ok(
+  closureInvariance.limitations.some((item) =>
+    item.toLowerCase().includes("замыкани")
+  ),
+  "предел контрфакта: в ограничениях прямо названы замыкания"
+);
+ok(
+  assertDecisionInvariance === diagnoseDecisionInvariance,
+  "предел контрфакта: старое имя сохранено как обёртка над диагностикой"
+);
+
+/* Структурная гарантия (A) при этом ДЕРЖИТСЯ: тот же читер не может
+ * прочитать будущее через контекст движка — barAt(index+1) бросает. */
+const closureProbe = probeProvider({
+  bars: bars60,
+  provider: closureCheater,
+  config: ZERO
+});
+
+ok(
+  closureProbe.ok && closureProbe.guardFailures.length === 0,
+  "структурный барьер: канал движка будущее не отдаёт даже читеру"
+);
+ok(
+  closureProbe.guarantee === "structural-context-barrier" &&
+    closureProbe.limitations.length > 0,
+  "структурный барьер: гарантия и её пределы опубликованы"
+);
+ok(
+  run(bars60, closureCheater, ZERO).ok === true,
+  "предел контрфакта: читер через замыкание УСПЕШНО прогоняется — барьер barAt покрывает только канал движка"
 );
 
 /* ------------------------------------------------------------------ */
@@ -1392,17 +1589,203 @@ const FORBIDDEN_TOKENS = [
 
 function stripComments(source: string): string {
   // Комментарии убираются, чтобы документация («никаких Date.now()»)
-  // не давала ложных срабатываний; строковых литералов с «//» в слое нет.
+  // не давала ложных срабатываний; строковые литералы сохраняются —
+  // по ним ниже проверяются импорты.
   return source
     .replace(/\/\*[\s\S]*?\*\//g, " ")
     .replace(/\/\/.*$/gm, " ");
 }
 
+/** Пропускает литерал в одинарных/двойных кавычках; индекс ПОСЛЕ него. */
+function skipQuoted(source: string, start: number, quote: string): number {
+  let i = start + 1;
+
+  while (i < source.length) {
+    const ch = source[i];
+
+    if (ch === "\\") {
+      i += 2;
+
+      continue;
+    }
+
+    if (ch === quote) {
+      return i + 1;
+    }
+
+    if (ch === "\n") {
+      return i;
+    }
+
+    i += 1;
+  }
+
+  return i;
+}
+
+/** Пропускает ${…} внутри шаблона (с вложенными кавычками); индекс ПОСЛЕ }. */
+function skipInterpolation(source: string, start: number): number {
+  let depth = 0;
+  let i = start;
+
+  while (i < source.length) {
+    const ch = source[i];
+
+    if (ch === "\"" || ch === "'") {
+      i = skipQuoted(source, i, ch);
+
+      continue;
+    }
+
+    if (ch === "`") {
+      i = skipTemplate(source, i);
+
+      continue;
+    }
+
+    if (ch === "{") {
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+
+      if (depth === 0) {
+        return i + 1;
+      }
+    }
+
+    i += 1;
+  }
+
+  return i;
+}
+
+/** Пропускает шаблонный литерал; индекс ПОСЛЕ закрывающего `. */
+function skipTemplate(source: string, start: number): number {
+  let i = start + 1;
+
+  while (i < source.length) {
+    const ch = source[i];
+
+    if (ch === "\\") {
+      i += 2;
+
+      continue;
+    }
+
+    if (ch === "`") {
+      return i + 1;
+    }
+
+    if (ch === "$" && source[i + 1] === "{") {
+      i = skipInterpolation(source, i + 1);
+
+      continue;
+    }
+
+    i += 1;
+  }
+
+  return i;
+}
+
+/**
+ * Текст шаблона убирается, но СОДЕРЖИМОЕ ${…} сохраняется как код
+ * (рекурсивно): спрятать запрещённый вызов в интерполяции нельзя.
+ */
+function templateInterpolations(source: string, start: number): string {
+  let out = "";
+  let i = start + 1;
+
+  while (i < source.length) {
+    const ch = source[i];
+
+    if (ch === "\\") {
+      i += 2;
+
+      continue;
+    }
+
+    if (ch === "`") {
+      break;
+    }
+
+    if (ch === "$" && source[i + 1] === "{") {
+      const end = skipInterpolation(source, i + 1);
+
+      out += `${stripCode(source.slice(i + 2, end - 1))} `;
+      i = end;
+
+      continue;
+    }
+
+    i += 1;
+  }
+
+  return out;
+}
+
+/**
+ * Убирает комментарии И ТЕКСТ строковых/шаблонных литералов, сохраняя
+ * код интерполяций. Нужно потому, что документация и тексты ошибок
+ * обязаны иметь право объяснять запреты словами («текущее время
+ * недопустимо», «Math.random»), а проверка относится к КОДУ.
+ */
+function stripCode(source: string): string {
+  let out = "";
+  let i = 0;
+
+  while (i < source.length) {
+    const ch = source[i];
+
+    if (ch === "/" && source[i + 1] === "*") {
+      const end = source.indexOf("*/", i + 2);
+
+      out += " ";
+      i = end === -1 ? source.length : end + 2;
+
+      continue;
+    }
+
+    if (ch === "/" && source[i + 1] === "/") {
+      const end = source.indexOf("\n", i);
+
+      out += " ";
+      i = end === -1 ? source.length : end;
+
+      continue;
+    }
+
+    if (ch === "\"" || ch === "'") {
+      i = skipQuoted(source, i, ch);
+      out += '""';
+
+      continue;
+    }
+
+    if (ch === "`") {
+      out += `""${templateInterpolations(source, i)}`;
+      i = skipTemplate(source, i);
+
+      continue;
+    }
+
+    out += ch;
+    i += 1;
+  }
+
+  return out;
+}
+
 const allSpecifiers: string[] = [];
 
 for (const name of sourceFiles) {
-  const source = stripComments(readFileSync(join(backtestDir, name), "utf8"));
-  const hits = FORBIDDEN_TOKENS.filter((token) => source.includes(token));
+  const raw = readFileSync(join(backtestDir, name), "utf8");
+  // Для импортов литералы нужны (from "./contract"), для запрета
+  // env/времени/случайности — нет: текст ошибок и документация
+  // проверяются как текст, а не как код.
+  const source = stripComments(raw);
+  const code = stripCode(raw);
+  const hits = FORBIDDEN_TOKENS.filter((token) => code.includes(token));
 
   ok(
     hits.length === 0,

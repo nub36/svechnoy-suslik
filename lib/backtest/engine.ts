@@ -7,20 +7,38 @@
  * serialize.ts, который тоже детерминирован).
  *
  * Цикл по барам (окно = сегмент или весь набор), на каждом баре i:
- *   1) исполнение отложенного входа (open бара i) — вход всегда на
- *      баре, СЛЕДУЮЩЕМ за баром сигнала;
+ *   1) исполнение отложенного входа (open бара i) — вход ВСЕГДА на баре,
+ *      СЛЕДУЮЩЕМ за баром сигнала, и ВСЕГДА исполняется: гэп за уровень
+ *      больше не отменяет сделку, а открывает и сразу закрывает её по
+ *      тому же open (пункт 4a политики);
  *   2) сопровождение открытой позиции по OHLC бара i (гэп → same-bar
  *      политика → SL → TP → timeout → конец окна);
- *   3) оценка сигнала на ЗАКРЫТОМ баре i и постановка входа на i+1.
+ *   3) оценка сигнала на ЗАКРЫТОМ баре i и постановка входа на i+1
+ *      (скаляры решения снэпшотятся, пункт 22).
  *
  * Порядок (2)→(3) означает, что стратегия видит результат собственного
  * стопаута в том же баре и может дать новый сигнал (вход всё равно
  * только на следующем баре) — это законная информация, а не lookahead.
  *
- * No-lookahead обеспечен СТРУКТУРНО: провайдер получает SignalContext,
- * у которого нет массива баров, а barAt(i) бросает исключение при
- * i > текущего индекса. Вход исполняется только по open следующего
- * бара, поэтому «узнать» исход бара сигнала до входа невозможно.
+ * NO-LOOKAHEAD — ДВЕ РАЗНЫЕ ГАРАНТИИ (пункт 20 политики, см.
+ * no-lookahead.ts):
+ *   A. СТРУКТУРНАЯ (здесь обеспечена кодом): источник решений получает
+ *      SignalContext без массива баров, barAt(i) бросает при i > index и
+ *      при i < firstVisibleIndex, visibleBars = index − firstVisibleIndex
+ *      + 1, вход только по open следующего бара. Метка сегмента
+ *      (TRAIN/VALIDATION/OOS) в контекст НЕ передаётся — слепой OOS.
+ *   B. ВНЕШНЕЕ СОСТОЯНИЕ источника решений (замыкания, глобалы, сеть,
+ *      собственная выборка данных) средствами JS не сертифицируется:
+ *      для неё существует контракт SignalAdapter (данные только через
+ *      SignalContext) и certifySignalAdapter, а не «доказательство».
+ *
+ * Разгон истории: warmup = max(config.warmupBars, requiredLookbackBars − 1)
+ * баров ПЕРЕД окном — это каузальное прошлое, а не утечка.
+ *
+ * Отказы структурированы по стадиям: config → adapter → bars → provider
+ * → arithmetic. Стадия "arithmetic" означает, что при конечном входе
+ * арифметика потеряла конечность (overflow): успешный результат не может
+ * содержать ни одного NaN/Infinity (пункт 17).
  */
 
 import {
@@ -29,6 +47,7 @@ import {
   feeForSide,
   grossPnl,
   plannedRewardRisk,
+  plannedRiskAmount,
   riskAmount,
   slippageCost
 } from "./costs";
@@ -51,28 +70,47 @@ import {
   type RejectedSignal,
   type ResolvedBacktestConfig,
   type SegmentWindow,
+  type SignalAdapter,
   type SignalContext,
   type SignalDecision,
   type SignalProvider,
   type SkippedSignal,
+  deepFreeze,
   isEntryDecision,
+  isSignalAdapter,
   resolveBacktestConfig,
   signalProviderFromList
 } from "./contract";
 import { computeBacktestMetrics } from "./metrics";
 import { fingerprintBars, fingerprintConfig } from "./serialize";
 import {
+  findNonFiniteNumbers,
   validateBars,
+  validateDecisionObject,
   validateEntryDecisionShape,
-  validateSegmentWindow
+  validateSegmentWindow,
+  validateSignalAdapter
 } from "./validate";
 
-/** Отложенный вход: решение принято на баре signalIndex. */
+/**
+ * Отложенный вход: решение принято на баре signalIndex.
+ *
+ * Скаляры и факты СНЭПШОТЯТСЯ в момент принятия (пункт 22 политики):
+ * ссылка на объект решения вызывающего кода не сохраняется, поэтому
+ * последующая мутация этого объекта не может изменить уже
+ * запланированную сделку.
+ */
 interface PendingEntry {
   readonly signalIndex: number;
   readonly signalTime: number;
   readonly entryIndex: number;
-  readonly decision: EntryDecision;
+  /** Опорная цена решения — close бара сигнала (знаменатель R). */
+  readonly plannedEntryReference: number;
+  readonly direction: Direction;
+  readonly stopLoss: number;
+  readonly takeProfit: number;
+  readonly label: string;
+  readonly facts: readonly string[];
 }
 
 /** Открытая позиция (внутреннее представление). */
@@ -82,6 +120,8 @@ interface OpenPosition {
   readonly signalTime: number;
   readonly entryIndex: number;
   readonly entryTime: number;
+  /** Опорная цена сигнала (close бара сигнала) — плановый риск. */
+  readonly plannedEntryReference: number;
   readonly plannedEntryPrice: number;
   readonly entryPrice: number;
   readonly feeEntry: number;
@@ -185,12 +225,48 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
   }
 
   const bars = freezeBars(input.bars);
-  const warmupStartIndex = Math.max(0, startIndex - config.warmupBars);
 
-  const provider: SignalProvider =
-    typeof input.signals === "function"
-      ? input.signals
-      : signalProviderFromList(input.signals);
+  /* ---------- источник решений: провайдер / список / адаптер ---------- */
+
+  const adapter: SignalAdapter | null = isSignalAdapter(input.signals)
+    ? input.signals
+    : null;
+
+  if (adapter !== null) {
+    const adapterErrors = validateSignalAdapter(adapter);
+
+    if (adapterErrors.length > 0) {
+      return { ok: false, stage: "adapter", errors: adapterErrors };
+    }
+  }
+
+  const signalSource = input.signals;
+  const provider: SignalProvider = isSignalAdapter(signalSource)
+    ? signalSource.decide
+    : typeof signalSource === "function"
+      ? signalSource
+      : signalProviderFromList(signalSource);
+
+  const signalSourceKind: "adapter" | "provider" | "list" = isSignalAdapter(
+    signalSource
+  )
+    ? "adapter"
+    : typeof signalSource === "function"
+      ? "provider"
+      : "list";
+
+  /**
+   * Требуемая каузальная история (пункт 19 политики): адаптер обязан
+   * объявить, сколько закрытых баров ему нужно. Для «голой» функции и
+   * списка требование не выдумывается — берётся только config.warmupBars.
+   */
+  const requiredLookbackBars =
+    adapter === null ? 1 : adapter.requiredLookbackBars;
+  const historyBars = Math.max(
+    config.warmupBars,
+    Math.max(0, requiredLookbackBars - 1)
+  );
+  const warmupStartIndex = Math.max(0, startIndex - historyBars);
 
   const trades: BacktestTrade[] = [];
   const skippedSignals: SkippedSignal[] = [];
@@ -224,9 +300,14 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
         kind,
         reason,
         detail,
-        referencePrice,
-        stopLoss,
-        takeProfit,
+        // Неконечные значения входа нормализуются в null: успешный
+        // результат обязан быть конечным целиком (пункт 17), а причина
+        // отказа видна в detail.
+        referencePrice: Number.isFinite(referencePrice)
+          ? referencePrice
+          : null,
+        stopLoss: Number.isFinite(stopLoss) ? stopLoss : null,
+        takeProfit: Number.isFinite(takeProfit) ? takeProfit : null,
         entryIndex,
         entryTime
       })
@@ -239,77 +320,34 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
     /* ---------------- 1. исполнение отложенного входа --------------- */
 
     if (pending !== null && pending.entryIndex === i) {
-      const decision = pending.decision;
+      // Пункт 4a политики (исправлено аудитом): вход исполняется ВСЕГДА
+      // по open бара N+1. Гэп через уровень больше НЕ удаляет сделку из
+      // выборки — иначе терялся класс убыточных исходов и смещались
+      // winRate/PF/drawdown/expectancy. Если open оказался за уровнем,
+      // позиция открывается и закрывается по тому же open общим гэповым
+      // правилом (пункт 7): валовый PnL ≈ 0, чистый — минус издержки.
       const plannedEntryPrice = bar.open;
-
       const entryPrice = entryFillPrice(
         plannedEntryPrice,
-        decision.kind,
+        pending.direction,
         config
       );
 
-      if (
-        !levelsBracket(
-          decision.kind,
-          plannedEntryPrice,
-          decision.stopLoss,
-          decision.takeProfit
-        )
-      ) {
-        // Уровни были согласованы с close бара сигнала, но open бара
-        // входа оказался за их пределами — рынок гэпнул через уровень.
-        reject(
-          pending.signalIndex,
-          pending.signalTime,
-          decision.kind,
-          "entry-levels-breached-at-open",
-          decision.kind === "LONG"
-            ? `open ${String(plannedEntryPrice)} не между sl ${String(decision.stopLoss)} и tp ${String(decision.takeProfit)}`
-            : `open ${String(plannedEntryPrice)} не между tp ${String(decision.takeProfit)} и sl ${String(decision.stopLoss)}`,
-          plannedEntryPrice,
-          decision.stopLoss,
-          decision.takeProfit,
-          i,
-          bar.time
-        );
-      } else if (
-        !levelsBracket(
-          decision.kind,
-          entryPrice,
-          decision.stopLoss,
-          decision.takeProfit
-        )
-      ) {
-        // Экстремальный слиппедж вынес фактическую цену входа за уровни:
-        // сделка открылась бы уже за собственным SL/TP.
-        reject(
-          pending.signalIndex,
-          pending.signalTime,
-          decision.kind,
-          "entry-fill-outside-levels",
-          `цена входа со слиппеджем ${String(entryPrice)} не между sl ${String(decision.stopLoss)} и tp ${String(decision.takeProfit)}`,
-          entryPrice,
-          decision.stopLoss,
-          decision.takeProfit,
-          i,
-          bar.time
-        );
-      } else {
-        open = {
-          direction: decision.kind,
-          signalIndex: pending.signalIndex,
-          signalTime: pending.signalTime,
-          entryIndex: i,
-          entryTime: bar.time,
-          plannedEntryPrice,
-          entryPrice,
-          feeEntry: feeForSide(entryPrice, config.quantity, config),
-          stopLoss: decision.stopLoss,
-          takeProfit: decision.takeProfit,
-          label: decision.label,
-          facts: Object.freeze([...decision.facts])
-        };
-      }
+      open = {
+        direction: pending.direction,
+        signalIndex: pending.signalIndex,
+        signalTime: pending.signalTime,
+        entryIndex: i,
+        entryTime: bar.time,
+        plannedEntryReference: pending.plannedEntryReference,
+        plannedEntryPrice,
+        entryPrice,
+        feeEntry: feeForSide(entryPrice, config.quantity, config),
+        stopLoss: pending.stopLoss,
+        takeProfit: pending.takeProfit,
+        label: pending.label,
+        facts: pending.facts
+      };
 
       pending = null;
     }
@@ -323,8 +361,9 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
       let gapThrough = false;
       let sameBarAmbiguity = false;
 
-      // 2a. гэп через уровень на open (на баре входа невозможен: уровни
-      //     проверены относительно того же open).
+      // 2a. гэп через уровень на open. ВОЗМОЖЕН и на баре входа
+      //     (пункт 4a): тогда позиция открывается и закрывается по
+      //     одному и тому же open, а убыток равен издержкам.
       if (open.direction === "LONG") {
         if (bar.open <= open.stopLoss) {
           plannedExitPrice = bar.open;
@@ -420,7 +459,14 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
           config.quantity
         );
         const fees = open.feeEntry + feeExit;
-        const risk = riskAmount(
+        // Первичный знаменатель R — ПЛАНОВЫЙ риск (известен на баре
+        // сигнала), фактический риск исполнения — только диагностика.
+        const plannedRisk = plannedRiskAmount(
+          open.plannedEntryReference,
+          open.stopLoss,
+          config.quantity
+        );
+        const actualFillRisk = riskAmount(
           open.entryPrice,
           open.stopLoss,
           config.quantity
@@ -434,6 +480,7 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
             signalTime: open.signalTime,
             entryIndex: open.entryIndex,
             entryTime: open.entryTime,
+            plannedEntryReference: open.plannedEntryReference,
             plannedEntryPrice: open.plannedEntryPrice,
             entryPrice: open.entryPrice,
             exitIndex: i,
@@ -447,9 +494,10 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
             quantity: config.quantity,
             stopLoss: open.stopLoss,
             takeProfit: open.takeProfit,
-            riskAmount: risk,
+            plannedRisk,
+            riskAmount: actualFillRisk,
             plannedRewardRisk: plannedRewardRisk(
-              open.entryPrice,
+              open.plannedEntryReference,
               open.stopLoss,
               open.takeProfit
             ),
@@ -466,8 +514,12 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
               config.quantity
             ),
             netPnl: gross - fees,
-            grossR: risk === 0 ? 0 : gross / risk,
-            rMultiple: risk === 0 ? 0 : (gross - fees) / risk,
+            grossR: plannedRisk === 0 ? 0 : gross / plannedRisk,
+            rMultiple: plannedRisk === 0 ? 0 : (gross - fees) / plannedRisk,
+            grossRActualFill:
+              actualFillRisk === 0 ? 0 : gross / actualFillRisk,
+            rMultipleActualFill:
+              actualFillRisk === 0 ? 0 : (gross - fees) / actualFillRisk,
             label: open.label,
             facts: open.facts
           })
@@ -497,7 +549,11 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
 
     const context: SignalContext = Object.freeze({
       index: i,
-      visibleBars: i + 1,
+      // visibleBars обязан равняться index − firstVisibleIndex + 1, то
+      // есть ЧИСЛУ БАРОВ, ДОСТИЖИМЫХ через barAt. При warmup > 0 (и при
+      // обязательном разгоне адаптера) это меньше i + 1: прежнее
+      // i + 1 было ложным заявлением о доступной истории.
+      visibleBars: i - warmupStartIndex + 1,
       firstVisibleIndex: warmupStartIndex,
       bar,
       barAt: (requested: number) => {
@@ -521,8 +577,11 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
 
         return bars[requested];
       },
-      position: positionView,
-      segment: segment === null ? null : segment.name
+      position: positionView
+      // Метка сегмента из контекста УБРАНА: решения не должны знать,
+      // прогоняются ли они в TRAIN/VAL/OOS (слепой OOS). Инженер
+      // передаёт сегмент провайдеру сам — и тогда утечка становится
+      // явной, проверяемой и не маскируется движком.
     });
 
     let decision: SignalDecision | null;
@@ -553,6 +612,18 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
     ) {
       providerErrors.push(
         `signals на баре ${String(i)}: неизвестный kind=${String(decision.kind)}`
+      );
+
+      break;
+    }
+
+    // Любое решение проверяется в момент принятия: скаляры конечны,
+    // label — строка (если задан), facts — массив строк (если задан).
+    const objectShape = validateDecisionObject(decision);
+
+    if (!objectShape.ok) {
+      providerErrors.push(
+        `signals на баре ${String(i)} (time=${String(bar.time)}): ${objectShape.detail}`
       );
 
       break;
@@ -633,7 +704,13 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
       signalIndex: i,
       signalTime: bar.time,
       entryIndex: i + 1,
-      decision
+      // Снэшот плановых скаляров: опорная цена = close бара сигнала.
+      plannedEntryReference: bar.close,
+      direction: decision.kind,
+      stopLoss: decision.stopLoss,
+      takeProfit: decision.takeProfit,
+      label: decision.label ?? "",
+      facts: Object.freeze([...(decision.facts ?? [])])
     };
   }
 
@@ -700,23 +777,53 @@ export function runBacktest(input: BacktestInput): BacktestOutcome {
     segmentStartIndex: segment === null ? null : segment.startIndex,
     segmentEndIndexExclusive:
       segment === null ? null : segment.endIndexExclusive,
-    warmupStartIndex: segment === null ? null : warmupStartIndex
+    warmupStartIndex: segment === null ? null : warmupStartIndex,
+    signalSourceKind,
+    adapterId: adapter === null ? null : adapter.adapterId,
+    adapterVersion: adapter === null ? null : adapter.version,
+    requiredLookbackBars,
+    historyStartIndex: warmupStartIndex
   });
 
-  const result: BacktestResult = Object.freeze({
-    metadata: Object.freeze(metadata),
-    config: Object.freeze(config),
-    input: Object.freeze({
+  // ГЛУБОКАЯ заморозка (пункт 18 политики): вложенные объекты
+  // (config.slippage, config.fees, каждая сделка, facts, equity-точки,
+  // metrics.exitReasonCounts) тоже неизменяемы, поэтому вызывающий код
+  // не может подменить значение после расчёта и получить расхождение
+  // между configFingerprint и фактическими параметрами.
+  const result = deepFreeze<BacktestResult>({
+    metadata,
+    config,
+    input: {
       barsCount: windowBars.length,
       signalsEvaluated,
-      decisionCounts: Object.freeze({ ...decisionCounts })
-    }),
-    trades: Object.freeze(trades),
-    skippedSignals: Object.freeze(skippedSignals),
-    rejectedSignals: Object.freeze(rejectedSignals),
-    equityCurve: Object.freeze(equityCurve),
-    metrics: Object.freeze(metrics)
+      decisionCounts: { ...decisionCounts }
+    },
+    trades,
+    skippedSignals,
+    rejectedSignals,
+    equityCurve,
+    metrics
   });
+
+  /* -------- полная арифметика: никаких NaN/Infinity в ok:true -------- */
+
+  // Вход проверен на конечность, но конечные значения могут дать
+  // overflow (quantity=1e308 × цена → Infinity). Такой результат нельзя
+  // публиковать как успех: serializeResult бросил бы исключение, а
+  // downstream увидел бы maxDrawdown=0 и profitFactorState="no-losses".
+  const nonFinite = findNonFiniteNumbers(result, "result");
+
+  if (nonFinite.length > 0) {
+    return {
+      ok: false,
+      stage: "arithmetic",
+      errors: [
+        `арифметика потеряла конечность при конечном входе (overflow/точность): ${nonFinite.join(
+          "; "
+        )}`
+      ]
+    };
+  }
 
   return { ok: true, result };
 }

@@ -9,10 +9,33 @@
  *  - win ⇔ netPnl > 0; netPnl = 0 — breakeven (не win и не loss);
  *    breakeven прерывает серии выигрышей и проигрышей;
  *  - медиана для чётного числа — среднее двух центральных;
- *  - drawdown: основная база — реализованная эквити (точка на каждую
- *    закрытую сделку), дополнительная консервативная — mark-to-market
- *    (открытая позиция переоценивается по close каждого бара; будущая
- *    комиссия выхода не резервируется).
+ *  - drawdown считается по ТРЁМ базам, каждая публикуется под своим
+ *    именем (ничего не переименовано и не подменено):
+ *      a) maxDrawdown / maxDrawdownPct — РЕАЛИЗОВАННАЯ эквити: точка на
+ *         каждую закрытую сделку. Основная база;
+ *      b) maxDrawdownMarkToMarket / …Pct — CLOSE-TO-CLOSE
+ *         нереализованная: открытая позиция переоценивается по CLOSE
+ *         каждого бара, будущая комиссия выхода не резервируется.
+ *         Внутрибарные экстремумы не учитываются, поэтому эта база
+ *         оптимистичнее (c);
+ *      c) maxAdverseExcursionDrawdown / …Pct — КОНСЕРВАТИВНАЯ: та же
+ *         переоценка, но по неблагоприятному экстремуму бара
+ *         (LONG → low, SHORT → high). Показывает худший
+ *         нереализованный спад, который мог наступить внутри бара;
+ *  - equityNonPositive взводится, если ЛЮБАЯ из трёх баз уходила в ноль
+ *    или ниже;
+ *  - maxDrawdownPct = 0 (не null) при нулевой просадке и положительном
+ *    первом значении эквити; null — только когда пик ≤ 0;
+ *  - finalEquity равен ПОСЛЕДНЕЙ точке реализованной кривой эквити
+ *    (а не initialEquity + totalNetPnl: порядок сложения float может
+ *    расходиться в последних разрядах, а отчёт обязан быть
+ *    самосогласованным);
+ *  - profitFactorState = "no-losses" при отсутствии чистых убытков,
+ *    ВКЛЮЧАЯ случай «все сделки в breakeven» (netPnl = 0): тогда PF =
+ *    null, winRate = 0 и это не считается прибылью;
+ *  - агрегаты считаются циклами, а НЕ Math.max(…arr) / Math.min(…arr):
+ *    spread раскрывает аргументы в стековый кадр и падает с
+ *    RangeError примерно на 150k+ записей.
  */
 
 import {
@@ -50,6 +73,35 @@ function sum(values: readonly number[]): number {
   return total;
 }
 
+/**
+ * Максимум циклом: null на пустом входе, без RangeError на больших
+ * массивах (spread-вариант падает примерно на 150k+ элементах).
+ */
+function maxValue(values: readonly number[]): number | null {
+  let best: number | null = null;
+
+  for (const value of values) {
+    if (best === null || value > best) {
+      best = value;
+    }
+  }
+
+  return best;
+}
+
+/** Минимум циклом: null на пустом входе (см. maxValue). */
+function minValue(values: readonly number[]): number | null {
+  let best: number | null = null;
+
+  for (const value of values) {
+    if (best === null || value < best) {
+      best = value;
+    }
+  }
+
+  return best;
+}
+
 function mean(values: readonly number[]): number | null {
   return values.length === 0 ? null : sum(values) / values.length;
 }
@@ -75,15 +127,25 @@ interface EquitySample {
   readonly equity: number;
 }
 
+/** Цена переоценки бара: close (MTM) либо неблагоприятный экстремум. */
+type RevaluationPrice = "close" | "adverse-extreme";
+
 /**
- * Mark-to-market эквити по барам окна: одна точка на бар.
+ * Эквити по барам окна: одна точка на бар.
  *
  * Реализованная часть — сумма netPnl сделок, закрытых на этом баре или
- * раньше; нереализованная — валовая переоценка открытой позиции по
- * close бара. Экспортируется для тестов и для будущей отрисовки.
+ * раньше; нереализованная — валовая переоценка открытой позиции:
+ *  - "close" → close-to-close mark-to-market (база b);
+ *  - "adverse-extreme" → по неблагоприятному экстремуму бара
+ *    (LONG → low, SHORT → high) — консервативная база (c).
+ *
+ * Будущая комиссия выхода в обеих базах не резервируется (это
+ * документированное приближение, а не «чистая» переоценка). Позиция на
+ * баре закрытия считается уже закрытой (exitIndex <= i).
  */
-export function markToMarketEquity(
-  args: MetricsInput
+function revaluedEquity(
+  args: MetricsInput,
+  price: RevaluationPrice
 ): readonly EquitySample[] {
   const { trades, bars, startIndex, endIndexExclusive, config } = args;
   const points: EquitySample[] = [];
@@ -104,13 +166,22 @@ export function markToMarketEquity(
         ? trades[cursor]
         : null;
 
+    const markPrice =
+      openTrade === null
+        ? bar.close
+        : price === "close"
+          ? bar.close
+          : openTrade.direction === "LONG"
+            ? bar.low
+            : bar.high;
+
     const unrealized =
       openTrade === null
         ? 0
         : grossPnl(
             openTrade.direction,
             openTrade.entryPrice,
-            bar.close,
+            markPrice,
             openTrade.quantity
           );
 
@@ -118,6 +189,27 @@ export function markToMarketEquity(
   }
 
   return points;
+}
+
+/**
+ * Close-to-close mark-to-market эквити (база b). Экспортируется для
+ * тестов и для будущей отрисовки. НЕ учитывает внутрибарные
+ * экстремумы — для этого есть adverseExcursionEquity.
+ */
+export function markToMarketEquity(
+  args: MetricsInput
+): readonly EquitySample[] {
+  return revaluedEquity(args, "close");
+}
+
+/**
+ * Консервативная эквити по неблагоприятному экстремуму бара
+ * (LONG → low, SHORT → high) — база c: maxAdverseExcursionDrawdown.
+ */
+export function adverseExcursionEquity(
+  args: MetricsInput
+): readonly EquitySample[] {
+  return revaluedEquity(args, "adverse-extreme");
 }
 
 /** Реализованная кривая эквити: старт + точка на каждую закрытую сделку. */
@@ -218,6 +310,9 @@ export function computeBacktestMetrics(args: MetricsInput): BacktestMetrics {
   const grossValues = trades.map((trade) => trade.grossPnl);
   const rValues = trades.map((trade) => trade.rMultiple);
   const grossRValues = trades.map((trade) => trade.grossR);
+  // Диагностика по фактическому исполнению (знаменатель — риск от
+  // реальной цены входа): публикуется отдельно от планового R.
+  const rActualFillValues = trades.map((trade) => trade.rMultipleActualFill);
   const winNetValues = wins.map((trade) => trade.netPnl);
   const lossNetValues = losses.map((trade) => trade.netPnl);
 
@@ -276,11 +371,16 @@ export function computeBacktestMetrics(args: MetricsInput): BacktestMetrics {
         ? trades[0].entryTime
         : 0;
 
-  const realizedStats = drawdownStats(
-    realizedEquity(trades, firstTime, config.initialEquity)
+  const realizedPoints = realizedEquity(
+    trades,
+    firstTime,
+    config.initialEquity
   );
+  const realizedStats = drawdownStats(realizedPoints);
   const markToMarketStats = drawdownStats(markToMarketEquity(args));
+  const adverseStats = drawdownStats(adverseExcursionEquity(args));
   const barsHeld = trades.map((trade) => trade.barsHeld);
+  const maxBarsHeld = maxValue(barsHeld);
 
   return {
     trades: count,
@@ -303,32 +403,38 @@ export function computeBacktestMetrics(args: MetricsInput): BacktestMetrics {
     expectancy: count === 0 ? null : totalNetPnl / count,
     avgR: mean(rValues),
     medianR: median(rValues),
+    avgRActualFill: mean(rActualFillValues),
+    medianRActualFill: median(rActualFillValues),
     avgWin: mean(winNetValues),
     avgLoss: mean(lossNetValues),
-    largestWin:
-      winNetValues.length === 0 ? null : Math.max(...winNetValues),
-    largestLoss:
-      lossNetValues.length === 0 ? null : Math.min(...lossNetValues),
+    largestWin: maxValue(winNetValues),
+    largestLoss: minValue(lossNetValues),
     avgGrossR: mean(grossRValues),
     medianGrossR: median(grossRValues),
     maxConsecutiveWins,
     maxConsecutiveLosses,
     avgBarsHeld: mean(barsHeld),
-    maxBarsHeld: barsHeld.length === 0 ? 0 : Math.max(...barsHeld),
+    maxBarsHeld: maxBarsHeld === null ? 0 : maxBarsHeld,
     exitReasonCounts: Object.freeze(exitReasonCounts),
     sameBarAmbiguityTrades: trades.filter((trade) => trade.sameBarAmbiguity)
       .length,
     gapThroughTrades: trades.filter((trade) => trade.gapThrough).length,
     openAtEndTrades:
       exitReasonCounts.END_OF_DATA + exitReasonCounts.SEGMENT_END,
-    finalEquity: config.initialEquity + totalNetPnl,
+    // Самосогласованность отчёта: финал эквити = последняя точка
+    // реализованной кривой (тот же порядок float-сложения).
+    finalEquity: realizedPoints[realizedPoints.length - 1].equity,
     maxDrawdown: realizedStats.maxDrawdown,
     maxDrawdownPct: realizedStats.maxDrawdownPct,
     maxDrawdownPeakTime: realizedStats.peakTime,
     maxDrawdownTroughTime: realizedStats.troughTime,
     maxDrawdownMarkToMarket: markToMarketStats.maxDrawdown,
     maxDrawdownMarkToMarketPct: markToMarketStats.maxDrawdownPct,
+    maxAdverseExcursionDrawdown: adverseStats.maxDrawdown,
+    maxAdverseExcursionDrawdownPct: adverseStats.maxDrawdownPct,
     equityNonPositive:
-      realizedStats.equityNonPositive || markToMarketStats.equityNonPositive
+      realizedStats.equityNonPositive ||
+      markToMarketStats.equityNonPositive ||
+      adverseStats.equityNonPositive
   };
 }

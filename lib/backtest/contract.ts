@@ -50,26 +50,35 @@
  *    (LONG: вверх, SHORT: вниз).
  *
  *    Требование к уровням ОДНО: они должны СТРОГО обрамлять опорную
- *    цену — LONG: sl < ref < tp, SHORT: tp < ref < sl. Проверяется
- *    оно ДВАЖДЫ, с разными опорными ценами, и именно опора задаёт код
- *    отказа (это не дублирование, а разделение вины решения и рынка):
- *      a) на баре СИГНАЛА N, ref = close бара N. Нарушение означает,
- *         что решение внутренне противоречиво: rejectedSignals,
- *         reason "levels-on-wrong-side"; вход даже не планируется.
- *      b) на баре ВХОДА N+1, ref = open бара N+1. Решение было
- *         согласованным, но рынок гэпнул за уровень: вход ОТКЛОНЯЕТСЯ,
- *         reason "entry-levels-breached-at-open". Сделка, которая была
- *         бы мгновенно выбита гэпом, НЕ фабрикуются — иначе PnL
- *         рисовался бы из цены исполнения, которой не существовало.
- *      c) после сдвига слиппеджем ФАКТИЧЕСКАЯ цена входа обязана
- *         оставаться между уровнями (тот же предикат, ref = entryPrice).
- *         Иначе сделка открылась бы уже за собственным SL/TP: отказ
- *         "entry-fill-outside-levels". Достигается только экстремальным
- *         слиппеджем, но правило явное — «сначала уровень, потом сделка».
- *    Структурно невалидные уровни (не конечные, ≤ 0, sl = tp) —
- *    reason "invalid-levels" (тоже на баре сигнала).
+ *    цену — LONG: sl < ref < tp, SHORT: tp < ref < sl. Проверяется оно
+ *    на баре СИГНАЛА N при ref = close бара N: нарушение означает, что
+ *    решение внутренне противоречиво → rejectedSignals, reason
+ *    "levels-on-wrong-side", вход не планируется. Структурно невалидные
+ *    уровни (не конечные, ≤ 0, sl = tp, label не строка, facts не
+ *    массив строк) → reason "invalid-levels".
  *    Сигнал на последнем баре набора/сегмента не имеет N+1 →
  *    skippedSignals "no-next-bar" / "segment-boundary".
+ *
+ *    4a. ГЭП НА ВХОДЕ (исправлено аудитом: раньше такие случаи
+ *    ОТКЛОНЯЛИСЬ, что удаляло из выборки класс убыточных сделок и
+ *    смещало winRate/PF/drawdown/expectancy в выгодную сторону).
+ *    Теперь вход исполняется ВСЕГДА по open бара N+1, а дальнейшая
+ *    судьба позиции определяется ОБЩИМ гэповым правилом пункта 7:
+ *      - LONG и open ≤ sl (или open ≥ tp) → позиция открывается по
+ *        open и закрывается ПО ТОМУ ЖЕ open (гэп через уровень);
+ *      - SHORT симметрично: open ≥ sl или open ≤ tp.
+ *    Валовый PnL такой сделки ≈ 0 (вход и выход — один open), а чистый
+ *    отрицателен на величину издержек: две стороны слиппеджа плюс две
+ *    комиссии. Это честный результат исполнения, а не «удалённый»
+ *    невыгодный кейс. exitReason при этом отражает ТРИГГЕР
+ *    (STOP_LOSS/TAKE_PROFIT), а знак PnL — экономику; сделка
+ *    помечается gapThrough и учитывается в gapThroughTrades.
+ *    Коды отказов "entry-levels-breached-at-open" и
+ *    "entry-fill-outside-levels" СОХРАНЕНЫ в объединении RejectReason
+ *    (форма отчётов `rejectedByReason` стабильна — 4 ключа), но
+ *    движком больше НЕ производятся: их счётчики всегда нулевые.
+ *    Экстремальный слиппедж, выносящий фактическую цену входа за
+ *    уровни, обрабатывается так же: вход по факту, выход по open.
  *
  * 5. СОПРОВОЖДЕНИЕ. Позиция, открытая на баре E, сопровождается
  *    начиная С ТОГО ЖЕ бара E (вход по open, поэтому rest-of-bar
@@ -93,7 +102,10 @@
  *    исполнения — open (для SL хуже уровня, для TP лучше), а не
  *    уровень: сделка не может быть исполнена по цене, которой не
  *    существовало на момент входа в бар. Помечается gapThrough.
- *    Слиппедж применяется и к гэповому исполнению.
+ *    Слиппедж применяется и к гэповому исполнению. Правило действует
+ *    и НА БАРЕ ВХОДА (пункт 4a): это единственная непротиворечивая
+ *    трактовка, при которой вход и выход исполняются по одной и той же
+ *    реально существовавшей цене.
  *
  * 8. ИЗЪЯТИЕ ПО CLOSE. timeout и END_OF_DATA/SEGMENT_END исполняются
  *    по close бара (плановая цена), затем слиппедж в невыгодную
@@ -113,12 +125,25 @@
  *     комиссия вычитается явно; slippageCost считается аналитически
  *     и публикуется для прозрачности.
  *
- * 11. PnL И R. LONG: gross = (exit − entry) × qty; SHORT: gross =
- *     (entry − exit) × qty; net = gross − fees. riskAmount =
- *     |entryPrice − stopLoss| × qty (фактическая цена входа, плановый
- *     уровень SL). grossR = gross / risk; rMultiple = net / risk
+ * 11. PnL И R (исправлено аудитом: знаменатель R больше НЕ может
+ *     схлопнуться). LONG: gross = (exit − entry) × qty; SHORT: gross =
+ *     (entry − exit) × qty; net = gross − fees.
+ *     ПЕРВИЧНЫЙ знаменатель R — ПЛАНОВЫЙ риск, известный на момент
+ *     сигнала: plannedEntryReference = close бара СИГНАЛА N (опорная
+ *     цена, относительно которой проверялись уровни),
+ *     plannedRisk = |plannedEntryReference − stopLoss| × qty.
+ *     grossR = gross / plannedRisk; rMultiple = net / plannedRisk
  *     (заголовный R — ЧИСТЫЙ, консервативно). plannedRewardRisk =
- *     |tp − entry| / |entry − sl|.
+ *     |tp − ref| / |ref − sl|.
+ *     Фактическое исполнение (слиппедж, гэп) влияет на ЧИСЛИТЕЛЬ, а не
+ *     на знаменатель: иначе вход почти в собственный стоп давал бы
+ *     risk ≈ 0 и R в тысячи крат (аудит: open = 90.001 при sl = 90 →
+ *     R ≈ 19999).
+ *     ДИАГНОСТИКА (не первичная метрика): riskAmount =
+ *     |entryPrice − stopLoss| × qty, grossRActualFill,
+ *     rMultipleActualFill — те же величины по фактической цене входа.
+ *     При plannedRisk = 0 (уровни структурно прошли проверку, так что
+ *     это возможно только для вырожденных данных) R-величины = 0.
  *
  * 12. МЕТРИКИ — только из ИСПОЛНЕННЫХ сделок (никаких «целевых»
  *     winrate/PF). win ⇔ netPnl > 0, loss ⇔ netPnl < 0, иначе
@@ -128,14 +153,27 @@
  *     убытков PF = null с явным profitFactorState "no-losses"
  *     (Infinity в JSON не сериализуется и не используется).
  *
- * 13. DRAWDOWN. Основная база — РЕАЛИЗОВАННАЯ эквити-кривая
- *     (initialEquity + накопленный netPnl, точка на каждую закрытую
- *     сделку, хронологически); additionally считается более
- *     консервативная mark-to-market база (оценка открытой позиции по
- *     close каждого бара). Процентный drawdown = null, если пик ≤ 0.
- *     Маржинальной модели/ликвидации в P2-A НЕТ: эквити может уйти
- *     ниже нуля, это фиксируется флагом equityNonPositive.
- *     Размер позиции ФИКСИРОВАННЫЙ (quantity), компаундинга нет.
+ * 13. DRAWDOWN — ТРИ базы, каждая со своим именем и смыслом (аудит
+ *     указал, что «mark-to-market» по close не является консервативной
+ *     оценкой: позиция может весь срок висеть в тик над стопом при
+ *     неизменном close, и такая просадка была бы 0).
+ *      a) РЕАЛИЗОВАННАЯ (основная, maxDrawdown / maxDrawdownPct):
+ *         initialEquity + накопленный netPnl, точка на каждую закрытую
+ *         сделку, хронологически.
+ *      b) CLOSE-TO-CLOSE нереализованная (maxDrawdownMarkToMarket /
+ *         …Pct): открытая позиция переоценивается по CLOSE каждого
+ *         бара. Имя поля сохранено для совместимости, но смысл —
+ *         именно close-to-close, и консервативной эта база НЕ является.
+ *         Будущая комиссия выхода не резервируется.
+ *      c) ADVERSE EXCURSION (MAE, наиболее консервативная:
+ *         maxAdverseExcursionDrawdown / …Pct): открытая позиция
+ *         переоценивается по НАИХУДШЕЙ цене бара — LONG по low, SHORT
+ *         по high. Показывает, какой была бы просадка при отметке в
+ *         самой неблагоприятной точке каждого бара.
+ *     Процентный drawdown = null, если пик ≤ 0. equityNonPositive
+ *     взводится, если ЛЮБАЯ из трёх баз уходила ≤ 0. Маржинальной
+ *     модели/ликвидации в P2-A НЕТ. Размер позиции ФИКСИРОВАННЫЙ
+ *     (quantity), компаундинга нет.
  *
  * 14. TRAIN/VALIDATION/OOS. Только хронологическое разбиение по
  *     индексам баров (без random, без shuffling). Утечка исключена
@@ -157,11 +195,92 @@
  *     и баров (sha256 канонической формы), характеристики окна,
  *     счётчики решений. Никаких Date.now(), randomUUID, hostname,
  *     pid, версий зависимостей и тому подобного.
+ *
+ * 17. ЧИСЛОВАЯ ПОЛНОТА. Успешный результат (ok = true) НЕ МОЖЕТ
+ *     содержать ни одного неконечного числа: после вычислений
+ *     результат сканируется целиком (сделки, метрики, кривая эквити,
+ *     метаданные), и любое NaN/±Infinity даёт структурированный отказ
+ *     stage = "arithmetic" с путём до значения. Конечные, но огромные
+ *     входы (quantity ~ 1e308, большие фиксированные комиссии)
+ *     переполняют IEEE-754 при умножении — вместо «красивого» результата
+ *     с maxDrawdown = 0 и profitFactorState = "no-losses" возвращается
+ *     отказ. serializeResult поэтому не может упасть на успешном
+ *     результате. Исключений нет и для «эха» отклонённых сигналов:
+ *     неконечные уровни решения нормализуются в null при записи отказа
+ *     (rejectedSignals[].stopLoss / takeProfit: number | null), а
+ *     фактическое значение приводится в detail. Иначе serializeResult
+ *     бросал бы исключение на успешном прогоне с отказом
+ *     "invalid-levels" при NaN-уровне.
+ *
+ * 18. НЕИЗМЕНЯЕМОСТЬ. Разрешённый конфиг и результат заморожены
+ *     ГЛУБОКО (включая config.slippage, config.fees, metrics,
+ *     метаданные, элементы массивов): мутация вложенного объекта
+ *     больше не может разодрать fingerprintConfig(result.config) и
+ *     metadata.configFingerprint.
+ *
+ * 19. ИСТОЧНИК РЕШЕНИЙ. Три формы: функция-провайдер, список решений
+ *     по индексам, либо SignalAdapter — { adapterId, version,
+ *     requiredLookbackBars, decide }. Адаптер ОБЯЗАН объявить, сколько
+ *     баров истории до текущего ему нужно: сегментный прогон
+ *     разрешает warmup как max(config.warmupBars,
+ *     adapter.requiredLookbackBars − 1) баров ПЕРЕД окном, поэтому
+ *     реалистичный провайдер,
+ *     читающий предыдущие бары, не падает на VALIDATION/OOS при
+ *     warmupBars = 0. Каузальная история ДО начала сегмента — это
+ *     прошлое, а НЕ утечка; искусственных разрывов между сегментами
+ *     нет и не появляется. Невалидный адаптер → stage = "adapter".
+ *     Метка сегмента (TRAIN/VALIDATION/OOS) провайдеру НЕ передаётся:
+ *     торговая логика не должна знать, на каком этапе оценки её
+ *     прогоняют (иначе «слепой» OOS фиктивен). Состояние движка
+ *     (позиция, сделки, эквити) сбрасывается на границе сегмента, а
+ *     ПРОИЗВОЛЬНОЕ замыкание провайдера движком не сбрасывается — это
+ *     обязанность автора стратегии (см. пункт 20).
+ *
+ * 20. NO-LOOKAHEAD: ДВЕ РАЗНЫЕ гарантии, их нельзя смешивать.
+ *     A. СТРУКТУРНАЯ (доказуема кодом): данные, доступные через
+ *        SignalContext (bar, barAt, position), не содержат будущего —
+ *        barAt(i) при i > index бросает исключение, при
+ *        i < firstVisibleIndex — тоже; visibleBars равен фактически
+ *        доступному числу баров (index − firstVisibleIndex + 1).
+ *     B. ВНЕШНЕЕ СОСТОЯНИЕ (недоказуемо в JS): провайдер-функция может
+ *        держать будущие бары в замыкании, глобале или заранее
+ *        вычисленном массиве. Отозвать уже выданные данные язык не
+ *        позволяет, поэтому НИ ОДИН тест не может сертифицировать
+ *        произвольный колбэк. `assertDecisionInvariance` — это
+ *        КОНТРФАКТИЧЕСКАЯ ДИАГНОСТИКА: она ловит lookahead только если
+ *        будущее приходит провайдеру через массив, переданный движку.
+ *        Для P2-B единственный допустимый контракт — адаптер,
+ *        получающий рыночные данные ИСКЛЮЧИТЕЛЬНО через каузальный
+ *        контекст движка (тогда диагностика имеет смысл), плюс
+ *        ревью/сертификация источника данных адаптера.
+ *
+ * 21. КОНФИГ БЕЗ НЕИЗВЕСТНЫХ КЛЮЧЕЙ. Любой ключ объекта config, не
+ *     входящий в BacktestConfig, — ошибка валидации (fail closed):
+ *     опечатка «timeoutBar» не должна молча означать «таймаута нет».
+ *
+ * 22. РЕШЕНИЯ ПРОВЕРЯЮТСЯ И СНЭПШОТЯТСЯ НА БАРЕ СИГНАЛА. kind,
+ *     stopLoss, takeProfit, label (строка, если задан) и facts (массив
+ *     строк, если задан) проверяются при принятии решения; скаляры и
+ *     список фактов КОПИРУЮТСЯ в отложенный вход, поэтому последующая
+ *     мутация объекта решения вызывающим кодом не может изменить уже
+ *     запланированную сделку.
  * ══════════════════════════════════════════════════════════════════
  */
 
-/** Версия контракта: меняется при любом изменении семантики. */
-export const BACKTEST_CONTRACT_VERSION = "p2a-1.0.0";
+/**
+ * Версия контракта: меняется при любом изменении семантики.
+ *
+ * p2a-1.1.0 — hardening по итогам независимого adversarial-аудита
+ * `096e13d`: гэповый вход БОЛЬШЕ НЕ отклоняется (исполнение по open
+ * бара входа booking'ом, а не удалением выборки), знаменатель R —
+ * ПЛАНОВЫЙ риск, добавлены MAE-просадка и диагностика R по факту
+ * исполнения, из результата исключены любые неконечные числа, конфиг и
+ * результат заморожены глубоко, источник решений может объявить
+ * `requiredLookbackBars`, из SignalContext убрана метка сегмента,
+ * `visibleBars` считается от `firstVisibleIndex`, неизвестные ключи
+ * конфига отклоняются.
+ */
+export const BACKTEST_CONTRACT_VERSION = "p2a-1.1.0";
 
 /** Имя движка в метаданных (детерминированная константа). */
 export const BACKTEST_ENGINE_NAME = "suslik-backtest";
@@ -258,7 +377,12 @@ export interface OpenPositionView {
 export interface SignalContext {
   /** Индекс ТЕКУЩЕГО ЗАКРЫТОГО бара, на котором оценивается сигнал. */
   readonly index: number;
-  /** Сколько баров законно видно провайдеру: index + 1 (+ warmup). */
+  /**
+   * Сколько баров ФАКТИЧЕСКИ доступно провайдеру:
+   * index − firstVisibleIndex + 1. При warmup-окне сегмента это меньше,
+   * чем index + 1 (исправлено аудитом: раньше заявлялось index + 1,
+   * что противоречило firstVisibleIndex > 0).
+   */
   readonly visibleBars: number;
   /** Первый индекс, доступный провайдеру (учитывает warmup-окно). */
   readonly firstVisibleIndex: number;
@@ -271,11 +395,64 @@ export interface SignalContext {
   readonly barAt: (i: number) => BacktestBar;
   /** Открытая позиция или null (флэт). */
   readonly position: OpenPositionView | null;
-  /** Имя сегмента, если прогон сегментный (TRAIN/VALIDATION/OOS). */
-  readonly segment: SplitName | null;
+  /**
+   * Метки сегмента (TRAIN/VALIDATION/OOS) в контексте НЕТ намеренно
+   * (пункт 19 политики): торговое решение не должно знать, на каком
+   * этапе оценки его прогоняют. Сегмент знает вызывающий слой
+   * (spлиты/отчёты), а не логика входа.
+   */
 }
 
 export type SignalProvider = (context: SignalContext) => SignalDecision | null;
+
+/**
+ * Адаптер стратегии — предпочтительная форма источника решений для
+ * сертифицируемых прогонов (пункты 19 и 20 политики).
+ *
+ * Контракт для P2-B: рыночная информация поступает адаптеру
+ * ИСКЛЮЧИТЕЛЬНО через каузальный `SignalContext`, который владеет
+ * движок. Никаких собственных массивов баров, глобалов и заранее
+ * вычисленных «будущих» срезов: только при таком условии контрфакт-
+ * диагностика no-lookahead имеет смысл, а структурный барьер barAt
+ * покрывает весь канал данных.
+ */
+export interface SignalAdapter {
+  /** Идентичность источника решений (входит в отпечатки прогона). */
+  readonly adapterId: string;
+  /** Версия источника решений. */
+  readonly version: string;
+  /**
+   * Сколько ЗАКРЫТЫХ баров истории (включая текущий) нужно адаптеру:
+   * 1 — только текущий бар, 3 — текущий и два предыдущих. Движок и
+   * сегментный прогон поднимают warmup как max(config.warmupBars,
+   * requiredLookbackBars − 1) баров ПЕРЕД началом окна, поэтому
+   * требование истории ОБЯЗАНО быть явным, а не «на глаз».
+   */
+  readonly requiredLookbackBars: number;
+  /** Решающая функция. Получает только каузальный контекст. */
+  readonly decide: SignalProvider;
+}
+
+/** Все допустимые формы источника решений. */
+export type SignalSource =
+  | SignalProvider
+  | SignalDecisionList
+  | SignalAdapter;
+
+/**
+ * Типовая защита адаптера. Список решений (массив) и функция
+ * отличаются от адаптера по наличию строкового `adapterId` и функции
+ * `decide`; порядок проверок важен: функция не является объектом, а
+ * массив не имеет `decide`.
+ */
+export function isSignalAdapter(source: SignalSource): source is SignalAdapter {
+  return (
+    typeof source === "object" &&
+    source !== null &&
+    !Array.isArray(source) &&
+    typeof (source as SignalAdapter).decide === "function"
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /* Конфигурация                                                        */
@@ -342,7 +519,8 @@ export interface ResolvedBacktestConfig {
  * дефолт (дорожная карта требует commission/slippage), поэтому
  * комиссия и слиппедж по умолчанию ненулевые и документированные.
  */
-export const BACKTEST_DEFAULTS: ResolvedBacktestConfig = {
+/** Глубоко заморожен: дефолты нельзя изменить из вызывающего кода. */
+export const BACKTEST_DEFAULTS: ResolvedBacktestConfig = deepFreeze<ResolvedBacktestConfig>({
   quantity: 1,
   initialEquity: 10_000,
   entryPolicy: "next-bar-open",
@@ -353,7 +531,7 @@ export const BACKTEST_DEFAULTS: ResolvedBacktestConfig = {
   requireUniformGrid: false,
   expectedTimeframeMs: null,
   warmupBars: 0
-};
+});
 
 /* ------------------------------------------------------------------ */
 /* Причины исходов (детерминированные коды, без свободных строк)       */
@@ -380,12 +558,29 @@ export type SkipReason =
   | "no-next-bar"
   | "segment-boundary";
 
-/** Решение отклонено как несогласованное (уровни/пробой на open). */
+/**
+ * Решение отклонено как несогласованное.
+ *
+ * Производятся движком только два первых кода (обе — на баре СИГНАЛА):
+ *  - "invalid-levels"       — структурно невалидные уровни/метка/факты;
+ *  - "levels-on-wrong-side" — уровни не обрамляют close бара сигнала.
+ * Два последних кода — ИСТОРИЧЕСКИЕ: до hardening (p2a-1.0.0) по ним
+ * отклонялся гэповый вход, что удаляло из выборки класс убыточных
+ * сделок (пункт 4a политики). Теперь гэп на входе ИСПОЛНЯЕТСЯ, коды
+ * сохранены только ради стабильной формы `rejectedByReason` (4 ключа)
+ * и их счётчики всегда нулевые.
+ */
 export type RejectReason =
   | "invalid-levels"
   | "levels-on-wrong-side"
   | "entry-levels-breached-at-open"
   | "entry-fill-outside-levels";
+
+/** Коды отказов, которые движок больше не производит (см. RejectReason). */
+export const RETIRED_REJECT_REASONS: readonly RejectReason[] = [
+  "entry-levels-breached-at-open",
+  "entry-fill-outside-levels"
+];
 
 /* ------------------------------------------------------------------ */
 /* Сделки и наблюдение                                                 */
@@ -421,9 +616,24 @@ export interface BacktestTrade {
   readonly quantity: number;
   readonly stopLoss: number;
   readonly takeProfit: number;
-  /** |entryPrice − stopLoss| × quantity — знаменатель R. */
+  /**
+   * Опорная цена, известная НА МОМЕНТ СИГНАЛА (close бара сигнала):
+   * относительно неё проверялись уровни и от неё считается плановый
+   * риск. Пункт 11 политики.
+   */
+  readonly plannedEntryReference: number;
+  /**
+   * ПЛАНОВЫЙ риск: |plannedEntryReference − stopLoss| × quantity.
+   * Первичный знаменатель R (не может схлопнуться из-за гэпа или
+   * слиппеджа на входе).
+   */
+  readonly plannedRisk: number;
+  /**
+   * ДИАГНОСТИКА: |entryPrice − stopLoss| × quantity (риск по
+   * фактической цене входа). Первичным знаменателем R НЕ является.
+   */
   readonly riskAmount: number;
-  /** Задуманное reward/risk: |tp − entry| / |entry − sl|. */
+  /** Задуманное reward/risk по плановым уровням: |tp − ref| / |ref − sl|. */
   readonly plannedRewardRisk: number;
   readonly grossPnl: number;
   readonly feeEntry: number;
@@ -432,8 +642,14 @@ export interface BacktestTrade {
   /** Аналитическая стоимость слиппеджа (в валюте счёта). */
   readonly slippageCost: number;
   readonly netPnl: number;
+  /** gross / plannedRisk (первичный, плановый знаменатель). */
   readonly grossR: number;
+  /** net / plannedRisk (заголовный ЧИСТЫЙ R). */
   readonly rMultiple: number;
+  /** ДИАГНОСТИКА: gross / riskAmount (знаменатель по факту входа). */
+  readonly grossRActualFill: number;
+  /** ДИАГНОСТИКА: net / riskAmount (знаменатель по факту входа). */
+  readonly rMultipleActualFill: number;
   readonly label: string;
   readonly facts: readonly string[];
 }
@@ -453,10 +669,19 @@ export interface RejectedSignal {
   /**
    * Цена, с которой сверялись уровни: close бара сигнала (решение
    * внутренне противоречиво) либо open бара входа (рынок гэпнул).
+   * null — только если опорная цена не была конечной (бары
+   * валидируются, поэтому на практике недостижимо).
    */
-  readonly referencePrice: number;
-  readonly stopLoss: number;
-  readonly takeProfit: number;
+  readonly referencePrice: number | null;
+  /**
+   * Уровни решения КАК ОНИ БЫЛИ получены. null означает «значение не
+   * было конечным числом»: NaN/±Infinity нормализуются здесь в null,
+   * чтобы успешный результат оставался полностью конечным и
+   * сериализуемым (пункт 17), а фактическое значение приводится в
+   * тексте detail.
+   */
+  readonly stopLoss: number | null;
+  readonly takeProfit: number | null;
   /**
    * Бар входа, на котором отказ был вынесен (для отказов на баре сигнала
    * — null: вход не планировался).
@@ -512,6 +737,10 @@ export interface BacktestMetrics {
   readonly largestLoss: number | null;
   readonly avgGrossR: number | null;
   readonly medianGrossR: number | null;
+  /** ДИАГНОСТИКА: средний R по фактическому знаменателю входа. */
+  readonly avgRActualFill: number | null;
+  /** ДИАГНОСТИКА: медиана R по фактическому знаменателю входа. */
+  readonly medianRActualFill: number | null;
   readonly maxConsecutiveWins: number;
   readonly maxConsecutiveLosses: number;
   readonly avgBarsHeld: number | null;
@@ -527,10 +756,23 @@ export interface BacktestMetrics {
   readonly maxDrawdownPct: number | null;
   readonly maxDrawdownPeakTime: number | null;
   readonly maxDrawdownTroughTime: number | null;
-  /** Консервативная база (оценка открытой позиции по close бара). */
+  /**
+   * CLOSE-TO-CLOSE нереализованная база: открытая позиция
+   * переоценивается по close каждого бара. Консервативной НЕ является
+   * (пункт 13 политики); консервативная оценка — adverse excursion ниже.
+   */
   readonly maxDrawdownMarkToMarket: number;
   readonly maxDrawdownMarkToMarketPct: number | null;
-  /** Эквити уходило ≤ 0 (маржинальной модели в P2-A нет). */
+  /**
+   * Наиболее консервативная база (MAE): открытая позиция
+   * переоценивается по наихудшей цене бара — LONG по low, SHORT по high.
+   */
+  readonly maxAdverseExcursionDrawdown: number;
+  readonly maxAdverseExcursionDrawdownPct: number | null;
+  /**
+   * Эквити уходило ≤ 0 ПО ЛЮБОЙ из трёх баз (маржинальной модели в
+   * P2-A нет, поэтому такой исход возможен и обязан быть видимым).
+   */
   readonly equityNonPositive: boolean;
 }
 
@@ -555,7 +797,30 @@ export interface BacktestMetadata {
   readonly segment: SplitName | null;
   readonly segmentStartIndex: number | null;
   readonly segmentEndIndexExclusive: number | null;
+  /**
+   * Начало разогрева ВНУТРИ сегмента; null для полного прогона
+   * (поле сохранено без изменения семантики для обратной
+   * совместимости проекций). Для полного прогона смотри
+   * historyStartIndex.
+   */
   readonly warmupStartIndex: number | null;
+  /** Источник решений: адаптер, функция-провайдер или готовый список. */
+  readonly signalSourceKind: "adapter" | "provider" | "list";
+  /** Идентичность адаптера; null, если источник — не адаптер. */
+  readonly adapterId: string | null;
+  readonly adapterVersion: string | null;
+  /**
+   * Заявленное число ЗАКРЫТЫХ баров истории, нужных источнику решений
+   * (1 — только текущий бар). Для провайдера/списка всегда 1: чужое
+   * требование истории не выдумывается.
+   */
+  readonly requiredLookbackBars: number;
+  /**
+   * Индекс первого бара, доступного решениям через context.barAt
+   * (всегда заполнен, в отличие от warmupStartIndex). Разгон —
+   * КАУЗАЛЬНАЯ история ДО окна, а не утечка будущего.
+   */
+  readonly historyStartIndex: number;
 }
 
 export type DecisionCounts = Readonly<
@@ -579,19 +844,26 @@ export interface BacktestResult {
   readonly metrics: BacktestMetrics;
 }
 
-/** Результат прогона: либо успех, либо структурированная ошибка. */
+/**
+ * Результат прогона: либо успех, либо структурированная ошибка.
+ *
+ * Стадии: "config" (конфиг), "adapter" (источник решений-адаптер),
+ * "bars" (данные/окно), "provider" (поведение источника решений),
+ * "arithmetic" (переполнение: в результате появилось неконечное число,
+ * пункт 17 политики).
+ */
 export type BacktestOutcome =
   | { readonly ok: true; readonly result: BacktestResult }
   | {
       readonly ok: false;
-      readonly stage: "config" | "bars" | "provider";
+      readonly stage: "config" | "adapter" | "bars" | "provider" | "arithmetic";
       readonly errors: readonly string[];
     };
 
 export interface BacktestInput {
   readonly bars: readonly BacktestBar[];
-  /** Провайдер решений ИЛИ заранее вычисленный список по индексам. */
-  readonly signals: SignalProvider | SignalDecisionList;
+  /** Провайдер, список решений по индексам либо адаптер стратегии. */
+  readonly signals: SignalSource;
   readonly config?: BacktestConfig;
   /** Сегментный прогон (границы включаются в метаданные и политику). */
   readonly segment?: SegmentWindow;
@@ -662,11 +934,89 @@ function isFiniteNumber(value: unknown): value is number {
  * Разрешение конфига: частичный конфиг дополняется дефолтами, любое
  * несогласованное значение — явная ошибка (никаких тихих подмен).
  */
+/** Ключи BacktestConfig: неизвестные ключи отклоняются (пункт 21). */
+export const BACKTEST_CONFIG_KEYS: readonly string[] = [
+  "quantity",
+  "initialEquity",
+  "entryPolicy",
+  "sameBarPolicy",
+  "timeoutBars",
+  "slippage",
+  "fees",
+  "requireUniformGrid",
+  "expectedTimeframeMs",
+  "warmupBars"
+];
+
+/**
+ * Глубокая заморозка (пункт 18 политики): вложенные объекты конфига и
+ * результата больше не мутируются, поэтому отпечаток конфига не может
+ * разойтись с metadata.configFingerprint постфактум.
+ */
+export function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+
+  const target = value as unknown as Record<string, unknown>;
+
+  for (const key of Object.keys(target)) {
+    const nested = target[key];
+
+    if (nested !== null && typeof nested === "object" && !Object.isFrozen(nested)) {
+      deepFreeze(nested);
+    }
+  }
+
+  return Object.freeze(value);
+}
+
 export function resolveBacktestConfig(
   config?: BacktestConfig
 ): ConfigCheck {
   const errors: string[] = [];
   const source: BacktestConfig = config ?? {};
+
+  if (config !== null && config !== undefined) {
+    if (typeof config !== "object" || Array.isArray(config)) {
+      return { ok: false, errors: ["config: ожидается объект"] };
+    }
+
+    // Пункт 21 политики: неизвестный ключ — ошибка, а не молчаливый
+    // дефолт. Опечатка в имени параметра не должна менять семантику.
+    const known = new Set(BACKTEST_CONFIG_KEYS);
+
+    for (const key of Object.keys(config)) {
+      if (!known.has(key)) {
+        errors.push(
+          `config: неизвестный ключ "${key}" (допустимы: ${BACKTEST_CONFIG_KEYS.join(", ")})`
+        );
+      }
+    }
+
+    for (const key of ["slippage", "fees"] as const) {
+      const nested = source[key];
+
+      if (nested !== undefined) {
+        if (typeof nested !== "object" || nested === null || Array.isArray(nested)) {
+          errors.push(`config.${key}: ожидается объект`);
+
+          continue;
+        }
+
+        const allowed =
+          key === "slippage" ? ["kind", "value"] : ["bps", "fixedPerSide"];
+
+        for (const nestedKey of Object.keys(nested)) {
+          if (!allowed.includes(nestedKey)) {
+            errors.push(
+              `config.${key}: неизвестный ключ "${nestedKey}" (допустимы: ${allowed.join(", ")})`
+            );
+          }
+        }
+      }
+    }
+  }
 
   const quantity = source.quantity ?? BACKTEST_DEFAULTS.quantity;
 
@@ -765,7 +1115,7 @@ export function resolveBacktestConfig(
 
   return {
     ok: true,
-    config: {
+    config: deepFreeze<ResolvedBacktestConfig>({
       quantity,
       initialEquity,
       entryPolicy,
@@ -777,7 +1127,7 @@ export function resolveBacktestConfig(
         source.requireUniformGrid ?? BACKTEST_DEFAULTS.requireUniformGrid,
       expectedTimeframeMs,
       warmupBars
-    }
+    })
   };
 }
 
