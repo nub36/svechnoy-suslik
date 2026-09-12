@@ -1778,6 +1778,27 @@ function stripCode(source: string): string {
 
 const allSpecifiers: string[] = [];
 
+/* P2AB-INTEGRATION (narrow policy extension, HARDENING #3 + P2-B acceptance):
+ * слой lib/backtest теперь содержит и P2-B data plane. Политика изоляции
+ * P2-A ядра НЕ ослаблена: 8 файлов ядра обязаны импортировать только "./"
+ * (+ node:crypto в serialize.ts), запрещённые токены сканируются у ВСЕХ
+ * файлов без изменений. Для data-plane файлов дополнительно разрешены
+ * существующие модули смарт-мани-eligibility (../strategies/*) и типы SMC
+ * (../smc/*) — те же самые зависимости, которые P2-B использовал до
+ * интеграции; Prisma/сеть/env по-прежнему запрещены всем. */
+const P2A_CORE_FILES = new Set([
+  "contract.ts",
+  "engine.ts",
+  "validate.ts",
+  "splits.ts",
+  "metrics.ts",
+  "costs.ts",
+  "serialize.ts",
+  "no-lookahead.ts"
+]);
+const P2B_DATA_PLANE_IMPORTS = ["../strategies/", "../smc/"];
+const P2A_CORE_EXTERNAL: string[] = [];
+
 for (const name of sourceFiles) {
   const raw = readFileSync(join(backtestDir, name), "utf8");
   // Для импортов литералы нужны (from "./contract"), для запрета
@@ -1798,24 +1819,46 @@ for (const name of sourceFiles) {
 
   allSpecifiers.push(...specifiers);
 
-  ok(
-    // contract.ts импортов не имеет вовсе — это допустимо.
-    specifiers.every(
+  if (P2A_CORE_FILES.has(name)) {
+    P2A_CORE_EXTERNAL.push(...specifiers.filter((s) => !s.startsWith("./")));
+
+    ok(
+      // contract.ts импортов не имеет вовсе — это допустимо.
+      specifiers.every(
         (specifier) =>
           specifier.startsWith("./") ||
           (specifier === "node:crypto" && name === "serialize.ts")
       ),
-    `isolation: ${name} импортирует только слой backtest (${specifiers.join(", ")})`
-  );
+      `isolation: [P2-A core] ${name} импортирует только слой backtest (${specifiers.join(", ")})`
+    );
+  } else {
+    ok(
+      // P2-B data plane: те же разрешённые зависимости, что и до интеграции
+      // (../strategies/* eligibility, ../smc/* типы), без Prisma/сети/env.
+      specifiers.every(
+        (specifier) =>
+          specifier.startsWith("./") ||
+          specifier === "node:crypto" ||
+          P2B_DATA_PLANE_IMPORTS.some((prefix) => specifier.startsWith(prefix))
+      ),
+      `isolation: [P2-B data plane] ${name} импортирует только backtest + smc/strategies (${specifiers.join(", ")})`
+    );
+  }
 }
 
 const externalSpecifiers = [
-  ...new Set(allSpecifiers.filter((item) => !item.startsWith("./")))
+  ...new Set(allSpecifiers.filter((item) => !item.startsWith("./") && !item.startsWith("../")))
 ];
 
+const p2aCoreExternalUnique = [...new Set(P2A_CORE_EXTERNAL)];
+
 ok(
-  externalSpecifiers.length === 1 && externalSpecifiers[0] === "node:crypto",
-  `isolation: единственная внешняя зависимость слоя — node:crypto (${externalSpecifiers.join(", ")})`
+  p2aCoreExternalUnique.length === 1 && p2aCoreExternalUnique[0] === "node:crypto",
+  `isolation: единственная внешняя зависимость P2-A ядра — node:crypto (${p2aCoreExternalUnique.join(", ")})`
+);
+ok(
+  externalSpecifiers.every((item) => item === "node:crypto"),
+  `isolation: внешние зависимости слоя — только node:crypto (${externalSpecifiers.join(", ")})`
 );
 ok(
   !allSpecifiers.some((item) => item.startsWith("@prisma") || item.includes("prisma")),
