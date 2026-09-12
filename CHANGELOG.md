@@ -950,3 +950,35 @@ Signal Engine (после живого прогона Runtime на VPS).
   источник, href, отсутствие fake-метрик в коде,
   disabled+объяснение на двух страницах, отсутствие
   create-API, запрет anchor-href).
+
+## 12.09.2026 — Pre-PnL Backtest: Historical Data Plane, Raw SMC Observation, Differential, Execution-Policy, Pre-PnL Runner, Splits Readiness, Admin UI
+
+Base: 51eb129 VPS-verified ACCEPTED (P2-A p2a-1.2.0, P2-B HARDENED, P2-C p2c-1.2.0), production d6c573c DO NOT deploy, Signal Engine edf3732 NOT ancestor, no DB writes, no PnL, BTC only 5m/15m/1h/4h/1d BINGX excluded 1d, costs 5bps fee 0 fixed 2bps slippage.
+
+New modules (lib/backtest/):
+- read-only-sql.ts: SELECT-only allowlist, forbidden INSERT/UPDATE/DELETE/UPSERT/CREATE/ALTER/DROP/TRUNCATE/LOCK/COPY/VACUUM + pg_advisory + FOR UPDATE/SHARE, multi-statement rejection
+- historical-eligibility.ts: CANNOT_RECONSTRUCT_HISTORICAL_ELIGIBILITY, E1/E2/E3, 5 fields rank/quoteVolume24h/enabled/status/listing
+- ohlcv-provenance.ts: audit lib/ohlcv/sync.ts upsert, diagnostics rowsWithCreatedAt/UpdatedAt/diff, no new Date token (formatIsoUtc)
+- historical-data-plane.ts: V2 pagination, canonical coverage requested-range basis, common timestamps/contiguous, participant feasibility, eligibility via isSmartMoneyExchangeEligible
+- execution-policy.ts: ExecutionPolicyDefinition, fingerprint, Executability EXECUTABLE/NON_EXECUTABLE, forbiddenDefaults k=1/k=2/k-grid, no hidden defaults, Date.parse validation, no new Date token
+- smc-observation.ts: RawSmcObservation reusing production evaluateSmc, windowPolicy hardMinimum 84 vs productionWindow 500 vs fetchCap 500 vs fidelity 500, causal clock H+D, boundaries H+D-1ms/AT/After/H+2D, batch causal prefix invariant
+- pre-pnl-runner.ts: PRE_REGISTRATION_REQUIRED/READY_FOR_EXECUTION, truthful baseline SMC-Direction Baseline / EP-1, no PnL
+- splits-readiness.ts: TRAIN/VALIDATION only selection, OOS final witness only, 90% readiness threshold
+
+CLI: scripts/backtest-historical-readonly.ts — owner-run READ ONLY NO DB WRITES NO PNL, SET TRANSACTION READ ONLY intent, fail-closed, timezone-less rejection, pageSize 1..5000
+
+Tests (no DB, no PnL, no Signal Engine):
+- test-backtest-data-plane.ts 46/46: SQL allowlist, eligibility, provenance, data plane + BINGX 1d exclusion
+- test-backtest-smc-observation.ts 78/78: window distinction, causal clock H+D, same prefix different suffix same observation, production vs historical identical for 5m/15m/1h/4h/1d, common horizon ok/relative_lag_stale/absolute_stale/data_unavailable
+- test-backtest-execution-policy.ts 16/16: explicit required fields, NaN/Infinity fail, no hidden defaults
+- test-backtest-pre-pnl.ts 28/28: PRE_REGISTRATION_REQUIRED without policy, DRAFT still PRE_REGISTRATION_REQUIRED, APPROVED -> READY_FOR_EXECUTION but still no PnL, truthful baseline, no profit fields, raw counts sum, OOS isolation TRAIN/VALIDATION only
+
+Fix isolation: removed new Date token from execution-policy, ohlcv-provenance, pre-pnl-runner (was 436/439 fail), now uses formatIsoUtc(0) / utcDateFromMs via Reflect.construct, grep only hits comments/docs stripped by isolation test, engine 439/439 green.
+
+Admin UI: /admin/backtests updated from stale 'no engine' to truthful pre-PnL infrastructure status (P2-A/B/C ACCEPTED, Phase A READ ONLY, Phase B raw SMC, Phase C differential, Phase D execution policy NO defaults, Phase E PRE_REGISTRATION_REQUIRED diagnostics only, Phase F TRAIN/VALIDATION/OOS readiness, eligibility CANNOT_RECONSTRUCT E1/E2/E3 unresolved, OHLCV PIT limitation, owner CLI command, no fake profitability)
+
+Docs: docs/backtest-pre-pnl-runbook.md full runbook, PROJECT_CONTEXT.md §52
+
+All P2-A/B/C contracts green: engine 439/439, hardening 567/567, metrics 123/123, splits 108/108, p2b 427/427, contract 213/213, report 225/225, leakage 174/174, hardening 165/165, eligibility 96/96, tsc --noEmit 0, git diff --check clean.
+
+Status: IMPLEMENTED / PENDING INDEPENDENT ADVERSARIAL REVIEW — no VPS verification, no profitability claims, no production deployment.

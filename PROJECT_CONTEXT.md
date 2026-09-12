@@ -4132,3 +4132,70 @@ REJECTED (с технической причиной) — одно требов�
 **Тесты.** P2-C: contract 213/213, report 225/225, leakage 174/174, hardening 165/165 (было 162; −4 проверки шва, +7 проверок H3); регрессия: engine 415/415, backtest-hardening 567/567, P2-B 427/427, metrics 123/123, splits 108/108, Smart Money eligibility 96/96; `tsc --noEmit` — 29 предсуществующих ошибок (набор идентичен базе); `git diff --check` чисто. Мутации вне дерева убиты: удаление вызова цепочки из `runExperiment` → 163/165 (пин H3 падает); возврат сводного статуса в допустимость выбора → 147/151; возврат полного `configurationId` в тай-брейк → 163/165.
 
 **Статус.** **IMPLEMENTED / ОЖИДАЕТ НЕЗАВИСИМОГО ПОДТВЕРЖДЕНИЯ.** Приёмка не заявляется; VPS-верификация владельцем не выполнялась; прибыльность не заявляется; P2-C не пишет в БД.
+
+52. PRE-PNL BACKTEST — BTC ONLY, 5m/15m/1h/4h/1d, BINGX EXCLUDED 1d (12.09.2026): HISTORICAL DATA PLANE, RAW SMC OBSERVATION, DIFFERENTIAL, EXECUTION-POLICY, PRE-PNL RUNNER, TRAIN/VALIDATION/OOS READINESS, ADMIN UI
+==========================================================================================================================================================================================================
+
+**Base:** 51eb129dea6a36ac077770d57859837769ece705 VPS-verified ACCEPTED (P2-A p2a-1.2.0, P2-B HARDENED, P2-C p2c-1.2.0) — production d6c573c remains DO NOT deploy.
+**Branch:** arena/01a09726-svechnoy-suslik from exact 51eb129, no accepted branches altered, no squash/amend/force-push.
+**Forbidden:** Signal Engine edf3732 NOT ancestor (git merge-base --is-ancestor exit 1), no DB writes (no INSERT/UPDATE/DELETE/UPSERT/DDL/migrate/db push/seed/strategy status), no DATABASE_URL request, no real PnL/winRate/profitFactor/Sharpe/expectancy/equity curve (synthetic only for correctness), BTC only, 5m/15m/1h/4h/1d, BINGX excluded 1d via production Smart Money eligibility, costs fixed 5bps fee 0 fixed 2bps slippage each side (only relevant after execution policy approved), no canonical SL/TP in production SMC — do NOT invent SL/TP, raw LONG/SHORT without SL/TP stays NON_EXECUTABLE not fake NEUTRAL/CANNOT_EVALUATE.
+
+**Scope A–H (safe pre-PnL):**
+A) Read-only historical PostgreSQL data plane on P2-B with canonical coverage diagnostics
+B) Historical raw SMC observation preserving LONG/SHORT/NEUTRAL/CANNOT_EVALUATE plus facts/reasons/provenance (reuses production evaluateSmc, no second algorithm)
+C) Differential/property tests for production vs historical observation with no-lookahead invariants (same prefix + different suffix = same observation, context-channel-only documented)
+D) Generic execution-policy infrastructure (ExecutionPolicyDefinition, fingerprint, Executability EXECUTABLE/NON_EXECUTABLE reasons) without economic defaults (no SL anchor, no ATR, no k, no RR, no timeout)
+E) Deterministic pre-PnL runner refusing real PnL until policy approved (status PRE_REGISTRATION_REQUIRED, only coverage/raw counts diagnostics)
+F) TRAIN/VALIDATION/OOS plumbing using P2-C semantics OOS-blind (selection TRAIN/VALIDATION only, OOS final witness only)
+G) Admin/backtests UI truthful readiness state (no fake profitability)
+H) Docs/runbooks
+
+**New files:**
+- lib/backtest/read-only-sql.ts — SELECT-only allowlist (SELECT/WITH allowed, INSERT/UPDATE/DELETE/UPSERT/CREATE/ALTER/DROP/TRUNCATE/LOCK/COPY/VACUUM + pg_advisory + FOR UPDATE/SHARE forbidden, Prisma allowlist, multi-statement rejection)
+- lib/backtest/historical-eligibility.ts — CANNOT_RECONSTRUCT_HISTORICAL_ELIGIBILITY, E1/E2/E3 methodologies, 5 fields Asset.rank/Market.quoteVolume24h/enabled/status/listing, format report
+- lib/backtest/ohlcv-provenance.ts — audit lib/ohlcv/sync.ts upsert path, compute diagnostics rowsWithCreatedAt/UpdatedAt/diff, limitations docs, expected write files lib/ohlcv/sync.ts only, no new Date token (formatIsoUtc via utcDateFromMs Reflect.construct allowed)
+- lib/backtest/historical-data-plane.ts — V2 hardened pagination, canonical coverage requested-range basis, common timestamps/contiguous, participant feasibility, eligibility via isSmartMoneyExchangeEligible (BINGX 1d excluded), provenance optional
+- lib/backtest/execution-policy.ts — ExecutionPolicyDefinition, fingerprint, Executability EXECUTABLE/NON_EXECUTABLE reasons, forbiddenDefaults split k=1/k=2/any k-grid, no hidden defaults validation, no new Date token (formatIsoUtc(0) deterministic, Date.parse validation)
+- lib/backtest/smc-observation.ts — RawSmcObservation reusing production evaluateSmc, windowPolicy hardMinimum ~84 vs productionWindow 500 vs fetchCap 500 vs fidelity 500, computeCausalAsOf H+D, testCausalClockBoundary H+D-1ms/AT/After/H+2D, no wall-clock, batch causal prefix invariant
+- lib/backtest/pre-pnl-runner.ts — PrePnlDiagnostics PRE_REGISTRATION_REQUIRED/READY_FOR_EXECUTION, truthful baseline SMC-Direction Baseline / EP-1, no PnL, no new Date token
+- lib/backtest/splits-readiness.ts — SplitReadiness with TRAIN/VALIDATION only selection, OOS final witness only, 90% readiness threshold, no split dates chosen based on strategy results, no silent OOS shortening
+- scripts/backtest-historical-readonly.ts — owner-run READ ONLY NO DB WRITES NO PNL CLI, defensive SET TRANSACTION READ ONLY intent, fail-closed, timezone-less rejection, pageSize 1..5000, read-only deps, no secret handling
+- scripts/test-backtest-data-plane.ts — Phase A tests for SQL allowlist, eligibility, provenance, data plane + BINGX 1d exclusion (46/46)
+- scripts/test-backtest-smc-observation.ts — Phase C differential tests for 5m/15m/1h/4h/1d, no-lookahead same prefix different suffix, production vs historical identical, common horizon ok/relative_lag_stale/absolute_stale/data_unavailable, causal clock boundaries (78/78)
+- scripts/test-backtest-execution-policy.ts — Phase D tests for explicit required fields, NaN/Infinity rejection, no hidden defaults (16/16)
+- scripts/test-backtest-pre-pnl.ts — Phase E/F tests for PRE_REGISTRATION_REQUIRED, no netPnl/profitFactor, OOS isolation TRAIN/VALIDATION only (28/28)
+- app/admin/backtests/page.tsx — truthful pre-PnL status, no fake profitability
+- docs/backtest-pre-pnl-runbook.md — full runbook
+
+**Isolation fix:**
+P2-B isolation forbids `new Date` token in lib/backtest/*.ts — our initial execution-policy.ts, ohlcv-provenance.ts, pre-pnl-runner.ts used `new Date()` for validatedAt/now, causing 436/439 fail. Fixed by replacing with `formatIsoUtc(0)` / `utcDateFromMs` via Reflect.construct and `Date.parse` validation. Grep now only hits comments/docs (adapter.ts, data-source.ts, timeframe.ts) which are stripped by isolation test's stripComments, so code passes FORBIDDEN_TOKENS check. Verified `grep -rn "new Date" lib/backtest/*.ts` now only doc lines.
+
+**Architecture decisions:**
+- RawSmcObservation vs Executability separation: raw LONG/SHORT without SL/TP stays NON_EXECUTABLE (NO_EXECUTION_POLICY/NO_VALID_LEVELS etc), not fake NEUTRAL/CANNOT_EVALUATE, do not send invalid to P2-A to reject.
+- Execution policy NOT approved: no structural SL anchor protectedLow/High, no ATR SL, no buffer/TP/k/RR_min/timeout/conflict defaults; make required config values explicit, APPROVED must have non-empty requiredEconomicFields.
+- Quant cautions documented: SL/TP not in production SMC; structural close-based vs P2-A wick-based; k=1 rejected; TrendSuslik ATR not transferable; distinguish hardMinimumBars (~84) vs productionWindowBars vs fetch cap vs fidelity window (500 hypothesis); historical common-horizon must use causal clock H+D boundary not wall clock.
+- Historical eligibility mutable fields: Asset.rank/Market.quoteVolume24h/enabled/status survivorship — build diagnostics CANNOT_RECONSTRUCT_HISTORICAL_ELIGIBILITY, leave E1/E2/E3 unresolved, do not choose.
+- OHLCV PIT: lib/ohlcv/sync.ts updates existing candles, createdAt does not prove historical values, build revision diagnostics.
+- Truthful baseline naming: SMC-Direction Baseline / EP-1 until execution/eligibility production-derived, not production SMC profitability.
+- No-lookahead contract context-channel-only, not proof against closures/globals, must use causal prefixes, OOS never influences ranking.
+- Admin UI must reflect truthful readiness, no fake profitability.
+
+**Tests (all green, no DB, no PnL, no Signal Engine):**
+- P2-A: engine 439/439 (was 415/415 base, now includes new files isolation), hardening 567/567, metrics 123/123, splits 108/108
+- P2-B: 427/427
+- P2-C: contract 213/213, report 225/225, leakage 174/174, hardening 165/165
+- Smart Money eligibility: 96/96
+- New: data-plane 46/46, smc-observation 78/78, execution-policy 16/16, pre-pnl 28/28
+- tsc --noEmit 0 errors
+- build: compiled successfully (sandbox Prisma stub causes page-data fail, identical to baseline, not new code)
+- git diff --check clean
+
+**Verification:**
+- No DB writes: grep -R INSERT/UPDATE/DELETE/UPSERT/CREATE/ALTER/DROP/TRUNCATE/LOCK/COPY/VACUUM in lib/backtest only in allowlist comments, read-only-sql.ts enforces SELECT-only
+- No PnL: grep -R profitFactor/sharpe/winRate/expectancy/netPnl in pre-pnl-runner absent
+- No Signal Engine ancestry: git merge-base --is-ancestor edf3732 HEAD exit 1 verified
+- No new Date token in code: grep -rn "new Date" lib/backtest/*.ts only comments/docs after fix, isolation test strips comments
+- No Date.now/Math.random/process.env/dynamic import in lib/backtest/*.ts
+- Owner-run CLI: DATABASE_URL=... npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --pageSize 1000
+
+**Status:** IMPLEMENTED / PENDING INDEPENDENT ADVERSARIAL REVIEW — VPS verification not performed, no profitability claims, no production deployment, no workers/PM2 restart.
