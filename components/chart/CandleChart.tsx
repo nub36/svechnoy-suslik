@@ -931,12 +931,17 @@ export default function CandleChart({
   /* ---------- наполнение серий данными ---------- */
 
   /**
-   * «Сбросить масштаб» (кнопка и двойной клик по графику): возврат к
-   * ожидаемому виду ШТАТНЫМИ средствами lightweight-charts 5.2.1 —
-   * timeScale().resetTimeScale() (barSpacing/rightOffset к дефолту),
-   * setAutoScale(true) на правой ценовой шкале каждой панели и
-   * timeScale().scrollToRealTime() (последние закрытые бары).
+   * «Сбросить масштаб» — ТОЛЬКО кнопка (не двойной клик по графику):
+   * возврат к ожидаемому виду ШТАТНЫМИ средствами lightweight-charts
+   * 5.2.1 — timeScale().resetTimeScale() (barSpacing/rightOffset к
+   * дефолту), setAutoScale(true) на правой ценовой шкале каждой панели
+   * и timeScale().scrollToRealTime() (последние закрытые бары).
    * Собственная «физика» масштаба не реализуется.
+   *
+   * Разделение жестов (урок проваленного ревью 5ff7795 — см.
+   * PROJECT_CONTEXT §31m): двойной клик по ценовой шкале обязан возвращать ТОЛЬКО
+   * авто-масштаб цены (штатный axisDoubleClickReset.price) и не трогать
+   * время; полный сброс времени — явное действие пользователя кнопкой.
    */
   const resetChartScale = useCallback(() => {
     const chart = chartRef.current;
@@ -2507,10 +2512,23 @@ export default function CandleChart({
           <p>{errorMessage}</p>
         </div>
       ) : (
+        /*
+          НА ОБЁРТКЕ НАМЕРЕННО НЕТ React-обработчика двойного клика.
+
+          Двойной клик по правой ценовой шкале библиотека обрабатывает
+          сама (handleScale.axisDoubleClickReset.price → Pane
+          ._internal_resetPriceScale → autoScale true), двойной клик по
+          оси времени — тоже сама (axisDoubleClickReset.time). Обработчик
+          на обёртке всплывал бы от canvas'а шкалы и поверх штатного
+          сброса цены выполнял resetTimeScale() + scrollToRealTime():
+          масштаб времени прыгал («приближает/отдаляет»), история
+          уезжала к последним барам, а только что выставленный drag'ом
+          вертикальный масштаб уничтожался (setAutoScale(true) по всем
+          панелям). Полный сброс — только кнопка «Сбросить масштаб».
+        */
         <div
           ref={wrapRef}
           className="chartWrap"
-          onDoubleClick={resetChartScale}
         >
           <div
             ref={containerRef}

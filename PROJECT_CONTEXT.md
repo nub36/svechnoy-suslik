@@ -2501,6 +2501,148 @@ exit 0, `git diff --check` чисто. Dev-smoke: `/coin/BTC` → 200
 > База: HEAD 9085d55 RANGE_POSITION CLOSED/UNDERSTOOD + Option A eligibility (принят на VPS 10.09.2026; real BTC diagnostic 5m READY, 15m READY, 1h READY, 4h READY, 1d verified via eligibility — BINGX 16:00 UTC excluded for 1d aggregation, 4/4 eligible BINANCE/BYBIT/GATE/KUCOIN aligned 2026-09-09T00:00:00Z safe=true), ветка arena/01a08b68-svechnoy-suslik. Rollout: Admin/API now supports all five TFs ["5m","15m","1h","4h","1d"].
 > Документация-only — без изменения runtime/Admin/DB.
 
+## §31m. Chart UX vertical fix #2 — снят перехват двойного клика обёрткой; добавлена runtime-регрессия (12.09.2026)
+
+UI-only фикс поверх §31l (parent `5ff7795`). Данные, SMC DTO/API/runtime,
+`lib/strategies`, Prisma, package-файлы, Signal Engine и TradingView не
+тронуты. Повод — провал ручного браузерного ревью §31l: «Ничего не изменилось —
+также удаляет и приближает».
+
+**1. ПОЧЕМУ СТАТИЧЕСКИЕ 424/424 НЕ СПАСЛИ**
+
+`scripts/test-chart-ux.ts` проверяет чистые функции `lib/chart/chart-ux.ts`
+и литералы исходников. Он доказал, что `axisPressedMouseMove.price === true`
+и что `scaleMargins`/`autoscaleInfoProvider` заданы верно, — но НИ ОДНА из
+этих проверок не исполняет lightweight-charts и не диспатчит события мыши.
+Поведение «drag по ценовой шкале» и «что происходит с ручным режимом дальше»
+оставалось непроверенным: баг жил не в опциях, а в JSX-обвязке.
+
+**2. HEADLESS-RUNTIME ХАРНЕС (новый постоянный актив)**
+
+Браузера, jsdom/happy-dom/linkedom/canvas и сети в песочнице нет, а
+`package.json` защищён (новых зависимостей не добавляли). Поэтому написан
+ручной минимальный DOM — `scripts/chart-dom-shim.ts`:
+
+- `installChartDom()` ставит глобалы (`window`, `document`, `navigator`,
+  `HTMLElement`, `Event`/`MouseEvent`/`TouchEvent`/`WheelEvent`,
+  `ResizeObserver`, `requestAnimationFrame`, `getComputedStyle`,
+  `matchMedia`, `devicePixelRatio`) ДО импорта библиотеки: lightweight-charts
+  фиксирует `isRunningOnClientSide = typeof window !== 'undefined'` в момент
+  вычисления модуля;
+- `ResizeObserver` отдаёт `devicePixelContentBoxSize`, поэтому fancy-canvas
+  2.1.0 идёт по штатному пути и bitmap-размеры canvas'ов ненулевые;
+- canvas 2D-контекст — Proxy-заглушка (`measureText`, градиенты, back-ref на
+  canvas); `getComputedStyle` нормализует цвет в `rgb()/rgba()`, иначе
+  `ColorParser._private__parseColor` падает ещё до создания панелей;
+- `Event.timeStamp` — как в браузере: `DOMHighResTimeStamp` от timeOrigin
+  (плюс «возраст страницы» 60 s). С epoch-мс `MouseEventHandler`
+  (`eventTimeStamp(e) < lastTouchEventTimeStamp + 500`, защита от призрачных
+  mouse-событий после touch) глушил бы мышь навсегда;
+- `shimLayoutTree()` раскладывает таблицу панелей (`table → tr → td → div →
+  canvas`) и проставляет `getBoundingClientRect`, иначе `localX/localY`
+  считались бы от нуля и тест «тыкал» бы не туда;
+- события всплывают до `document.documentElement` — там висят root-слушатели
+  `mousemove`/`mouseup`, которые библиотека добавляет на время нажатия.
+
+Development-бандл берётся прямым file-URL
+(`node_modules/lightweight-charts/dist/lightweight-charts.development.mjs`):
+exports-карта пакета разрешает только `"."`.
+
+**3. ЧТО ХАРНЕС ИЗМЕРИЛ НА НАШИХ РЕАЛЬНЫХ ОПЦИЯХ (до фикса)**
+
+График строится ровно как в `CandleChart.tsx` (те же `SUSLIK_*`, тот же
+`createMainPaneAutoscaleProvider`, volume-overlay `priceScaleId: ""` с
+`{top: 0.82, bottom: 0}`, три панели 4/1.6/1.6, 300 свечей с pump в конце):
+
+- виджет правой ценовой шкалы существует как отдельная колонка
+  (canvas 58×294 справа от plot 1142×294), на нём висят `mousedown` и
+  `touchstart`, при наведении его обёртка получает `cursor: ns-resize`
+  (ровно та «↕», которую видит пользователь);
+- drag по шкале: `autoScale true → false`, диапазон `92.48…156.41 →
+  49.42…199.47`, при этом `getVisibleLogicalRange()` и `barSpacing`
+  НЕ изменились — то есть вертикальный масштаб независим от времени;
+- wheel над plot — это zoom ВРЕМЕНИ (`barSpacing 3.81 → 4.19`), ручной
+  режим цены и её диапазон он не трогает;
+- ручной режим переживает `chart.applyOptions(...)` (путь `applyChartTheme`),
+  `scale.applyOptions({scaleMargins})` (путь `applyChartMetrics`),
+  `series.setData([...older, ...candles])` (путь `loadOlder`: viewport
+  сдвинулся ровно на 40 добавленных баров) и переключение видимости серий;
+- двойной клик по шкале: `autoScale → true`, время НЕ тронуто;
+- `Model._internal_applyOptions` передаёт в `Pane._internal_applyScaleOptions`
+  ТОЛЬКО переданные ключи, поэтому `chart.applyOptions({rightPriceScale:
+  {borderColor}})` не сбрасывает `autoScale` (подозрение снято).
+
+Вывод: слой библиотеки и опций уже был корректен — значит сбой давал наш слой.
+
+**4. КОРЕНЬ ПРОБЛЕМЫ: REACT-`onDoubleClick` НА ОБЁРТКЕ ГРАФИКА**
+
+`<div className="chartWrap" onDoubleClick={resetChartScale}>`. Двойной клик
+по canvas'у ценовой шкалы всплывает до обёртки, поэтому поверх штатного
+`axisDoubleClickReset.price` выполнялся наш полный сброс:
+`timeScale().resetTimeScale()` (barSpacing/rightOffset к дефолту — «приближает/
+отдаляет»), `scrollToRealTime()` (анимированный прыжок к последним барам —
+история «уезжает») и `setAutoScale(true)` по всем панелям (только что
+выставленный drag'ом вертикальный масштаб уничтожался). Два коротких
+повторных нажатия на шкалу браузер тоже квалифицирует как dblclick, так что
+сброс срабатывал в процессе проверки жеста. Обработчик существовал и до
+`5ff7795` — отсюда буквальное «ничего не изменилось».
+
+**5. ФИКС**
+
+- `onDoubleClick` с обёртки снят полностью: двойной клик по ценовой шкале
+  обрабатывает библиотека (`axisDoubleClickReset.price` →
+  `Pane._internal_resetPriceScale` → `setMode({autoScale: true})` +
+  `recalculatePriceRange(visibleBars)`), двойной клик по оси времени — тоже
+  библиотека (`axisDoubleClickReset.time`);
+- полный сброс (цена + время + последние бары) остался ТОЛЬКО на кнопке
+  «Сбросить масштаб»: `resetChartScale` упоминается в файле ровно дважды
+  (определение + `onClick` кнопки) — это заперто тестами;
+- никакой собственной pointer-физики не добавлено.
+
+Карта жестов после фикса: plot-drag → история; wheel/pinch → zoom времени;
+drag оси времени → растянуть/сжать время; drag правой ценовой шкалы →
+вертикальный масштаб (время не трогается); dblclick ценовой шкалы → только
+авто-масштаб цены; dblclick оси времени → только сброс времени; кнопка
+«Сбросить масштаб» → авто-масштаб цены во всех панелях + последние бары.
+
+**6. ИЗВЕСТНОЕ ОГРАНИЧЕНИЕ TOUCH (осознанно, не регрессия)**
+
+`PriceAxisWidget` передаёт в `MouseEventHandler`
+`treatVertTouchDragAsPageScroll: () => !handleScroll.vertTouchDrag`, то есть
+наш `vertTouchDrag: false` (вертикальный свайп отдан прокрутке страницы —
+решение §31k) отключает и вертикальный touch-драг по ценовой шкале: пальцем
+шкалу не растянуть, доступен только двойной тап (возврат авто-масштаба).
+Мышиный drag работает всегда. Зафиксировано проверкой в runtime-тесте, чтобы
+поведение было явным, а не «внезапным».
+
+**7. РЕГРЕССИЯ**
+
+- НОВЫЙ `scripts/test-chart-runtime.ts` — 81 проверка состояний и
+  инвариантов взаимодействия (не литералов опций): hit-target шкалы и курсор
+  `ns-resize`, AUTO-экстремумы не обрезаны и не под легендой, drag по шкале
+  меняет ТОЛЬКО цену, ручной режим живёт после wheel/plot-drag/
+  `applyOptions`/`scaleMargins`/`setData`/toggles, dblclick по шкале не
+  трогает время, сброс кнопкой, touch-поведение, dblclick по оси времени не
+  возвращает авто-масштаб цены. Запуск: `npx tsx scripts/test-chart-runtime.ts`.
+- Mutation-check: возврат `onDoubleClick={resetChartScale}` на обёртку →
+  80/81 (падает именно замок на перехват); после снятия мутации → 81/81.
+- `scripts/test-chart-ux.ts` — 426/426: требование «двойной клик по графику
+  сбрасывает масштаб» заменено на обратное (0 `onDoubleClick`, 1
+  `onClick={resetChartScale}`, 2 упоминания `resetChartScale`).
+- `scripts/test-chart-history.ts` 50/50, `scripts/test-chart-params.ts` 37/37,
+  `scripts/test-chart-sql.ts` — зелёные (горизонтальная навигация §31k не
+  задета).
+
+**Files changed (один коммит):** `components/chart/CandleChart.tsx` (снят
+`onDoubleClick` с обёртки, комментарии), `scripts/chart-dom-shim.ts` (новый),
+`scripts/test-chart-runtime.ts` (новый), `scripts/test-chart-ux.ts` (инверсия
+замка dblclick), `PROJECT_CONTEXT.md` (этот §31m).
+
+**Deliverable:** ОДИН reviewable FIX-коммит ровно поверх
+`5ff7795b29012dc322b3de09b8674cda10ab4d76` (не amend), push только в
+`arena/01a09406-svechnoy-suslik`. Приёмка — повторное ручное ревью на VPS
+:3001; автоматические тесты приёмкой не считаются.
+
 # Свечной Суслик — Product Roadmap & Backlog
 
 Последнее обновление: 10.09.2026

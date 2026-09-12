@@ -584,9 +584,29 @@ ok(/resetTimeScale\(\)/.test(resetCode), "reset: timeScale().resetTimeScale() �
 ok(/setAutoScale\(true\)/.test(resetCode), "reset: авто-масштаб ценовой шкалы возвращается штатным API");
 ok(/scrollToRealTime\(\)/.test(resetCode), "reset: возврат к последним закрытым барам — штатный API");
 ok(/applyChartMetrics\(\)/.test(resetCode), "reset: резерв места под легенду пересчитывается");
-ok(
-  /onDoubleClick=\{resetChartScale\}/.test(chartCode),
-  "chart: двойной клик по графику по-прежнему сбрасывает масштаб"
+/*
+ * Двойной клик по графику БОЛЬШЕ не выполняет полный сброс: его
+ * перехватывал React-обработчик на обёртке, и вместе со штатным
+ * возвратом авто-масштаба цены (axisDoubleClickReset.price) он делал
+ * resetTimeScale() + scrollToRealTime() + setAutoScale(true) по всем
+ * панелям — то есть уничтожал только что выставленный drag'ом по ценовой
+ * шкале вертикальный масштаб и прыгал масштабом времени. Подробно —
+ * PROJECT_CONTEXT §31m и runtime-регрессия scripts/test-chart-runtime.ts.
+ */
+eq(
+  (chartCode.match(/onDoubleClick/g) ?? []).length,
+  0,
+  "chart: на обёртке НЕТ React-onDoubleClick — двойной клик по осям обрабатывает только библиотека"
+);
+eq(
+  (chartCode.match(/onClick=\{resetChartScale\}/g) ?? []).length,
+  1,
+  "chart: полный сброс масштаба — только кнопка «Сбросить масштаб»"
+);
+eq(
+  (chartCode.match(/resetChartScale/g) ?? []).length,
+  2,
+  "chart: resetChartScale не привязан ни к какому другому жесту"
 );
 ok(
   /Сбросить масштаб/.test(CHART_SRC),
