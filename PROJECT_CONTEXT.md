@@ -4257,7 +4257,7 @@ All 21 mutation controls killed.
 - data-plane 46/46 smc-observation 78/78 execution-policy 16/16 pre-pnl 32/32 full-pipeline 40/40 hardening-pre-pnl 47/47
 - new hardening: readonly-sql 89/89 clock 46/46 eligibility 32/32 structural-proof 22/22 mutation 21/21 owner-inspection 25/25
 - real-long-short 17/17 BEHAVIOR, canonical-coverage-real 38/38 BEHAVIOR, historical-data-plane-behavior-real 22/22 BEHAVIOR REAL plane via fetchHistoricalDataPlane, no-pnl-output 11/11 CONTRACT REAL plane, economic-default-detection 12/12 CONTRACT top-level scope, core-api-immutability 14/14 CONTRACT, survivorship-fixtures 11/11 CONTRACT strict, mutations-m1-m11 20/20 classified BEHAVIOR/CONTRACT/SOURCE PIN
-- Changed files from base 51eb129: 35 files (git diff --name-only 51eb129..HEAD)
+- Changed files from base 51eb129: 36 files (git diff --name-only 51eb129..HEAD)
 - tsc --noEmit 0 errors (normal)
 - build compiled successfully then fails at page data collection @prisma/client not initialized — identical to base 51eb129, not introduced
 - git diff --check clean including trailing blank line fix

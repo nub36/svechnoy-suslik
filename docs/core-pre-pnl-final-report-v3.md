@@ -6,7 +6,7 @@
 **Branch:** this branch HEAD (arena/01a09726-svechnoy-suslik) — sequential commits from 7f58365, PENDING TARGETED RE-AUDIT
 **Parent Chain from 7f58365:** 7f58365 -> 60367af -> 6adc3a1 -> c8a19cc -> 29d6f94 -> 0e94235 -> f16e577 -> 396a1d5 -> b3b49be -> 8739b52 -> 599c845 -> this branch HEAD (see git log)
 **Final SHA:** this branch HEAD (do not hardcode self-referential SHA in commit that changes same report; use git rev-parse HEAD at review time)
-**Changed Files from base 51eb129:** 35 files (git diff --name-only 51eb129..HEAD) — see list in runbook §1
+**Changed Files from base 51eb129:** 36 files (git diff --name-only 51eb129..HEAD) — see list in runbook §1
 **Forbidden Signal Engine:** edf3732da81a8916efc7e63f5608401ee6e2668c exists, git merge-base --is-ancestor exit 1 (not ancestor) verified — NO SIGNAL ENGINE, no lib/signals, no signal-worker, no Signal Prisma
 
 ## Disposition 1-10 (Mandatory from audit)
@@ -98,7 +98,7 @@
 
 ### 11. FACTUAL DOC CLEANUP — IMPLEMENTED
 - Corrected createdAt NOT overwritten by Candle update branch: lib/ohlcv/sync.ts update branch updates ONLY closeTime/open/high/low/close/volume/closed — createdAt NOT overwritten (Prisma default), only updatedAt auto-updated. Earlier docs claimed createdAt overwritten — FALSE, corrected in runbook §4.
-- Corrected actual changed-file count: 35 files from base 51eb129..HEAD (git diff --name-only).
+- Corrected actual changed-file count: 36 files from base 51eb129..HEAD (git diff --name-only).
 - Removed false runner wording "→P2-A→P2-C" — factual correction: runner returns PRE_REGISTRATION_REQUIRED, no P2-A economics entered, no computeMetrics — intentionally stops before economics. Fixed in lib/backtest/pre-pnl-runner.ts.
 - Updated stale titles/final SHA — runbook now reports actual HEAD, not stale, final SHA not hardcoded self-referentially.
 - Do not claim new work accepted/VPS verified — base 51eb129 is VPS-verified ACCEPTED, new work is PENDING TARGETED RE-AUDIT.
@@ -183,8 +183,8 @@ All new suites + accepted P2-A/B/C green — actual counts recomputed after fina
 
 - Final SHA: this branch HEAD (use git rev-parse HEAD at review time, not hardcoded self-referential SHA)
 - Parent chain from 7f58365 verified via git log --oneline 7f58365..HEAD
-- Changed files: 35 from base 51eb129..HEAD
-- Commits added disposition 1-10: secret cleanup, CLI contract, read-only truthfulness, survivorship, real LONG/SHORT evidence, real coverage evidence, vacuous removal, no-PnL recursive REAL plane, economic defaults top-level scope, immutability, factual doc cleanup (35 files, no >6700, no false 442 was 439), read-only SQL scope, PRE_REGISTRATION import-closure, M1-M11 mutations classified honestly, regression actual counts, signal absence verified, trailing blank line fixed, runner comment fixed.
+- Changed files: 36 from base 51eb129..HEAD
+- Commits added disposition 1-10: secret cleanup, CLI contract, read-only truthfulness, survivorship, real LONG/SHORT evidence, real coverage evidence, vacuous removal, no-PnL recursive REAL plane, economic defaults top-level scope, immutability, factual doc cleanup (36 files, no >6700, no false 442 was 439), read-only SQL scope, PRE_REGISTRATION import-closure, M1-M11 mutations classified honestly, regression actual counts, signal absence verified, trailing blank line fixed, runner comment fixed.
 - Real LONG/SHORT evidence: canonical fixture from test-smc-projection.ts yields LONG 75/10, negate yields SHORT 20/75 via production evaluateSmc path, wrapWithExecutability preserves raw LONG/SHORT + NON_EXECUTABLE — BEHAVIOR.
 - Real coverage evidence: 1h [00:30,03:30) expects 01:00/02:00/03:00 partial 2/3 ratio 0.6667, aligned full, leading/internal/trailing/off-grid/duplicate/boundary/zero slots, mutations M3-M5 killed — BEHAVIOR; REAL plane behavior via fetchHistoricalDataPlane 22/22 non-aligned effectiveFrom 01:00 expectedSlots 3 ratio 2/3 overallCoverageRatio 0.6 !=1 isAligned false canonicalized true.
 - Read-only guarantee: capability-restricted surface asset.findUnique/market.findMany (all markets)/candle.findMany CLOSED-only/$disconnect, no SET TRANSACTION READ ONLY claim, read-only-sql static defense only, assertReadOnlyDeps validates actual deps fail-closed, HONEST SCOPE top-level.
@@ -234,7 +234,7 @@ Result: exists, exit 1 — SIGNAL ENGINE ABSENCE VERIFIED.
 
 **IMPLEMENTED / PENDING TARGETED RE-AUDIT — STOP**
 
-No DB writes, no workers, no Signal Engine, no production deployment, no profitability claims, BTC-only, truthful baseline SMC-Direction Baseline / EP-1, PRE_REGISTRATION_REQUIRED until execution policy APPROVED, 35 changed files from base, no >6700 claim, no false engine 442 was 439, actual suite counts, classified mutations BEHAVIOR/CONTRACT/SOURCE PIN, REAL plane behavior via fetchHistoricalDataPlane, trailing blank line fixed, runner stops before economics intentionally.
+No DB writes, no workers, no Signal Engine, no production deployment, no profitability claims, BTC-only, truthful baseline SMC-Direction Baseline / EP-1, PRE_REGISTRATION_REQUIRED until execution policy APPROVED, 36 changed files from base, no >6700 claim, no false engine 442 was 439, actual suite counts, classified mutations BEHAVIOR/CONTRACT/SOURCE PIN, REAL plane behavior via fetchHistoricalDataPlane, trailing blank line fixed, runner stops before economics intentionally.
 
 Hard stops remaining:
 - owner economic SL/TP decisions

@@ -4,7 +4,7 @@
 **Current Branch:** this branch HEAD — sequential commits from 7f58365, PENDING TARGETED RE-AUDIT
 **Status:** IMPLEMENTED / PENDING TARGETED INDEPENDENT RE-AUDIT — no PnL, no profitability claims
 **Production:** d6c573c20a11e79e26153579575818f1dada2f96 — DO NOT deploy, DO NOT restart workers
-**Changed Files from base 51eb129:** 35 files (see git diff --name-only 51eb129..HEAD)
+**Changed Files from base 51eb129:** 36 files (see git diff --name-only 51eb129..HEAD)
 
 ## 1. Scope — What is pre-PnL
 
