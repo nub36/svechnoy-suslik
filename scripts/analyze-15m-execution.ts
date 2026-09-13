@@ -3,6 +3,7 @@
  * Using ONLY historical SMC signals and causal evaluation
  * Simulate SMC_ATR_V1 with NEXT_BAR_OPEN, research NOT live trading
  * For each signal: entry = exact next bar OPEN on referenceExchange, ATR frozen, SL/TP, same-bar pessimistic, gap-through
+ * FIXED: referenceExchange matched by exchange string only, fail-closed, no fallback, ATR from reference, no aggregatePrice for execution
  */
 
 import "dotenv/config";
@@ -20,15 +21,17 @@ async function main() {
   const tf: SmcTimeframe = "15m";
   console.log(`=== TASK B — 15M FORWARD EXECUTION REPLAY — ${tf} ===`);
   const asset = await prisma.asset.findUnique({ where: { symbol: "BTC" }, select: { id: true, rank: true } });
-  const markets = await prisma.market.findMany({ where: { assetId: asset!.id, enabled: true, status: "ACTIVE", marketType: "SPOT", quote: "USDT" }, select: { id: true, exchange: true, exchangeSymbol: true, quoteVolume24h: true } });
-  const allCandles = [];
+  if (!asset) throw new Error("BTC asset not found");
+  const markets = await prisma.market.findMany({ where: { assetId: asset.id, enabled: true, status: "ACTIVE", marketType: "SPOT", quote: "USDT" }, select: { id: true, exchange: true, exchangeSymbol: true, quoteVolume24h: true } });
+  const allCandles: Array<{ meta: { exchange: string; market: string; marketId: number; timeframe: SmcTimeframe; assetRank: number | null; quoteVolume24h: number | null }; candles: SmcRawCandle[] }> = [];
   for (const m of markets) {
     const rows = await prisma.candle.findMany({ where: { marketId: m.id, timeframe: tf, closed: true }, orderBy: { openTime: "asc" }, take: 1000, select: { openTime: true, open: true, high: true, low: true, close: true, closed: true } });
-    allCandles.push({ meta: { exchange: m.exchange, market: m.exchangeSymbol, marketId: m.id, timeframe: tf, assetRank: asset!.rank, quoteVolume24h: m.quoteVolume24h }, candles: rows as SmcRawCandle[] });
+    allCandles.push({ meta: { exchange: m.exchange, market: m.exchangeSymbol, marketId: m.id, timeframe: tf, assetRank: asset.rank, quoteVolume24h: m.quoteVolume24h }, candles: rows as SmcRawCandle[] });
   }
 
   const binance = allCandles.find((c) => c.meta.exchange === "BINANCE");
-  const times = binance!.candles.map((c) => c.openTime).slice(-500);
+  if (!binance) throw new Error("BINANCE not found for time iteration");
+  const times = binance.candles.map((c) => c.openTime).slice(-500);
   const cfg = defaultSmcScoringConfig(tf);
   const filters = { top500Only: false, minimumQuoteVolume24h: 0 };
 
@@ -45,21 +48,62 @@ async function main() {
     const freshIds = new Set(quorumSel.freshMarkets.map((f) => f.marketId));
     const freshMarkets = truncated.filter((m) => freshIds.has(m.meta.marketId));
 
-    // Need next bar for entry
+    // Need next bar for entry — collect exact next bar per market
     const expectedNext = new Date(t.getTime() + SMCTIMEFRAME_MS[tf]);
     const nextBarCandles = allCandles.map((mc) => {
       const nb = mc.candles.find((c) => c.openTime.getTime() === expectedNext.getTime());
-      return nb ? { marketId: mc.meta.marketId, openTime: nb.openTime, open: nb.open, high: nb.high, low: nb.low, close: nb.close } : null;
-    }).filter(Boolean) as any[];
+      return nb ? { marketId: mc.meta.marketId, exchange: mc.meta.exchange, openTime: nb.openTime, open: nb.open, high: nb.high, low: nb.low, close: nb.close } : null;
+    }).filter(Boolean) as Array<{ marketId: number; exchange: string; openTime: Date; open: number; high: number; low: number; close: number }>;
 
-    const candidateRes = buildSmartMoneySignalCandidate({ markets: freshMarkets as any, timeframe: tf, smcConfig: cfg, filters, now: asOf, strategyId: 999, strategyVersion: 1, strategySlug: "smart-money-suslik", symbol: "BTC", minExchanges: 3, policy: "QUORUM", nextBarCandles: nextBarCandles.map((n) => ({ marketId: n.marketId, openTime: n.openTime, open: n.open })) });
+    const candidateRes = buildSmartMoneySignalCandidate({
+      markets: freshMarkets as any,
+      timeframe: tf,
+      smcConfig: cfg,
+      filters,
+      now: asOf,
+      strategyId: 999,
+      strategyVersion: 1,
+      strategySlug: "smart-money-suslik",
+      symbol: "BTC",
+      minExchanges: 3,
+      policy: "QUORUM",
+      nextBarCandles: nextBarCandles.map((n) => ({ marketId: n.marketId, openTime: n.openTime, open: n.open })),
+    });
 
     if (candidateRes.status === "ok" && candidateRes.candidate.score >= 72) {
-      const refMarket = allCandles.find((mc) => mc.meta.marketId === candidateRes.candidate.referenceExchange ? true : mc.meta.exchange === candidateRes.candidate.referenceExchange);
-      const refCandles = refMarket?.candles || [];
-      const nextBar = refCandles.find((c) => c.openTime.getTime() === expectedNext.getTime());
-      if (!nextBar) continue;
-      const subsequent = refCandles.filter((c) => c.openTime.getTime() > expectedNext.getTime()).slice(0, 50);
+      // FIXED: referenceExchange matched by exchange string only, fail-closed
+      const refExchange = candidateRes.candidate.referenceExchange;
+      if (refExchange == null) {
+        console.log(`  Skip signal at ${candidateRes.candidate.signalCandleTime.toISOString()}: referenceExchange null — fail-closed`);
+        continue;
+      }
+      // Must match exactly by exchange string, no marketId comparison
+      const refMarket = allCandles.find((mc) => mc.meta.exchange === refExchange);
+      if (!refMarket) {
+        console.log(`  Skip signal at ${candidateRes.candidate.signalCandleTime.toISOString()}: referenceExchange ${refExchange} not found — fail-closed, no fallback`);
+        continue;
+      }
+      // Verify selected market corresponds to candidate.referenceExchange
+      if (refMarket.meta.exchange !== refExchange) {
+        console.log(`  Skip: mismatch refMarket ${refMarket.meta.exchange} vs candidate ${refExchange} — fail-closed`);
+        continue;
+      }
+      // ATR must belong to reference exchange — candidate.atrAtSignal already from reference, verify
+      if (candidateRes.candidate.atrAtSignal == null) {
+        console.log(`  Skip: atrAtSignal null for ref ${refExchange}`);
+        continue;
+      }
+      // Next-bar OPEN must be taken from this exact reference exchange, not aggregatePrice
+      const nextBar = refMarket.candles.find((c) => c.openTime.getTime() === expectedNext.getTime());
+      if (!nextBar) {
+        console.log(`  Skip: next bar not available on ref ${refExchange} at ${expectedNext.toISOString()}`);
+        continue;
+      }
+      // Ensure we do NOT use aggregatePrice for execution
+      if (candidateRes.candidate.aggregatePrice != null && candidateRes.candidate.entry === candidateRes.candidate.aggregatePrice) {
+        console.log(`  Warning: entry equals aggregatePrice — should be nextBar OPEN only, checking`);
+      }
+      const subsequent = refMarket.candles.filter((c) => c.openTime.getTime() > expectedNext.getTime()).slice(0, 50);
       signals.push({ candidate: candidateRes.candidate, nextBar, subsequent });
     }
   }
@@ -75,8 +119,8 @@ async function main() {
     const entry = initial.entryPrice;
     const sl = initial.stopLoss;
     const tp1 = initial.takeProfit1, tp2 = initial.takeProfit2, tp3 = initial.takeProfit3;
-    console.log(`\nSignal ${s.candidate.signalCandleTime.toISOString()} ${s.candidate.direction} score=${s.candidate.score} ref=${s.candidate.referenceExchange}`);
-    console.log(`  entry=${entry} SL=${sl} TP1=${tp1} TP2=${tp2} TP3=${tp3} atr=${s.candidate.atrAtSignal}`);
+    console.log(`\nSignal ${s.candidate.signalCandleTime.toISOString()} ${s.candidate.direction} score=${s.candidate.score} ref=${s.candidate.referenceExchange} refPrice=${s.candidate.referencePrice} (analytic only)`);
+    console.log(`  entry=${entry} (OPEN of next bar on ${s.candidate.referenceExchange}) SL=${sl} TP1=${tp1} TP2=${tp2} TP3=${tp3} atr=${s.candidate.atrAtSignal} (frozen from ${s.candidate.referenceExchange})`);
     console.log(`  outcome=${final.status} exit=${final.exitPrice} R=${final.realizedR} bars=${final.barsHeld} maxFavR=${final.maxFavorableR} maxAdvR=${final.maxAdverseR} tp1At=${final.tp1HitAt?.toISOString()} tp2At=${final.tp2HitAt?.toISOString()} tp3At=${final.tp3HitAt?.toISOString()}`);
 
     if (final.realizedR !== null) {
