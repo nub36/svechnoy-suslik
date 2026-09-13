@@ -1,6 +1,7 @@
 import AdminNav from "@/components/admin/AdminNav";
 import { auth } from "@/auth";
 import { redirect } from "next/navigation";
+import ExecutionPolicyRegistryClient from "./ExecutionPolicyRegistryClient";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +35,7 @@ export default async function AdminBacktestsPage() {
         </div>
 
         <div className="adminGrid">
+          <ExecutionPolicyRegistryClient />
           <div className="adminCard">
             <h3>P2-A Backtest Engine — p2a-1.2.0 — ACCEPTED / VPS VERIFIED (51eb129)</h3>
             <ul>
