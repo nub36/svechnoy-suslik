@@ -22,7 +22,6 @@
  */
 
 import "dotenv/config";
-import { PrismaClient } from "@prisma/client";
 import { defaultSmcScoringConfig, type SmcScoringConfig } from "../lib/smc/config";
 import { evaluateSmc, type SmcEvaluation } from "../lib/smc/evaluate";
 import type { SmcTimeframe, SmcRawCandle } from "../lib/smc/types";
@@ -36,7 +35,14 @@ import { aggregateAssetGroup } from "../lib/strategies/runtime";
 import { isSmartMoneyExchangeEligible } from "../lib/strategies/smart-money-eligibility";
 import { SMART_MONEY_SLUG } from "../lib/strategies/smart-money";
 
-const prisma = new PrismaClient();
+let prisma: any = null;
+async function getPrisma() {
+  if (!prisma) {
+    const { PrismaClient } = await import("@prisma/client");
+    prisma = new PrismaClient();
+  }
+  return prisma;
+}
 
 type Args = {
   symbol: string;
@@ -187,7 +193,8 @@ async function evaluateMarketHistory(
   lastN: number | null
 ): Promise<PerExchangeResult> {
   // READ-ONLY: only findMany
-  const candlesRaw = await prisma.candle.findMany({
+  const db = await getPrisma();
+  const candlesRaw = await db.candle.findMany({
     where: {
       marketId: market.id,
       timeframe,
@@ -416,7 +423,7 @@ async function main() {
   // STEP A — production state
   console.log(`--- STEP A — PRODUCTION STATE smart-money-suslik ---`);
   try {
-    const strategies = await prisma.strategy.findMany({
+    const strategies = await (await getPrisma()).strategy.findMany({
       where: { slug: SMART_MONEY_SLUG },
       orderBy: [{ version: "desc" }],
       take: 5,
@@ -447,7 +454,7 @@ async function main() {
 
     // Load markets for BTC
     // READ-ONLY: findMany Asset + Market
-    const asset = await prisma.asset.findUnique({
+    const asset = await (await getPrisma()).asset.findUnique({
       where: { symbol: args.symbol },
       select: { id: true, symbol: true, rank: true },
     });
@@ -457,7 +464,7 @@ async function main() {
       continue;
     }
 
-    const markets = await prisma.market.findMany({
+    const markets = await (await getPrisma()).market.findMany({
       where: {
         assetId: asset.id,
         enabled: true,
@@ -563,7 +570,7 @@ async function main() {
       // Load candles for all eligible markets
       const marketCandles: CommonHorizonMarket[] = [];
       for (const market of eligibleMarkets) {
-        const candlesRaw = await prisma.candle.findMany({
+        const candlesRaw = await (await getPrisma()).candle.findMany({
           where: { marketId: market.id, timeframe, closed: true },
           orderBy: { openTime: "asc" },
           ...(args.limit ? { take: args.limit } : {}),
@@ -725,7 +732,7 @@ async function main() {
     }
   }
 
-  await prisma.$disconnect();
+  await (await getPrisma()).$disconnect();
   console.log(`\n=== DONE — READ-ONLY BASELINE ===`);
 }
 
