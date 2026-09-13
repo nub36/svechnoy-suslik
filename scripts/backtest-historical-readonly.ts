@@ -66,6 +66,7 @@ function parseArgs() {
   let pageSize = 1000;
   let executionPolicyId: string | null = null;
   let approve = false;
+  let fullPipeline = false;
 
   for (let i = 0; i < raw.length; i++) {
     const a = raw[i];
@@ -103,6 +104,8 @@ function parseArgs() {
       i++;
     } else if (a === "--approve") {
       approve = true;
+    } else if (a === "--fullPipeline" || a === "--full-pipeline" || a === "--full") {
+      fullPipeline = true;
     } else if (a === "--smartMoney" || a === "--smart-money") {
       smartMoney = true;
     } else if (a === "--smc") {
@@ -116,15 +119,15 @@ function parseArgs() {
     }
   }
 
-  return { asset, timeframe, from, to, smartMoney, smc, splits, help, pageSize, executionPolicyId, approve };
+  return { asset, timeframe, from, to, smartMoney, smc, splits, help, pageSize, executionPolicyId, approve, fullPipeline };
 }
 
 function printHelp() {
   console.log(`
-Owner-run READ-ONLY historical data inspection CLI — NO DB WRITES — BTC ONLY — REAL PNL ONLY WHEN APPROVED
+Owner-run READ-ONLY historical data inspection CLI — NO DB WRITES — BTC ONLY — REAL PNL ONLY WHEN APPROVED — Phase H Full Pipeline
 
 Usage (uses server's existing env, no secrets, never echo DATABASE_URL):
-  npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 [--smartMoney] [--smc] [--splits] [--executionPolicy EP-2 --approve]
+  npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 [--smartMoney] [--smc] [--splits] [--executionPolicy EP-2 --approve] [--fullPipeline]
 
 Options:
   --asset <symbol>       Asset symbol (default BTC) — BTC only, fail-closed if != BTC (pre-registered scope)
@@ -132,8 +135,9 @@ Options:
   --from <ISO>           From timestamp ISO (e.g. 2024-01-01T00:00:00Z or YYYY-MM-DD)
   --to <ISO>             To timestamp ISO, must be > from
   --pageSize <n>         Page size 1..5000 (default 1000)
-  --executionPolicy <id> Execution policy registry id EP-1/EP-2/EP-3 — Phase G real PnL runner, truthful baseline EP-1 0 trades, EP-2/EP-3 DRAFT blocked until APPROVED
+  --executionPolicy <id> Execution policy registry id EP-1/EP-2/EP-3 — Phase G/H real PnL runner, truthful baseline EP-1 0 trades, EP-2/EP-3 DRAFT blocked until APPROVED
   --approve              Simulate owner approval of DRAFT policy EP-2/EP-3 via approvePolicy utility — deterministic, no DB writes, for inspection only
+  --fullPipeline         Run Full Pipeline Real PnL Phase H: data plane + raw SMC + EP registry + P2-A + splits OOS-blind — requires --executionPolicy
   --smartMoney           Apply Smart Money eligibility (BINGX 1d excluded — timeless policy only)
   --smc                  Also evaluate raw SMC observations (no SL/TP, no PnL unless executionPolicy APPROVED)
   --splits               Also evaluate TRAIN/VALIDATION/OOS readiness (OOS isolation, no silent shortening)
@@ -436,7 +440,7 @@ async function main() {
       console.log("OOS does not influence selection — TRAIN/VALIDATION only, OOS final witness only");
     }
 
-    // Phase G: Real PnL Runner with execution policy registry
+    // Phase G/H: Real PnL Runner + Full Pipeline with execution policy registry
     if (args.executionPolicyId) {
       console.log(`\n=== Real PnL Runner — Execution Policy ${args.executionPolicyId} — READ ONLY — ${args.approve ? "APPROVED via --approve" : "DRAFT check"} ===`);
       let policy = getRegistryPolicyById(args.executionPolicyId);
@@ -512,12 +516,41 @@ async function main() {
       } else if (diag.status === "READY_FOR_EXECUTION") {
         console.log(`\nREADY_FOR_EXECUTION: policy ${diag.policyId} APPROVED — real trades ${diag.tradesCount}, raw LONG ${diag.rawLongCount} SHORT ${diag.rawShortCount}, policy identity in fingerprint ${diag.policyFingerprint}`);
       }
+
+      if (args.fullPipeline) {
+        console.log(`\n=== Full Pipeline Real PnL Phase H — ${args.executionPolicyId} ${args.approve ? "APPROVED" : "DRAFT"} — READ ONLY ===`);
+        const { runFullPipelineRealPnlDiagnostics, formatFullPipelineRealPnlReport } = await import("../lib/backtest/full-pipeline-real-pnl");
+        const fullDiag = await runFullPipelineRealPnlDiagnostics({
+          assetSymbol: args.asset,
+          timeframe: args.timeframe as any,
+          from: fromDate,
+          to: toDate,
+          markets,
+          deps,
+          smcConfig,
+          allCandlesPerMarket,
+          decisionBarsMs,
+          executionPolicyRegistryId: args.executionPolicyId,
+          approve: args.approve,
+          isSmartMoneyRunner: args.smartMoney,
+        });
+        console.log("\n" + formatFullPipelineRealPnlReport(fullDiag));
+        if (fullDiag.status === "PRE_REGISTRATION_REQUIRED") {
+          console.log(`\nFull Pipeline PRE_REGISTRATION_REQUIRED: policy ${args.executionPolicyId} not APPROVED`);
+        } else {
+          console.log(`\nFull Pipeline READY: policy ${fullDiag.policyId} trades ${fullDiag.tradesCount} coverage ${fullDiag.coverageRatio} common ${fullDiag.commonTimestampsCount} splits OOS-blind ${fullDiag.splitsReadiness?.oosIsolation.oosDoesNotInfluenceSelection}`);
+        }
+      }
     } else {
+      if (args.fullPipeline) {
+        fail("--fullPipeline requires --executionPolicy EP-1/EP-2/EP-3");
+      }
       console.log("\n=== Execution Policy Registry — available policies (no --executionPolicy supplied, no real PnL) ===");
       for (const p of listRegistryPolicies()) {
         console.log(`- ${p.id} v${p.version} status=${p.status} fingerprint=${p.fingerprint.slice(0, 48)}... required=${p.requiredEconomicFields.join(",")}`);
       }
       console.log("Supply --executionPolicy EP-1/EP-2/EP-3 to run Real PnL Runner (EP-1 0 trades baseline truthful, EP-2/EP-3 DRAFT blocked until APPROVED, use --approve to simulate approval)");
+      console.log("Add --fullPipeline to run Full Pipeline Phase H: data plane + raw SMC + EP registry + P2-A + splits OOS-blind");
     }
 
     console.log("\n=== READ ONLY — NO DB WRITES — BTC ONLY — CLI completed successfully ===");
