@@ -21,19 +21,33 @@ export default async function MarketOverview() {
 
   try {
     const { prisma } = await import("@/lib/prisma");
-    const [candles, snapshots, markets, strategies] = await Promise.all([
-      prisma.candle.count(),
-      prisma.indicatorSnapshot.count(),
-      prisma.market.count({ where: { enabled: true, status: "ACTIVE" } }),
-      prisma.strategy.findMany({ select: { enabled: true, status: true } }),
-    ]);
-    candleCount = candles;
-    snapshotCount = snapshots;
-    marketCount = markets;
-    strategiesTotal = strategies.length;
-    strategiesOnline = strategies.filter(
-      (s: { enabled: boolean; status: string }) => s.enabled && s.status === "PUBLISHED"
-    ).length;
+    let candles = 0;
+    let snapshots = 0;
+    let markets = 0;
+    let strategies: { enabled: boolean; status: string }[] = [];
+    try {
+      candles = await prisma.candle.count();
+    } catch {}
+    try {
+      snapshots = await prisma.indicatorSnapshot.count();
+    } catch {}
+    try {
+      markets = await prisma.market.count({ where: { enabled: true, status: "ACTIVE" } });
+    } catch {}
+    try {
+      const raw = await (prisma as any).strategy?.findMany?.({ select: { enabled: true, status: true } });
+      if (Array.isArray(raw)) strategies = raw as any;
+    } catch {}
+    // Build-safe: guard against Proxy mock returning null
+    if (typeof candles === "number") candleCount = candles;
+    if (typeof snapshots === "number") snapshotCount = snapshots;
+    if (typeof markets === "number") marketCount = markets;
+    if (Array.isArray(strategies)) {
+      strategiesTotal = strategies.length;
+      strategiesOnline = strategies.filter(
+        (s: { enabled: boolean; status: string }) => s.enabled && s.status === "PUBLISHED"
+      ).length;
+    }
   } catch (error) {
     console.error("[MarketOverview] Ошибка загрузки сводки:", error);
   }

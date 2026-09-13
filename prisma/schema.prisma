@@ -100,13 +100,6 @@ enum SignalSource {
   LEGACY
 }
 
-enum SignalSource {
-  LIVE_FORWARD
-  SEEDED
-  BACKTEST
-  LEGACY
-}
-
 model Signal {
   id          Int       @id @default(autoincrement())
   symbol      String

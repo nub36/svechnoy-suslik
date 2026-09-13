@@ -22,7 +22,7 @@ async function main() {
     process.exit(1);
   }
 
-  // Force safe defaults for public-top50
+  // Force safe defaults for public-top50 — ONLY BINANCE by default via ExchangeConfig
   const safeOptions = {
     ...options,
     top: options.top ?? 50,
@@ -35,6 +35,7 @@ async function main() {
     mode: (options as any).mode ?? "safe",
     minFreeMemMb: (options as any).minFreeMemMb ?? 200,
     maxLoadAvg: (options as any).maxLoadAvg ?? 2.0,
+    useExchangeConfig: true,
   };
 
   // Validate cadence — interval must be <=300000 for 5m

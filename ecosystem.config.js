@@ -154,7 +154,7 @@ module.exports = {
     {
       name: "svechnoy-suslik-public-top50",
       script: "npx",
-      args: "tsx scripts/public-top50-worker.ts --top=50 --timeframes=5m,15m,1h,4h,1d --batch-size=2 --delay=1000 --pause=10000 --incremental-limit=20 --backfill-limit=100 --concurrency=1 --interval=300000 --mode=safe --min-free-mem=200 --max-load=2.0 --confirm-large-run",
+      args: "tsx scripts/public-top50-worker.ts --top=50 --timeframes=5m,15m,1h,4h,1d --batch-size=2 --delay=1000 --pause=10000 --incremental-limit=20 --backfill-limit=100 --concurrency=1 --interval=300000 --mode=safe --min-free-mem=200 --max-load=2.0 --use-exchange-config --confirm-large-run",
       cwd: "/root/svechnoy-suslik",
       interpreter: "none",
       instances: 1,

@@ -99,11 +99,65 @@ async function getCoverageMap(
   }
 }
 
+async function getOhlcvEnabledExchanges(prisma: PrismaClient): Promise<string[]> {
+  try {
+    const configs = await (prisma as any).exchangeConfig?.findMany?.({
+      where: { ohlcvEnabled: true },
+      select: { exchange: true, priority: true },
+      orderBy: [{ priority: "desc" }, { exchange: "asc" }],
+    });
+    if (Array.isArray(configs) && configs.length > 0) {
+      return configs.map((c: any) => c.exchange);
+    }
+    // Fallback if table empty or mock: only BINANCE
+    return ["BINANCE"];
+  } catch {
+    // Table not yet migrated — default to BINANCE only for VPS safety
+    return ["BINANCE"];
+  }
+}
+
 export async function runSafeOhlcvSync(
   prisma: PrismaClient,
   options: OhlcvCliOptions
 ): Promise<SafeSyncStats> {
   const adapterByName = new Map(exchanges.map((e) => [e.name, e]));
+
+  // ExchangeConfig filtering — only for public-top50 worker, NOT for BTC dedicated worker
+  const useExchangeConfig = (options as any).useExchangeConfig === true;
+  let allowedExchanges: string[] | null = null;
+  if (useExchangeConfig) {
+    allowedExchanges = await getOhlcvEnabledExchanges(prisma);
+    console.log(`[safe] PUBLIC OHLCV EXCHANGES: ${allowedExchanges.join(", ") || "(none)"}`);
+    console.log(`[safe] ASSETS: <=${options.top ?? 50}`);
+    console.log(`[safe] CONCURRENCY: 1`);
+    if (allowedExchanges.length === 0) {
+      console.log(`[safe] No OHLCV-enabled exchanges — nothing to do. Check ExchangeConfig ohlcvEnabled.`);
+      const emptyStats: SafeSyncStats = {
+        assets: 0,
+        markets: 0,
+        tasks: 0,
+        fetched: 0,
+        written: 0,
+        created: 0,
+        updated: 0,
+        skippedInvalid: 0,
+        errors: 0,
+        batches: 0,
+        pausedDueToBackpressure: 0,
+        byExchange: {},
+        byTimeframe: {},
+        failedMarkets: [],
+      };
+      for (const ex of adapterByName.keys()) {
+        emptyStats.byExchange[ex] = { markets: 0, written: 0, errors: 0 };
+      }
+      for (const tf of options.timeframes) {
+        emptyStats.byTimeframe[tf] = { markets: 0, fetched: 0, written: 0, errors: 0 };
+      }
+      return emptyStats;
+    }
+  }
 
   // Try to lower process priority (nice)
   try {
@@ -125,6 +179,7 @@ export async function runSafeOhlcvSync(
   }>;
 
   if (options.symbol) {
+    // BTC dedicated worker — does NOT use ExchangeConfig filtering, keeps 5 markets quorum 3/5
     const single = await prisma.asset.findFirst({
       where: { symbol: options.symbol, enabled: true },
       include: {
@@ -137,17 +192,66 @@ export async function runSafeOhlcvSync(
     assets = single ? [single as any] : [];
   } else {
     const top = options.top ?? 100;
+    // Public TOP-50 uses ExchangeConfig filtering if enabled
+    const marketWhere: any = { enabled: true, status: "ACTIVE", quote: "USDT", marketType: "SPOT" };
+    if (allowedExchanges) {
+      marketWhere.exchange = { in: allowedExchanges };
+    }
+    // Main universe: rank <= top
     assets = await prisma.asset.findMany({
-      where: { enabled: true, rank: { lte: top, not: null } },
+      where: { enabled: true, archivedAt: null, rank: { lte: top, not: null } },
       orderBy: { rank: "asc" },
       take: top,
       include: {
         markets: {
-          where: { enabled: true, status: "ACTIVE", quote: "USDT", marketType: "SPOT" },
+          where: marketWhere,
           select: { id: true, exchange: true, exchangeSymbol: true, lastSyncAt: true },
         },
       },
     });
+
+    // + manually added coins if architecture supports (enabled, not archived, rank null, has at least one allowed market)
+    // Do NOT turn manual add into 5-exchange scan — filtered by allowedExchanges (BINANCE only by default)
+    if (useExchangeConfig) {
+      try {
+        const manualAssets = await prisma.asset.findMany({
+          where: {
+            enabled: true,
+            archivedAt: null,
+            rank: null,
+          },
+          include: {
+            markets: {
+              where: marketWhere,
+              select: { id: true, exchange: true, exchangeSymbol: true, lastSyncAt: true },
+            },
+          },
+        });
+        // Only include those that have at least one market after filter
+        const manualWithMarkets = (manualAssets as any[]).filter((a: any) => a.markets && a.markets.length > 0);
+        if (manualWithMarkets.length > 0) {
+          console.log(`[safe] Including ${manualWithMarkets.length} manually added coins (rank null) with allowed exchanges`);
+          // Merge, deduplicate by id
+          const existingIds = new Set(assets.map(a => a.id));
+          for (const ma of manualWithMarkets) {
+            if (!existingIds.has(ma.id)) {
+              assets.push(ma as any);
+            }
+          }
+        }
+      } catch (e) {
+        console.log(`[safe] Manual assets query failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  // Additional in-memory filter for safety when allowedExchanges is set (covers single symbol case if ever used with filter)
+  if (allowedExchanges) {
+    for (const a of assets) {
+      (a as any).markets = (a as any).markets.filter((m: any) => allowedExchanges!.includes(m.exchange));
+    }
+    // Remove assets with no markets after filter (manual add without BINANCE should not trigger 5-exchange scan)
+    assets = assets.filter((a: any) => a.markets.length > 0);
   }
 
   const allMarketIds = assets.flatMap((a) => a.markets.map((m) => m.id));

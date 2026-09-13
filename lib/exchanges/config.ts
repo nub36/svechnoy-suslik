@@ -29,7 +29,9 @@ export const DEFAULT_EXCHANGE_CONFIGS: ExchangeConfigRow[] = EXCHANGE_LIST.map((
   id: idx + 1,
   exchange: ex,
   publicEnabled: true,
-  ohlcvEnabled: true,
+  // PUBLIC Top-50 ingestion scans ONLY BINANCE by default (ohlcvEnabled=true)
+  // BTC dedicated worker does NOT use ExchangeConfig filtering, keeps 5 markets
+  ohlcvEnabled: ex === "BINANCE",
   liveEnabled: true,
   isDefault: ex === "BINANCE",
   priority: EXCHANGE_PRIORITY[ex],

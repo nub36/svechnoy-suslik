@@ -101,6 +101,7 @@ export type OhlcvCliOptions = OhlcvWorkerOptions & {
   mode: SafeMode;
   minFreeMemMb: number;
   maxLoadAvg: number;
+  useExchangeConfig?: boolean;
 };
 
 const KNOWN_OHLCV_FLAGS: ReadonlySet<string> = new Set([
@@ -123,6 +124,7 @@ const KNOWN_OHLCV_FLAGS: ReadonlySet<string> = new Set([
   "mode",
   "min-free-mem",
   "max-load",
+  "use-exchange-config",
 ]);
 
 export function wantsHelp(argv: string[]): boolean {
@@ -350,6 +352,10 @@ export function parseOhlcvArgs(
     argv.includes("--once") ||
     env.OHLCV_ONCE === "1";
 
+  const useExchangeConfig =
+    argv.includes("--use-exchange-config") ||
+    env.OHLCV_USE_EXCHANGE_CONFIG === "1";
+
   const result: OhlcvCliOptions = {
     top: parseCliNumber(
       get("top") ?? env.OHLCV_TOP,
@@ -383,6 +389,7 @@ export function parseOhlcvArgs(
     mode: parseSafeMode(get("mode") ?? env.OHLCV_MODE, "safe"),
     minFreeMemMb: parseCliNumber(get("min-free-mem") ?? env.OHLCV_MIN_FREE_MEM, 200, { name: "min-free-mem", min: 50, max: 1000 }),
     maxLoadAvg: parseFloatNumber(get("max-load") ?? env.OHLCV_MAX_LOAD, 2.0, { name: "max-load", min: 0.5, max: 10 }),
+    useExchangeConfig,
   };
   if (symbol) {
     (result as any).symbol = symbol;

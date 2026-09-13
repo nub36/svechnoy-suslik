@@ -31,10 +31,14 @@ export type TrendMode = "OFF" | "MARKET_STRUCTURE" | "EMA" | "HTF" | "COMBINED";
 export type TrendPolicy = "SCORE_BOOST" | "TIERING" | "HARD_ALIGNMENT";
 export type StrategyMode = "DISABLED" | "DRY_RUN" | "FORWARD_TEST" | "LIVE";
 
+export type SmcConfirmationCategory = "INDEPENDENT" | "DERIVED" | "CONTEXT" | "PLACEHOLDER";
+
 export type SmcConfirmationConfig = {
   enabled: boolean;
   weight: number;
   required: boolean; // true = core required, false = optional weighted
+  category: SmcConfirmationCategory;
+  description?: string;
 };
 
 export type SmcConfirmationsV2 = {
@@ -102,16 +106,31 @@ export type SmartMoneyV2Config = {
   };
 };
 
+/**
+ * Honest categorization — no double counting:
+ * INDEPENDENT: real causal SMC fact from evaluateSmc scoring (distinct reason codes)
+ * DERIVED: computed from other facts (OB+FVG overlap) — small bonus, not duplicate weight
+ * CONTEXT: market structure context (internal trend) — not primary signal
+ * PLACEHOLDER: not yet independently exposed (displacement) or duplicate of another fact (choch shares internalStructure)
+ *
+ * Displacement: evaluateSmc returns displacements[] but scoring does NOT use it as separate reason.
+ * Until displacement has its own reason code, it is PLACEHOLDER disabled.
+ *
+ * CHOCH: shares INTERNAL_TREND with internalStructure — to avoid double weight, choch is PLACEHOLDER disabled by default.
+ * internalStructure is the canonical CONTEXT for internal phase.
+ *
+ * Confluence: OB_FVG_CONFLUENCE is deliberate overlap bonus (5 points) from scoring.ts — DERIVED, not independent.
+ */
 export const DEFAULT_CONFIRMATIONS: SmcConfirmationsV2 = {
-  bos: { enabled: true, weight: 20, required: true },
-  choch: { enabled: true, weight: 15, required: false },
-  orderBlock: { enabled: true, weight: 15, required: true },
-  fvg: { enabled: true, weight: 10, required: false },
-  liquiditySweep: { enabled: true, weight: 10, required: false },
-  displacement: { enabled: true, weight: 10, required: false },
-  rangePosition: { enabled: true, weight: 10, required: false },
-  confluence: { enabled: true, weight: 5, required: false },
-  internalStructure: { enabled: true, weight: 5, required: false },
+  bos: { enabled: true, weight: 20, required: true, category: "INDEPENDENT", description: "Break of Structure — SWING_TREND + RECENT_SWING_BOS" },
+  choch: { enabled: false, weight: 0, required: false, category: "PLACEHOLDER", description: "Change of Character — duplicate of internalStructure (INTERNAL_TREND), disabled to avoid double count" },
+  orderBlock: { enabled: true, weight: 20, required: true, category: "INDEPENDENT", description: "Order Block — SWING_ORDER_BLOCK (or INTERNAL as fallback)" },
+  fvg: { enabled: true, weight: 15, required: false, category: "INDEPENDENT", description: "Fair Value Gap — FVG" },
+  liquiditySweep: { enabled: true, weight: 15, required: false, category: "INDEPENDENT", description: "Liquidity Sweep — LIQUIDITY_SWEEP" },
+  displacement: { enabled: false, weight: 0, required: false, category: "PLACEHOLDER", description: "Displacement — evaluateSmc exposes displacements[] but scoring has no DISPLACEMENT reason yet, placeholder until exposed" },
+  rangePosition: { enabled: true, weight: 15, required: false, category: "INDEPENDENT", description: "Premium/Discount — RANGE_POSITION" },
+  confluence: { enabled: true, weight: 5, required: false, category: "DERIVED", description: "OB+FVG confluence — OB_FVG_CONFLUENCE overlap bonus, derived, not duplicate weight" },
+  internalStructure: { enabled: true, weight: 10, required: false, category: "CONTEXT", description: "Internal structure bias — INTERNAL_TREND context" },
 };
 
 export const DEFAULT_TREND: TrendContextV2 = {
@@ -185,10 +204,14 @@ export function normalizeV2Config(raw: unknown): SmartMoneyV2Config {
     const c = conf[key] as Record<string, unknown> | undefined;
     const def = (DEFAULT_CONFIRMATIONS as any)[key] as SmcConfirmationConfig;
     if (!c) return { ...def };
+    const catRaw = (c as any).category;
+    const category = typeof catRaw === "string" && ["INDEPENDENT","DERIVED","CONTEXT","PLACEHOLDER"].includes(catRaw) ? catRaw as SmcConfirmationCategory : def.category;
     return {
       enabled: typeof c.enabled === "boolean" ? c.enabled : def.enabled,
       weight: typeof c.weight === "number" ? c.weight : def.weight,
       required: typeof c.required === "boolean" ? c.required : def.required,
+      category,
+      description: typeof (c as any).description === "string" ? (c as any).description : def.description,
     };
   }
 
@@ -302,11 +325,29 @@ export function validateV2Config(config: SmartMoneyV2Config, timeframes: string[
   }
   if (sum !== 100) errors.push(`weights sum must be 100 got ${sum}`);
 
-  // Confirmations
+  // Confirmations — check category and avoid double-count placeholders as required
   for (const [key, c] of Object.entries(config.confirmations)) {
     if (typeof c.enabled !== "boolean") errors.push(`confirmations.${key}.enabled: boolean`);
     if (!Number.isInteger(c.weight) || c.weight < 0 || c.weight > 100) errors.push(`confirmations.${key}.weight: 0..100`);
     if (typeof c.required !== "boolean") errors.push(`confirmations.${key}.required: boolean`);
+    if (!["INDEPENDENT","DERIVED","CONTEXT","PLACEHOLDER"].includes((c as any).category)) errors.push(`confirmations.${key}.category: INDEPENDENT/DERIVED/CONTEXT/PLACEHOLDER got ${(c as any).category}`);
+    if ((c as any).category === "PLACEHOLDER" && c.enabled && c.weight > 0) {
+      errors.push(`confirmations.${key}: PLACEHOLDER should be disabled or weight 0 (currently enabled weight ${c.weight})`);
+    }
+    if ((c as any).category === "PLACEHOLDER" && c.required) {
+      errors.push(`confirmations.${key}: PLACEHOLDER cannot be required`);
+    }
+    if ((c as any).category === "DERIVED" && c.required) {
+      errors.push(`confirmations.${key}: DERIVED confluence should not be required (bonus only)`);
+    }
+  }
+  // Double-count protection: choch and internalStructure share INTERNAL_TREND — only one should be enabled
+  if (config.confirmations.choch.enabled && config.confirmations.internalStructure.enabled) {
+    errors.push("confirmations double count: choch and internalStructure both enabled but share INTERNAL_TREND — disable choch (PLACEHOLDER)");
+  }
+  // Displacement placeholder should be disabled until real DISPLACEMENT reason exists
+  if (config.confirmations.displacement.enabled) {
+    errors.push("confirmations.displacement: PLACEHOLDER enabled — displacement has no DISPLACEMENT reason in scoring yet, disable until exposed");
   }
 
   // Trend
@@ -355,15 +396,20 @@ export function validateV2Config(config: SmartMoneyV2Config, timeframes: string[
   return errors;
 }
 
-// V2 evaluation on reference exchange only
+// V2 evaluation on reference exchange only — honest N/M, categories exposed
 export type V2EvaluationResult = {
   direction: Direction;
   longScore: number;
   shortScore: number;
-  confirmations: { code: string; label: string; longPoints: number; shortPoints: number; enabled: boolean; required: boolean }[];
+  confirmations: { code: string; label: string; longPoints: number; shortPoints: number; enabled: boolean; required: boolean; category: SmcConfirmationCategory; v2Key: keyof SmcConfirmationsV2; smcCode: string }[];
   trendContext: { mode: TrendMode; direction: "UP" | "DOWN" | "NEUTRAL"; boost: number };
   totalConfirmations: number;
   metConfirmations: number;
+  // Breakdown for UI N/M honesty
+  independentTotal: number;
+  independentMet: number;
+  derivedTotal: number;
+  contextTotal: number;
   referenceExchange: string;
   symbol: string;
   timeframe: SmcTimeframe;
@@ -407,14 +453,19 @@ export function evaluateV2WithCandles(
   }
 
   if (!smcEval.availability.evaluable) {
+    const enabled = Object.entries(config.confirmations).filter(([_, c]) => c.enabled);
     return {
       direction: "NEUTRAL" as Direction,
       longScore: 0,
       shortScore: 0,
       confirmations: [],
       trendContext: { mode: config.trend.mode, direction: "NEUTRAL", boost: 0 },
-      totalConfirmations: 0,
+      totalConfirmations: enabled.length,
       metConfirmations: 0,
+      independentTotal: enabled.filter(([_, c]) => c.category === "INDEPENDENT").length,
+      independentMet: 0,
+      derivedTotal: enabled.filter(([_, c]) => c.category === "DERIVED").length,
+      contextTotal: enabled.filter(([_, c]) => c.category === "CONTEXT").length,
       referenceExchange: config.referenceExchange,
       symbol: config.symbol,
       timeframe: config.timeframe,
@@ -423,34 +474,43 @@ export function evaluateV2WithCandles(
     };
   }
 
-  // Map SMC reasons to V2 confirmations
-  const confirmationMap: Record<string, { code: string; label: string }> = {
-    SWING_TREND: { code: "BOS", label: "Break of Structure — swing trend bias" },
-    RECENT_SWING_BOS: { code: "BOS", label: "Recent swing BOS" },
-    INTERNAL_TREND: { code: "CHOCH", label: "Internal structure / CHOCH" },
-    LIQUIDITY_SWEEP: { code: "LIQUIDITY_SWEEP", label: "Liquidity Sweep" },
-    SWING_ORDER_BLOCK: { code: "ORDER_BLOCK", label: "Swing Order Block" },
-    INTERNAL_ORDER_BLOCK: { code: "ORDER_BLOCK", label: "Internal Order Block" },
-    FVG: { code: "FVG", label: "Fair Value Gap" },
-    RANGE_POSITION: { code: "RANGE_POSITION", label: "Premium/Discount range position" },
-    OB_FVG_CONFLUENCE: { code: "CONFLUENCE", label: "OB + FVG confluence" },
+  // Honest mapping — no proxy, no double counting
+  // Each SMC reason maps to exactly one V2 confirmation key
+  // Displacement is NOT mapped from SWING_TREND — it would be separate if exposed, currently PLACEHOLDER
+  const confirmationMap: Record<string, { code: string; label: string; v2Key: keyof SmcConfirmationsV2; category: SmcConfirmationCategory }> = {
+    SWING_TREND: { code: "BOS", label: "Break of Structure — swing trend bias", v2Key: "bos", category: "INDEPENDENT" },
+    RECENT_SWING_BOS: { code: "BOS", label: "Recent swing BOS", v2Key: "bos", category: "INDEPENDENT" },
+    INTERNAL_TREND: { code: "INTERNAL_STRUCTURE", label: "Internal structure bias", v2Key: "internalStructure", category: "CONTEXT" },
+    LIQUIDITY_SWEEP: { code: "LIQUIDITY_SWEEP", label: "Liquidity Sweep", v2Key: "liquiditySweep", category: "INDEPENDENT" },
+    SWING_ORDER_BLOCK: { code: "ORDER_BLOCK", label: "Swing Order Block", v2Key: "orderBlock", category: "INDEPENDENT" },
+    INTERNAL_ORDER_BLOCK: { code: "ORDER_BLOCK", label: "Internal Order Block", v2Key: "orderBlock", category: "INDEPENDENT" },
+    FVG: { code: "FVG", label: "Fair Value Gap", v2Key: "fvg", category: "INDEPENDENT" },
+    RANGE_POSITION: { code: "RANGE_POSITION", label: "Premium/Discount range position", v2Key: "rangePosition", category: "INDEPENDENT" },
+    OB_FVG_CONFLUENCE: { code: "CONFLUENCE", label: "OB + FVG confluence", v2Key: "confluence", category: "DERIVED" },
   };
 
-  const confirmations = smcEval.reasons.map(r => {
-    const mapped = confirmationMap[r.code] || { code: r.code, label: r.label };
-    // Find matching V2 confirmation config
-    let v2Key: keyof SmcConfirmationsV2 = "bos";
-    if (r.code.includes("SWING_TREND") || r.code.includes("RECENT_SWING_BOS")) v2Key = "bos";
-    else if (r.code.includes("INTERNAL_TREND")) v2Key = "internalStructure";
-    else if (r.code.includes("LIQUIDITY_SWEEP")) v2Key = "liquiditySweep";
-    else if (r.code.includes("ORDER_BLOCK")) v2Key = "orderBlock";
-    else if (r.code === "FVG") v2Key = "fvg";
-    else if (r.code === "RANGE_POSITION") v2Key = "rangePosition";
-    else if (r.code === "OB_FVG_CONFLUENCE") v2Key = "confluence";
-    else v2Key = "bos";
+  // Deduplicate by v2Key to avoid double counting same underlying fact
+  // e.g., SWING_TREND + RECENT_SWING_BOS both -> bos should count once
+  // SWING_ORDER_BLOCK + INTERNAL_ORDER_BLOCK both -> orderBlock counts once
+  const metByV2Key = new Map<keyof SmcConfirmationsV2, { long: number; short: number; codes: string[] }>();
 
-    // For displacement, we use SWING_TREND + recent BOS as proxy
-    const v2Conf = config.confirmations[v2Key] || { enabled: true, weight: 10, required: false };
+  const confirmations = smcEval.reasons.map(r => {
+    const mapped = confirmationMap[r.code] || { code: r.code, label: r.label, v2Key: "bos" as keyof SmcConfirmationsV2, category: "INDEPENDENT" as SmcConfirmationCategory };
+    const v2Key = mapped.v2Key;
+    const v2Conf = config.confirmations[v2Key] || { enabled: true, weight: 10, required: false, category: "INDEPENDENT" as SmcConfirmationCategory };
+
+    // Track met by v2Key (max points)
+    if (v2Conf.enabled && (r.longPoints > 0 || r.shortPoints > 0)) {
+      const existing = metByV2Key.get(v2Key);
+      if (!existing) {
+        metByV2Key.set(v2Key, { long: r.longPoints, short: r.shortPoints, codes: [r.code] });
+      } else {
+        // Keep max points, merge codes
+        existing.long = Math.max(existing.long, r.longPoints);
+        existing.short = Math.max(existing.short, r.shortPoints);
+        if (!existing.codes.includes(r.code)) existing.codes.push(r.code);
+      }
+    }
 
     return {
       code: mapped.code,
@@ -459,16 +519,36 @@ export function evaluateV2WithCandles(
       shortPoints: r.shortPoints,
       enabled: v2Conf.enabled,
       required: v2Conf.required,
+      category: v2Conf.category,
+      v2Key,
+      smcCode: r.code,
     };
   });
 
-  // Count met confirmations (points >0 and enabled)
-  const enabledConfs = Object.values(config.confirmations).filter(c => c.enabled);
-  const totalConfirmations = enabledConfs.length;
-  let metConfirmations = 0;
-  for (const c of confirmations) {
-    if (c.enabled && (c.longPoints > 0 || c.shortPoints > 0)) metConfirmations++;
+  // Count met confirmations by distinct v2Key, not by reason count — avoids double counting
+  // Only INDEPENDENT + CONTEXT + DERIVED count if enabled; PLACEHOLDER disabled are excluded
+  const enabledConfs = Object.entries(config.confirmations).filter(([_, c]) => c.enabled);
+  const totalConfirmations = enabledConfs.length; // real N/M, not fixed 9
+
+  // For met count: distinct v2Keys that have points>0
+  // This automatically deduplicates BOS (SWING_TREND + RECENT_SWING_BOS) and ORDER_BLOCK (SWING + INTERNAL)
+  let metConfirmations = metByV2Key.size;
+
+  // Special handling for confluence: derived confirmation should only count if both OB and FVG are met
+  // Prevents confluence from silently duplicating OB+FVG weights
+  if (metByV2Key.has("confluence")) {
+    const hasOB = metByV2Key.has("orderBlock");
+    const hasFVG = metByV2Key.has("fvg");
+    if (!hasOB || !hasFVG) {
+      // Confluence without both parents is not valid — remove from met count
+      // It is bonus only when OB and FVG overlap
+      metByV2Key.delete("confluence");
+      metConfirmations = metByV2Key.size;
+    }
   }
+
+  // Displacement placeholder: if enabled but no displacement fact, it stays unmet — honest
+  // CHOCH placeholder: disabled by default, shares INTERNAL_TREND, so not double counted
 
   // Trend context
   let trendDir: "UP" | "DOWN" | "NEUTRAL" = "NEUTRAL";
@@ -518,6 +598,7 @@ export function evaluateV2WithCandles(
     } else if (config.trend.policy === "HARD_ALIGNMENT") {
       // Hard alignment: if trend disagrees, force NEUTRAL
       if (trendDir === "UP" && smcEval.direction === "SHORT") {
+        const enabled = Object.entries(config.confirmations).filter(([_, c]) => c.enabled);
         return {
           direction: "NEUTRAL" as Direction,
           longScore: smcEval.longScore ?? 0,
@@ -526,6 +607,10 @@ export function evaluateV2WithCandles(
           trendContext: { mode: config.trend.mode, direction: trendDir, boost: -100 },
           totalConfirmations,
           metConfirmations,
+          independentTotal: enabled.filter(([_, c]) => c.category === "INDEPENDENT").length,
+          independentMet: Array.from(metByV2Key.keys()).filter(k => config.confirmations[k].category === "INDEPENDENT").length,
+          derivedTotal: enabled.filter(([_, c]) => c.category === "DERIVED").length,
+          contextTotal: enabled.filter(([_, c]) => c.category === "CONTEXT").length,
           referenceExchange: config.referenceExchange,
           symbol: config.symbol,
           timeframe: config.timeframe,
@@ -534,6 +619,7 @@ export function evaluateV2WithCandles(
         };
       }
       if (trendDir === "DOWN" && smcEval.direction === "LONG") {
+        const enabled = Object.entries(config.confirmations).filter(([_, c]) => c.enabled);
         return {
           direction: "NEUTRAL" as Direction,
           longScore: smcEval.longScore ?? 0,
@@ -542,6 +628,10 @@ export function evaluateV2WithCandles(
           trendContext: { mode: config.trend.mode, direction: trendDir, boost: -100 },
           totalConfirmations,
           metConfirmations,
+          independentTotal: enabled.filter(([_, c]) => c.category === "INDEPENDENT").length,
+          independentMet: Array.from(metByV2Key.keys()).filter(k => config.confirmations[k].category === "INDEPENDENT").length,
+          derivedTotal: enabled.filter(([_, c]) => c.category === "DERIVED").length,
+          contextTotal: enabled.filter(([_, c]) => c.category === "CONTEXT").length,
           referenceExchange: config.referenceExchange,
           symbol: config.symbol,
           timeframe: config.timeframe,
@@ -565,28 +655,41 @@ export function evaluateV2WithCandles(
     }
   }
 
-  // Check required core conditions
-  const requiredConfs = Object.entries(config.confirmations).filter(([_, c]) => c.required && c.enabled);
+  // Check required core conditions — honest, no proxy, no double count
+  // PLACEHOLDER confirmations (displacement, choch) are disabled by default, so they never appear as required
+  // DERIVED confluence should never be required (it's bonus)
+  const requiredConfs = Object.entries(config.confirmations).filter(([_, c]) => c.required && c.enabled && c.category !== "PLACEHOLDER");
   let requiredMet = true;
+  const seenRequiredCodes = new Set<string>(); // avoid double counting same SMC code for multiple V2 keys
   for (const [key] of requiredConfs) {
-    // Map key to SMC reason
+    // Honest mapping — no SWING_TREND proxy for displacement
     const codeMap: Record<string, string[]> = {
       bos: ["SWING_TREND", "RECENT_SWING_BOS"],
-      choch: ["INTERNAL_TREND"],
+      choch: [], // PLACEHOLDER disabled — shares INTERNAL_TREND, do not require separately
       orderBlock: ["SWING_ORDER_BLOCK", "INTERNAL_ORDER_BLOCK"],
       fvg: ["FVG"],
       liquiditySweep: ["LIQUIDITY_SWEEP"],
-      displacement: ["SWING_TREND"],
+      displacement: [], // PLACEHOLDER — no DISPLACEMENT reason in scoring yet, cannot be required
       rangePosition: ["RANGE_POSITION"],
-      confluence: ["OB_FVG_CONFLUENCE"],
+      confluence: [], // DERIVED — should not be required, it's bonus
       internalStructure: ["INTERNAL_TREND"],
     };
     const codes = codeMap[key] || [];
-    const hasPoints = confirmations.some(c => codes.includes(c.code) && (c.longPoints > 0 || c.shortPoints > 0));
+    if (codes.length === 0) {
+      // If no codes (placeholder/derived), skip — it cannot be required honestly
+      continue;
+    }
+    // Avoid counting same SMC code twice for different V2 keys (e.g., bos and internalStructure are distinct, but choch would duplicate internalStructure)
+    const hasPoints = confirmations.some(c => {
+      if (seenRequiredCodes.has(c.smcCode)) return false; // already counted for another required key
+      return codes.includes(c.smcCode) && (c.longPoints > 0 || c.shortPoints > 0);
+    });
     if (!hasPoints) {
       requiredMet = false;
       break;
     }
+    // Mark codes as seen to prevent double counting
+    for (const code of codes) seenRequiredCodes.add(code);
   }
 
   let finalDirection: Direction = smcEval.direction as Direction;
@@ -602,6 +705,12 @@ export function evaluateV2WithCandles(
     finalDirection = "NEUTRAL" as Direction;
   }
 
+  const enabledList = Object.entries(config.confirmations).filter(([_, c]) => c.enabled);
+  const independentTotal = enabledList.filter(([_, c]) => c.category === "INDEPENDENT").length;
+  const independentMet = Array.from(metByV2Key.keys()).filter(k => config.confirmations[k].category === "INDEPENDENT").length;
+  const derivedTotal = enabledList.filter(([_, c]) => c.category === "DERIVED").length;
+  const contextTotal = enabledList.filter(([_, c]) => c.category === "CONTEXT").length;
+
   return {
     direction: finalDirection,
     longScore,
@@ -610,6 +719,10 @@ export function evaluateV2WithCandles(
     trendContext: { mode: config.trend.mode, direction: trendDir, boost: trendBoost },
     totalConfirmations,
     metConfirmations,
+    independentTotal,
+    independentMet,
+    derivedTotal,
+    contextTotal,
     referenceExchange: config.referenceExchange,
     symbol: config.symbol,
     timeframe: config.timeframe,

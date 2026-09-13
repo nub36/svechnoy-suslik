@@ -26,14 +26,17 @@ CREATE INDEX IF NOT EXISTS "ExchangeConfig_publicEnabled_idx" ON "ExchangeConfig
 CREATE INDEX IF NOT EXISTS "ExchangeConfig_priority_idx" ON "ExchangeConfig"("priority");
 CREATE INDEX IF NOT EXISTS "ExchangeConfig_isDefault_idx" ON "ExchangeConfig"("isDefault");
 
--- Seed default exchange configs: BINANCE default true priority 100, others 90..60
+-- Seed default exchange configs: BINANCE default true priority 100, others ohlcvEnabled=false for VPS 2GB
+-- PUBLIC Top-50 ingestion scans ONLY BINANCE by default (ohlcvEnabled=true)
+-- Admin can manually enable OHLCV for other exchanges later
+-- BTC dedicated worker does NOT use ExchangeConfig filtering, keeps 5 markets quorum 3/5
 INSERT INTO "ExchangeConfig" ("exchange", "publicEnabled", "ohlcvEnabled", "liveEnabled", "isDefault", "priority")
 VALUES 
   ('BINANCE', true, true, true, true, 100),
-  ('BYBIT', true, true, true, false, 90),
-  ('GATE', true, true, true, false, 80),
-  ('KUCOIN', true, true, true, false, 70),
-  ('BINGX', true, true, true, false, 60)
+  ('BYBIT', true, false, true, false, 90),
+  ('GATE', true, false, true, false, 80),
+  ('KUCOIN', true, false, true, false, 70),
+  ('BINGX', true, false, true, false, 60)
 ON CONFLICT ("exchange") DO NOTHING;
 
 -- StrategyResearchResult: store V2 research metrics

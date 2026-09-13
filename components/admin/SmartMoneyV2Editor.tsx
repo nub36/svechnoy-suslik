@@ -85,19 +85,33 @@ function ConfirmationRow({
   config: SmcConfirmationConfig;
   onChange: (c: SmcConfirmationConfig) => void;
 }) {
+  const categoryColor: Record<string, string> = {
+    INDEPENDENT: "#059669",
+    DERIVED: "#d97706",
+    CONTEXT: "#2563eb",
+    PLACEHOLDER: "#6b7280",
+  };
+  const categoryLabel: Record<string, string> = {
+    INDEPENDENT: "INDEPENDENT",
+    DERIVED: "DERIVED (bonus)",
+    CONTEXT: "CONTEXT",
+    PLACEHOLDER: "PLACEHOLDER",
+  };
   return (
-    <div style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12, background: config.enabled ? "#fff" : "#f9fafb" }}>
+    <div style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12, background: config.enabled ? "#fff" : "#f9fafb", opacity: config.category === "PLACEHOLDER" && !config.enabled ? 0.6 : 1 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
         <div>
           <b>{label}</b> <small style={{ color: "#6b7280" }}>{code}</small>
+          <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, color: "#fff", background: categoryColor[config.category] || "#6b7280", padding: "2px 6px", borderRadius: 4 }}>{categoryLabel[config.category] || config.category}</span>
           <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>{description}</div>
+          {config.description && <div style={{ fontSize: 11, color: "#374151", marginTop: 4, fontStyle: "italic" }}>{config.description}</div>}
         </div>
         <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <input type="checkbox" checked={config.enabled} onChange={(e) => onChange({ ...config, enabled: e.target.checked })} />
+          <input type="checkbox" checked={config.enabled} onChange={(e) => onChange({ ...config, enabled: e.target.checked })} disabled={config.category === "PLACEHOLDER" && config.weight===0} />
           <span style={{ fontSize: 13 }}>{config.enabled ? "Вкл" : "Выкл"}</span>
         </label>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={{ fontSize: 12 }}>Вес</span>
           <input
@@ -115,10 +129,23 @@ function ConfirmationRow({
           <select
             value={config.required ? "required" : "optional"}
             onChange={(e) => onChange({ ...config, required: e.target.value === "required" })}
-            disabled={!config.enabled}
+            disabled={!config.enabled || config.category === "PLACEHOLDER" || config.category === "DERIVED"}
           >
             <option value="required">Обязательно (core)</option>
             <option value="optional">Опционально (weighted)</option>
+          </select>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 12 }}>Категория</span>
+          <select
+            value={config.category}
+            onChange={(e) => onChange({ ...config, category: e.target.value as any })}
+            disabled={true}
+          >
+            <option value="INDEPENDENT">INDEPENDENT</option>
+            <option value="DERIVED">DERIVED</option>
+            <option value="CONTEXT">CONTEXT</option>
+            <option value="PLACEHOLDER">PLACEHOLDER</option>
           </select>
         </label>
       </div>
@@ -251,7 +278,7 @@ export default function SmartMoneyV2Editor({ strategy }: Props) {
           <h1>{strategy.name} — Smart Money V2</h1>
           {strategy.description && <p>{strategy.description}</p>}
           <p className="muted" style={{ marginTop: 8, fontSize: 13 }}>
-            V2 • Референс {config.referenceExchange} • {config.symbol} • TF {config.timeframe} • Порог {config.minimumSignalScore} • Веса Σ={weightSum} • Подтверждения {Object.values(config.confirmations).filter(c => c.enabled).length}/{Object.keys(config.confirmations).length}
+            V2 • Референс {config.referenceExchange} • {config.symbol} • TF {config.timeframe} • Порог {config.minimumSignalScore} • Веса Σ={weightSum} • Подтверждения {Object.values(config.confirmations).filter(c => c.enabled).length} активных / {Object.keys(config.confirmations).length} всего (INDEPENDENT {Object.values(config.confirmations).filter(c => c.enabled && (c as any).category==="INDEPENDENT").length}, DERIVED {Object.values(config.confirmations).filter(c => c.enabled && (c as any).category==="DERIVED").length}, CONTEXT {Object.values(config.confirmations).filter(c => c.enabled && (c as any).category==="CONTEXT").length}, PLACEHOLDER {Object.values(config.confirmations).filter(c => (c as any).category==="PLACEHOLDER").length} disabled)
           </p>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
