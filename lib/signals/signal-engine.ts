@@ -468,6 +468,16 @@ async function runSmartMoneyEngine(opts: {
 
   console.log(`\n=== WRITE GUARD AND === flag=${flagEnabled} env=${envEnabled} => allowed=${writeAllowed}`);
 
+  // Helper to detect unavailable status for same-horizon provisional logic
+  function isUnavailableStatus(s: string | null | undefined): boolean {
+    if (!s) return false;
+    const u = s.toUpperCase();
+    return u.includes("CANNOT") || u.includes("DATA_UNAVAILABLE") || u.includes("QUORUM") || u.includes("FUTURE") || u.includes("STALE");
+  }
+  function isEvaluableAggregate(a: AggregateState): boolean {
+    return a === "NEUTRAL" || a === "LONG" || a === "SHORT";
+  }
+
   // Handle idempotent and refuse cases
   if (transition.action === "NOOP_SAME_HORIZON") {
     console.log(`Idempotent no-op — same horizon already evaluated, no state mutation, no signal`);
@@ -491,13 +501,16 @@ async function runSmartMoneyEngine(opts: {
       result.neutralGroups++;
       return;
     }
-    // Update only lastEvaluated, preserve aggregateState
+    // Update only lastEvaluated, preserve aggregateState — but same-horizon provisional idempotent
     try {
       await prisma.$transaction(async (tx: any) => {
         const existing = await tx.strategySignalState.findUnique({ where: { strategyId_symbol_timeframe: { strategyId: strategy.id, symbol, timeframe } } });
         if (existing) {
-          // Check idempotency inside transaction
+          // Same-horizon: if already finalized evaluable, do NOT overwrite with provisional unavailable (preserve finalized)
+          // If already provisional unavailable same horizon, NOOP to avoid churn
           if (existing.lastEvaluatedCandleTime && existing.lastEvaluatedCandleTime.getTime() === transition.currentCandleTime.getTime()) {
+            // If existing was evaluable finalized, keep it, don't overwrite with unavailable
+            // If existing was already unavailable provisional, idempotent NOOP
             return;
           }
           if (existing.lastEvaluatedCandleTime && transition.currentCandleTime.getTime() < existing.lastEvaluatedCandleTime.getTime()) {
@@ -512,7 +525,6 @@ async function runSmartMoneyEngine(opts: {
             },
           });
         } else {
-          // No state yet and current is unavailable — bootstrap as NEUTRAL? Actually preserve null, but we should bootstrap NEUTRAL without signal
           await tx.strategySignalState.create({
             data: {
               strategyId: strategy.id,
@@ -557,12 +569,21 @@ async function runSmartMoneyEngine(opts: {
       return;
     }
 
-    // Live state-only update
+    // Live state-only update — FIX: allow same-horizon re-evaluation if previous was provisional unavailable and current is evaluable
     try {
       await prisma.$transaction(async (tx: any) => {
         const existing = await tx.strategySignalState.findUnique({ where: { strategyId_symbol_timeframe: { strategyId: strategy.id, symbol, timeframe } } });
         if (existing) {
-          if (existing.lastEvaluatedCandleTime && existing.lastEvaluatedCandleTime.getTime() === transition.currentCandleTime.getTime()) return;
+          if (existing.lastEvaluatedCandleTime && existing.lastEvaluatedCandleTime.getTime() === transition.currentCandleTime.getTime()) {
+            // If previous was provisional unavailable and current is evaluable (NEUTRAL/LONG/SHORT), allow re-evaluation (don't NOOP)
+            const prevWasUnavailable = isUnavailableStatus(existing.lastEvaluationStatus);
+            const currIsEvaluable = isEvaluableAggregate(currentAggregate);
+            if (prevWasUnavailable && currIsEvaluable) {
+              // allow — provisional 16:15 QUORUM_NOT_MET -> evaluable 16:15 SHORT/NEUTRAL must be processed
+            } else {
+              return; // idempotent NOOP for finalized or repeated unavailable
+            }
+          }
           if (existing.lastEvaluatedCandleTime && transition.currentCandleTime.getTime() < existing.lastEvaluatedCandleTime.getTime()) throw new Error("Refuse older horizon");
           await tx.strategySignalState.update({
             where: { id: existing.id },
@@ -633,25 +654,36 @@ async function runSmartMoneyEngine(opts: {
     return;
   }
 
-  // Transactional write: Signal + Outcome + State update in ONE transaction — STRICT ATOMICITY
+  // Transactional write: Signal + Outcome + State update in ONE transaction — STRICT ATOMICITY + provisional fix
   // Either all commit or all rollback. No "backfillable" Signal if Outcome fails.
-  console.log(`\nLIVE WRITE ALLOWED — STRICT ATOMIC transactional emit: Signal+Outcome+State in ONE transaction`);
+  // FIX: same-horizon provisional unavailable -> evaluable must be allowed, not blocked as NOOP
+  console.log(`\nLIVE WRITE ALLOWED — STRICT ATOMIC transactional emit: Signal+Outcome+State in ONE transaction (provisional fix)`);
   try {
     await prisma.$transaction(async (tx: any) => {
-      // Re-check state inside transaction for concurrency
+      // Re-check state inside transaction for concurrency — with provisional semantics
       const existingState = await tx.strategySignalState.findUnique({ where: { strategyId_symbol_timeframe: { strategyId: strategy.id, symbol, timeframe } } });
       if (existingState) {
         if (existingState.lastEvaluatedCandleTime && existingState.lastEvaluatedCandleTime.getTime() === transition.currentCandleTime.getTime()) {
-          console.log(`  Concurrent same horizon already processed — idempotent no-op inside tx`);
-          // Throw P2002-like to be classified as duplicate outside? Instead return to cause no-op but still need to avoid partial.
-          // We return early — no Signal created, so no partial, safe.
-          return;
+          const prevWasUnavailable = isUnavailableStatus(existingState.lastEvaluationStatus);
+          const currIsEvaluable = isEvaluableAggregate(currentAggregate);
+          if (prevWasUnavailable && currIsEvaluable) {
+            // Allow re-evaluation: provisional 16:15 QUORUM_NOT_MET -> 16:15 SHORT must emit
+            console.log(`  Same horizon ${transition.currentCandleTime.toISOString()} but prev was provisional ${existingState.lastEvaluationStatus} -> evaluable ${currentAggregate}: allowing re-evaluation (fix)`);
+          } else {
+            console.log(`  Concurrent same horizon already processed — idempotent no-op inside tx (prevStatus=${existingState.lastEvaluationStatus})`);
+            return;
+          }
         }
         if (existingState.lastEvaluatedCandleTime && transition.currentCandleTime.getTime() < existingState.lastEvaluatedCandleTime.getTime()) {
           throw new Error(`Refuse older horizon inside tx`);
         }
         if (existingState.aggregateState === currentAggregate && existingState.lastSignalCandleTime && existingState.lastSignalCandleTime.getTime() === candidate.signalCandleTime.getTime()) {
+          // But if previous was provisional unavailable, this duplicate check should not block if we are now evaluable and previous had no signal?
+          // If lastSignalCandleTime == candidate time, it means we already emitted for this candle, so skip
+          // However if previous evaluation was provisional unavailable, lastSignalCandleTime would be from earlier horizon, not this one, so this check is safe
           console.log(`  Duplicate signal already exists for same candle — skip inside tx`);
+          // Additional guard: if existing lastEvaluationStatus was unavailable, this duplicate may be false positive? But if lastSignalCandleTime == candidate time, it means signal already exists, so safe to skip
+          // To be extra safe, check if existing lastEvaluationStatus was unavailable -> allow? But signal existence means already emitted, so skip
           return;
         }
       }

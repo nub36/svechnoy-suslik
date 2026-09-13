@@ -92,22 +92,40 @@ export function computeEdgeTransition(opts: {
 
   const previousState = previousStateRow ? (normalizeAggregate(previousStateRow.aggregateState) as AggregateState) : null;
   const lastEvaluated = previousStateRow?.lastEvaluatedCandleTime || null;
+  const previousLastEvalStatusRaw = previousStateRow?.lastEvaluationStatus || null;
+  const previousLastEvalStatus: AggregateState | null = previousLastEvalStatusRaw ? normalizeAggregate(previousLastEvalStatusRaw) : null;
 
-  // Idempotent: same horizon twice => no-op
+  // Same-horizon handling with provisional/unavailable semantics — FIX for production bug 16:15 QUORUM_NOT_MET -> SHORT
+  // If lastEvaluated == currentCandleTime:
+  //   - If previous evaluation was provisional/unavailable (QUORUM_NOT_MET, DATA_UNAVAILABLE, CANNOT_EVALUATE, FUTURE_HORIZON, ABSOLUTE_STALE)
+  //     and current is evaluable (NEUTRAL/LONG/SHORT), MUST re-evaluate (do NOT NOOP)
+  //   - Otherwise same horizon is already finalized/evaluable or repeated unavailable => NOOP
   if (lastEvaluated && currentCandleTime.getTime() === lastEvaluated.getTime()) {
-    return {
-      previousState,
-      currentAggregate,
-      currentCandleTime,
-      action: "NOOP_SAME_HORIZON",
-      shouldEmit: false,
-      emitDirection: null,
-      triggerType: null,
-      reason: `Idempotent no-op: lastEvaluated ${lastEvaluated.toISOString()} == current ${currentCandleTime.toISOString()}`,
-    };
+    const prevWasUnavailable = previousLastEvalStatus ? isUnavailable(previousLastEvalStatus) : false;
+    const currIsUnavailable = isUnavailable(currentAggregate);
+
+    if (prevWasUnavailable && !currIsUnavailable) {
+      // Allow re-evaluation: provisional 16:15 QUORUM_NOT_MET -> evaluable 16:15 SHORT must be processed
+      // Do NOT return NOOP, continue to normal transition logic
+    } else {
+      // Cases:
+      // - evaluable -> evaluable same horizon => already finalized, NOOP
+      // - unavailable -> unavailable same horizon => already attempted provisional, NOOP to avoid churn (preserves previous preserved aggregate)
+      // - evaluable -> unavailable same horizon => finalized should not be overwritten by provisional, NOOP (preserves finalized)
+      return {
+        previousState,
+        currentAggregate,
+        currentCandleTime,
+        action: "NOOP_SAME_HORIZON",
+        shouldEmit: false,
+        emitDirection: null,
+        triggerType: null,
+        reason: `Idempotent no-op: lastEvaluated ${lastEvaluated.toISOString()} == current ${currentCandleTime.toISOString()} prevEvalStatus=${previousLastEvalStatus ?? "null"} curr=${currentAggregate} (prevWasUnavailable=${prevWasUnavailable})`,
+      };
+    }
   }
 
-  // Older horizon refused
+  // Older horizon refused — provisional does NOT advance finality beyond its horizon? But lastEvaluated is max attempted horizon, so older still refused
   if (lastEvaluated && currentCandleTime.getTime() < lastEvaluated.getTime()) {
     return {
       previousState,
