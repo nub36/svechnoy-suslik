@@ -49,8 +49,8 @@ for (const meth of ["E1","E2","E3"] as const) {
 
 // Ensure no current-state value silently becomes historical — check data-plane does not use rank/quoteVolume as historical truth
 const dataPlaneSrc = readFileSync(resolve(__dirname, "../lib/backtest/historical-data-plane.ts"), "utf8");
-ok(dataPlaneSrc.includes("eligibilityDiagnostics") || dataPlaneSrc.includes("CANNOT_RECONSTRUCT") || dataPlaneSrc.includes("historical-eligibility"), "data-plane references eligibility diagnostics");
-ok(!dataPlaneSrc.includes("Asset.rank") || dataPlaneSrc.includes("eligibility") || true, "data-plane does not silently use rank as historical (checked)");
+ok(dataPlaneSrc.includes("eligibilityDiagnostics") || dataPlaneSrc.includes("CANNOT_RECONSTRUCT"), "data-plane references eligibility diagnostics");
+ok(!dataPlaneSrc.includes("Asset.rank"), "data-plane does not directly reference Asset.rank as historical truth");
 
 // Check historical-eligibility source has no process.env, no Date.now, no new Date
 const eligSrc = readFileSync(resolve(__dirname, "../lib/backtest/historical-eligibility.ts"), "utf8");

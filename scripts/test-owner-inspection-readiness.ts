@@ -37,16 +37,16 @@ ok(dataPlaneSrc.includes("canonical") || dataPlaneSrc.includes("CanonicalWindow"
 ok(dataPlaneSrc.includes("overallCoverageRatio") || dataPlaneSrc.includes("coverageRatio"), "data-plane includes coverage ratio");
 ok(dataPlaneSrc.includes("BINGX") && dataPlaneSrc.includes("1d"), "data-plane mentions BINGX 1d exclusion");
 
-// No secrets in CLI command examples
-ok(!cliSrc.includes("DATABASE_URL=") || cliSrc.includes("never echo DATABASE_URL") || cliSrc.includes("do NOT paste"), "CLI does not contain DATABASE_URL= secret example (or warns not to)");
-ok(!cliSrc.includes("postgresql://") || cliSrc.includes("never echo"), "CLI does not leak postgresql:// secret");
+// No secrets in CLI command examples — strict, no escape hatch
+ok(!cliSrc.includes("DATABASE_URL="), "CLI does not contain DATABASE_URL= secret example");
+ok(!cliSrc.includes("postgresql://"), "CLI does not leak postgresql:// secret");
 ok(coreApiSrc.includes("noSecrets") && coreApiSrc.includes("true"), "core-api marks noSecrets true");
 ok(coreApiSrc.includes("npx tsx scripts/backtest-historical-readonly.ts"), "core-api contains owner command without secrets");
 
 // Ensure no PnL calculation in CLI (mentioning winRate in help as "never calculates" is allowed)
 const cliNoComments = cliSrc.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 ok(!cliNoComments.includes("netPnl") && !cliNoComments.includes("profitFactor"), "CLI no netPnl/profitFactor fields");
-ok(!cliSrc.includes("runBacktest") || cliSrc.includes("fetchHistoricalDataPlane"), "CLI does not run P2-A backtest engine for PnL");
+ok(!cliSrc.includes("runBacktest"), "CLI does not run P2-A backtest engine for PnL");
 
 // Ensure CLI fails closed on invalid inputs
 ok(cliSrc.includes("fail(") && cliSrc.includes("fail-closed"), "CLI has fail-closed");

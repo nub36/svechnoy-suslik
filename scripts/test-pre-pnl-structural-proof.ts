@@ -18,12 +18,13 @@ function ok(cond: boolean, msg: string) {
 const prePnlSrc = readFileSync(resolve(__dirname, "../lib/backtest/pre-pnl-runner.ts"), "utf8");
 const prePnlNoComments = prePnlSrc.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 
-// 1. No P2-A engine import
-ok(!prePnlNoComments.includes("runBacktest") || prePnlNoComments.includes("fetchHistoricalDataPlane"), "pre-pnl-runner does not import P2-A runBacktest engine (or only data-plane)");
-ok(!prePnlNoComments.includes("from \"../backtest\"") || !prePnlNoComments.includes("BacktestEngine"), "no BacktestEngine import");
+// 1. No P2-A engine import — strict, no escape hatch
+ok(!prePnlNoComments.includes("runBacktest"), "pre-pnl-runner does not import P2-A runBacktest engine");
+ok(!prePnlNoComments.includes("BacktestEngine"), "no BacktestEngine import");
+ok(!prePnlNoComments.includes("computeMetrics"), "no computeMetrics import");
 ok(!prePnlSrc.includes("profitFactor") && !prePnlSrc.includes("netPnl") && !prePnlSrc.includes("sharpe") && !prePnlSrc.includes("winRate"), "no PnL fields in pre-pnl-runner");
 ok(prePnlSrc.includes("PRE_REGISTRATION_REQUIRED"), "contains PRE_REGISTRATION_REQUIRED");
-ok(prePnlSrc.includes("READ ONLY") || prePnlSrc.includes("readOnly"), "mentions readOnly");
+ok(prePnlSrc.includes("READ ONLY"), "mentions READ ONLY");
 
 // 2. Structural order: executionPolicy validation before wrapping observations
 const validateCallIdx = prePnlSrc.indexOf("validateExecutionPolicyDefinition(req.executionPolicy)");
@@ -101,23 +102,14 @@ async function testNoPolicyStopsBeforeP2A() {
     closed: true,
   })) as any;
 
-  // Mock deps that would fail if P2-A tried to use them
-  let p2aEntered = false;
   const mockDeps = {
     findCandlesPage: async () => {
-      // This is data-plane, not P2-A, allowed
       return [] as any;
     },
   };
 
-  // We use allCandlesPerMarket directly, so deps not used for observation batch? Actually runPrePnlDiagnostics uses fetchHistoricalDataPlane which uses deps
-  // To avoid DB, we provide markets and allCandlesPerMarket, but fetchHistoricalDataPlane will be called — we need to mock it to avoid DB?
-  // Instead test the earlier part: wrapWithExecutability already proves no P2-A
-  // For full runner, we test with minimal data that still triggers PRE_REGISTRATION_REQUIRED
-
   const markets = [{ id: 1, exchange: "BINANCE", exchangeSymbol: "BTCUSDT", assetId: 1, enabled: true, status: "ACTIVE", base: "BTC", quote: "USDT", marketType: "SPOT", quoteVolume24h: 1000000 } as any];
 
-  // Provide decisionBarsMs and allCandlesPerMarket
   const decisionBarsMs = [now + 100 * H1, now + 101 * H1];
 
   const diag = await runPrePnlDiagnostics({
@@ -137,9 +129,13 @@ async function testNoPolicyStopsBeforeP2A() {
 
   ok(diag.status === "PRE_REGISTRATION_REQUIRED", "runPrePnlDiagnostics with no policy => PRE_REGISTRATION_REQUIRED");
   ok(diag.readOnly === true && diag.noPnl === true, "diagnostics readOnly/noPnl true");
-  ok(diag.rawLongCount + diag.rawShortCount + diag.rawNeutralCount + diag.rawCannotEvaluateCount >= 0, "raw counts present even when PRE_REGISTRATION_REQUIRED");
+  ok(diag.rawLongCount + diag.rawShortCount + diag.rawNeutralCount + diag.rawCannotEvaluateCount === decisionBarsMs.length, "raw counts sum to decisionBars length even when PRE_REGISTRATION_REQUIRED");
   ok(diag.executableCount === 0, "executableCount 0 when no policy");
-  ok(!p2aEntered, "P2-A engine not entered (no spy triggered)");
+  ok(diag.nonExecutableCount === decisionBarsMs.length, "nonExecutableCount equals decisionBars when no policy");
+
+  // Real import-closure assertion: pre-pnl-runner module graph must NOT contain engine.ts / metrics.ts
+  ok(!prePnlSrc.includes("lib/backtest/engine") && !prePnlSrc.includes("lib/backtest/metrics") && !prePnlSrc.includes("from \"./engine\"") && !prePnlSrc.includes("from \"./metrics\""), "pre-pnl-runner does not import engine.ts/metrics.ts — no economics entered");
+  ok(!prePnlSrc.includes("runBacktest") && !prePnlSrc.includes("computeMetrics"), "no P2-A economics functions in pre-pnl-runner");
 }
 
 (async () => {

@@ -115,12 +115,12 @@ function makeDeps(candlesMap: Map<number, SmcRawCandle[]>): BacktestDataDepsV2 {
   ok(diagNoPolicy.nonExecutableCount > 0, "nonExecutableCount >0 when no policy");
   ok(diagNoPolicy.executableCount === 0, "executableCount 0 when no policy");
 
-  // Ensure no PnL fields
+  // Ensure no PnL fields — output-level check, no vacuous || raw
   const diagJson = JSON.stringify(diagNoPolicy);
-  ok(!diagJson.includes("profit") && !diagJson.includes("pnl") && !diagJson.includes("winRate") || diagJson.includes("raw"), "no PnL fields in diagnostics (except raw counts)");
-  // Actually raw counts include LONG etc but not profit
+  ok(!diagJson.includes("netPnl") && !diagJson.includes("profitFactor") && !diagJson.includes("winRate") && !diagJson.includes("sharpe") && !diagJson.includes("expectancy") && !diagJson.includes("equityCurve"), "no PnL economics fields in diagnostics JSON");
   ok(!("netPnl" in diagNoPolicy), "no netPnl field");
   ok(!("profitFactor" in diagNoPolicy), "no profitFactor field");
+  ok(!("grossPnl" in diagNoPolicy) && !("winRate" in diagNoPolicy), "no grossPnl/winRate fields");
 
   // 2. With DRAFT policy -> still PRE_REGISTRATION_REQUIRED
   const draftPolicy = {

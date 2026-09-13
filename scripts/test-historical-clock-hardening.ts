@@ -43,14 +43,14 @@ ok(wp.productionWindowBars === 500, "productionWindowBars 500");
 ok(wp.fetchCap === 500, "fetchCap 500");
 ok(wp.historicalFidelityWindow === 500, "historicalFidelityWindow 500");
 ok(wp.strategyMemory === "ROLLING_500", "strategyMemory ROLLING_500");
-ok(PRODUCTION_WINDOW_POLICY.hardMinimumBars === 84 || true, "PRODUCTION_WINDOW_POLICY hardMinimum 84 baseline");
+ok(typeof PRODUCTION_WINDOW_POLICY.hardMinimumBars === "number" && PRODUCTION_WINDOW_POLICY.hardMinimumBars >= 80, "PRODUCTION_WINDOW_POLICY hardMinimum is number >=80");
 ok(wp.description.includes("500") && wp.description.includes("rolling"), "windowPolicy description mentions 500 and rolling");
 
-// No Date.now in smc-observation
+// No Date.now in smc-observation — strict
 const smcObsSrc = readFileSync(resolve(__dirname, "../lib/backtest/smc-observation.ts"), "utf8");
 const noComments = smcObsSrc.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 ok(!noComments.includes("Date.now"), "smc-observation no Date.now");
-ok(!noComments.includes("new Date(") || noComments.includes("utcDateFromMs"), "smc-observation no new Date (except via utcDateFromMs wrapper)");
+ok(!noComments.includes("new Date()"), "smc-observation no new Date() wall-clock");
 ok(smcObsSrc.includes("computeCausalAsOf"), "contains computeCausalAsOf");
 ok(smcObsSrc.includes("testCausalClockBoundary"), "contains testCausalClockBoundary");
 

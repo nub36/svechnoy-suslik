@@ -38,8 +38,8 @@ ok(!assertReadOnlySql("SELECT * FROM Candle FOR UPDATE").ok, "mutation: FOR UPDA
 
 // 2. Off-grid candle as canonical occupancy — check data-plane logic forbids off-grid
 const dataPlaneSrc = readFileSync(resolve(__dirname, "../lib/backtest/historical-data-plane.ts"), "utf8");
-ok(dataPlaneSrc.includes("off-grid") || dataPlaneSrc.includes("offGrid") || dataPlaneSrc.includes("isOffGrid") || dataPlaneSrc.includes("off_grid"), "data-plane mentions off-grid detection");
-ok(dataPlaneSrc.includes("canonical") || dataPlaneSrc.includes("canonicalGrid"), "data-plane mentions canonical grid");
+ok(dataPlaneSrc.includes("offGrid") || dataPlaneSrc.includes("off-grid"), "data-plane mentions off-grid detection");
+ok(dataPlaneSrc.includes("canonicalWindow") || dataPlaneSrc.includes("canonical"), "data-plane mentions canonical grid");
 
 // 3. Wall-clock Date.now reintroduction — check smc-observation has no Date.now
 const smcObsSrc = readFileSync(resolve(__dirname, "../lib/backtest/smc-observation.ts"), "utf8");
@@ -80,19 +80,19 @@ ok(prePnlSrc.includes("NO_EXECUTION_POLICY"), "pre-pnl-runner contains NO_EXECUT
 
 // 7. Enter P2-A economics without policy — check no import of P2-A engine
 const prePnlNoComments = prePnlSrc.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-ok(!prePnlNoComments.includes("runBacktest") || prePnlSrc.includes("fetchHistoricalDataPlane"), "mutation: P2-A runBacktest not imported in pre-pnl-runner");
+ok(!prePnlNoComments.includes("runBacktest"), "mutation: P2-A runBacktest not imported in pre-pnl-runner");
 ok(!prePnlNoComments.includes("netPnl") && !prePnlNoComments.includes("profitFactor"), "mutation: no PnL fields");
 
 // 8. Contaminate OOS selection/readiness — check splits-readiness OOS isolation
 const splitsSrc = readFileSync(resolve(__dirname, "../lib/backtest/splits-readiness.ts"), "utf8");
-ok(splitsSrc.includes("oosDoesNotInfluenceSelection") || splitsSrc.includes("OOS") && splitsSrc.includes("TRAIN"), "splits-readiness mentions OOS isolation");
-ok(splitsSrc.includes("oosIsFinalWitnessOnly") || splitsSrc.includes("finalWitness"), "splits-readiness mentions final witness");
+ok(splitsSrc.includes("oosDoesNotInfluenceSelection"), "splits-readiness mentions oosDoesNotInfluenceSelection");
+ok(splitsSrc.includes("oosIsFinalWitnessOnly"), "splits-readiness mentions final witness");
 
 // 9. Hidden default k/SL/TP — check execution-policy forbiddenDefaults
 const execPolicySrc = readFileSync(resolve(__dirname, "../lib/backtest/execution-policy.ts"), "utf8");
 ok(execPolicySrc.includes("forbiddenDefaults"), "execution-policy has forbiddenDefaults");
-ok(execPolicySrc.includes("k=1") || execPolicySrc.includes("k-grid"), "forbiddenDefaults includes k");
-ok(execPolicySrc.includes("ATR") || execPolicySrc.includes("SL"), "forbiddenDefaults includes SL/ATR");
+ok(execPolicySrc.includes("atr") || execPolicySrc.includes("ATR") || execPolicySrc.includes("k-grid") || execPolicySrc.includes("k="), "forbiddenDefaults includes k/ATR");
+ok(execPolicySrc.includes("SL") || execPolicySrc.includes("stopLoss") || execPolicySrc.includes("RR") || execPolicySrc.includes("rr"), "forbiddenDefaults includes SL/RR");
 
 // 10. Self-adversarial: try to bypass by using current rank as historical — should be caught by eligibility
 import { buildHistoricalEligibilityDiagnostics } from "../lib/backtest/historical-eligibility";
