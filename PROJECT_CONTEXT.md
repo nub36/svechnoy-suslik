@@ -4192,3 +4192,86 @@ H) Admin/backtests UI truthful readiness (no fake profitability), docs/runbooks
 **Status:** IMPLEMENTED / PENDING INDEPENDENT ADVERSARIAL REVIEW — no PnL, no DB writes, no Signal Engine, BTC only 5m/15m/1h/4h/1d, BINGX excluded 1d, costs 5bps fee 2bps slippage, no profitability claims, VPS verification pending.
 
 **Next:** Owner must choose E1/E2/E3 for historical eligibility CANNOT_RECONSTRUCT, approve execution policy economic semantics (SL anchor, TP model, k/RR_min/buffer/timeout/conflict) — currently PRE_REGISTRATION_REQUIRED truthful baseline SMC-Direction Baseline / EP-1, until approved no real PnL only coverage/raw counts diagnostics, after approval integrate execution policy into P2-A runner with generic boundary include policy identity in fingerprints run TRAIN/VALIDATION/OOS OOS-blind report limitations no fake profitability, admin UI truthful, VPS verification read-only CLI owner-run.
+
+53. PRE-PNL CORE HARDENING — SELF-ADVERSARIAL AUDIT + FIXES (13.09.2026): READ-ONLY SQL, PRE-PNL STRUCTURAL PROOF, CLOCK, ELIGIBILITY, OWNER INSPECTION, CORE API, MUTATIONS
+
+**Base:** 51eb129 + §52 pre-PnL CORE (7c4c22a) — treat as own unaccepted author work, continue with NEW sequential commits from HEAD.
+**Branch:** arena/01a09726-core-pre-pnl continued — no rewrite/amend of first 10 commits, new commits only.
+
+**Self-adversarial audit findings (51eb129..7c4c22a):**
+- read-only-sql: previous regex used \bSELECT\b.*\bFOR\b.*\bUPDATE\b with dot not matching newline, missing SELECT INTO, missing MERGE/REPLACE/CALL/DO/PERFORM/EXECUTE/LISTEN/NOTIFY/UNLISTEN/REFRESH/ANALYZE/LOAD, missing nextval/setval/currval/lastval/pg_sleep/pg_notify/pg_cancel/terminate, comment /* INSERT */ handling via allowlist miss (fail-closed ok) but doc had */ inside block comment causing TS parse error (fixed), dollar-quoted $$INSERT$$ still caught but not explicitly tested, multi-statement heuristic split ; but not stripping dollar-quoted (fixed with stripDollarQuotedForSemicolonCheck).
+- pre-pnl-runner: no P2-A import, but no explicit structural proof test, no spy that P2-A not entered, raw LONG/SHORT preservation tested but not as separate hardening suite.
+- historical clock/window: boundaries H+D-1ms/AT/After/H+2D tested in smc-observation 78/78 but not as dedicated 46-case suite with rolling 84/500/expanding and future-suffix invariance explicit.
+- eligibility: 5 fields present, CANNOT_RECONSTRUCT, but no guard test ensuring no current-state silent use, no check that data-plane does not use rank as historical truth.
+- owner inspection: CLI produced data-plane/eligibility/provenance/splits but docs/examples contained DATABASE_URL=... secret pattern — must use existing env, never echo secrets.
+- core/api contract for visual agent: missing typed read-only boundary.
+
+**Fixes in new commits:**
+- baf16c8: remove DATABASE_URL secrets from docs/runbook/final-report/admin UI/CLI examples, owner-run uses existing configured env, never echo DATABASE_URL.
+- d6408f7: hardened read-only-sql.ts — positive allowlist SELECT/WITH, single statement, expanded forbidden list: INSERT/UPDATE/DELETE/MERGE/UPSERT/REPLACE/CREATE/ALTER/DROP/TRUNCATE/REINDEX/VACUUM/ANALYZE/CLUSTER/COPY/LOAD/LOCK/GRANT/REVOKE/SECURITY/COMMENT/TABLESPACE/OWNER/CALL/DO/PERFORM/EXECUTE/LISTEN/NOTIFY/UNLISTEN/REFRESH/SELECT INTO/FOR UPDATE/SHARE/NO KEY UPDATE/KEY SHARE/writable CTE pg_advisory/pg_try_advisory/pg_sleep/pg_notify/pg_cancel_backend/pg_terminate_backend/pg_reload_conf/nextval/setval/currval/lastval/pg_*() generic, multi-statement ;, dollar-quoted fail-closed, comments fail-closed, Prisma $executeRaw etc. Doc guarantee + limitations.
+- c3b08eb: core-api.ts — read-only typed contracts for visual agent, no DB writes, no Signal Engine, no PnL, owner command without secrets, truthful readiness response, re-exports safe types.
+- c1265b8: hardening tests 5 files — readonly 89/89, clock 46/46, eligibility 32/32, structural proof 19/19, mutation controls 21/21.
+- New: owner-inspection-readiness test 25/25.
+
+**SQL guarantee (documented in file):**
+Positive allowlist: must start with SELECT/WITH, single statement, no forbidden write/lock/side-effect tokens. Fail-closed on comments/dollar-quoted hiding. Limitations: syntactic guard not full parser, dollar-quoted and comments containing forbidden keywords rejected fail-closed, does not detect custom side-effecting functions but forbids known pg_* patterns. Exact list in READ_ONLY_SQL_ALLOWLIST_DOC.
+
+**Pre-PnL structural proof:**
+NO APPROVED EXECUTION POLICY → PRE_REGISTRATION_REQUIRED → STOP BEFORE P2-A economics. Proven by:
+- Source check: no runBacktest import, no netPnl/profitFactor/sharpe/winRate, contains PRE_REGISTRATION_REQUIRED, validateExecutionPolicyDefinition call before wrapWithExecutability call.
+- Runtime: wrapWithExecutability preserves raw LONG/SHORT, returns NON_EXECUTABLE NO_EXECUTION_POLICY, not mapped to NEUTRAL/CANNOT_EVALUATE.
+- runPrePnlDiagnostics with null policy returns status PRE_REGISTRATION_REQUIRED, executableCount 0, raw counts present, readOnly/noPnl true, P2-A not entered (spy flag).
+
+**Raw SMC guarantee:**
+raw direction and executability preserved separately: raw LONG + no policy => raw LONG visible + NON_EXECUTABLE/PRE_REGISTRATION_REQUIRED, raw SHORT similarly, never mapped to NEUTRAL/CANNOT_EVALUATE, no SL/TP invented.
+
+**Historical clock/window:**
+computeCausalAsOf H+D, testCausalClockBoundary exact: H+D-1ms BEFORE_CLOSE, H+D AT_CLOSE, H+D+1ms AFTER_CLOSE, H+2D AFTER_CLOSE, tested for 5m/15m/1h/4h/1d. WindowPolicy hardMinimum ~84 vs production 500 vs fetchCap 500 vs fidelity 500 vs ROLLING_500, description mentions 500 and rolling, no Date.now, no new Date() except via utcDateFromMs wrapper. Rolling window caps at 500, future suffix invariance: same prefix different suffix same direction+fingerprint.
+
+**Eligibility:**
+5 fields Asset.rank/Market.quoteVolume24h/enabled/status/listing, reconstructable false, CANNOT_RECONSTRUCT_HISTORICAL_ELIGIBILITY, E1 currentValueUsed true, E2 false, E3 CANNOT_RECONSTRUCT, canReportProfitability false always, limitations mention owner decision mutable current-state, data-plane references eligibility diagnostics not silent rank use, no process.env/Date.now/Math.random.
+
+**Owner inspection readiness:**
+CLI produces BTC markets/exchanges, timeframe coverage, earliest/latest CLOSED, counts, canonical slots expectedSlots aligned canonicalized, leading/internal/trailing missing, duplicates, off-grid, common intersection/horizon feasibility, revision diagnostics (createdAt/updatedAt), eligibility limitations, TRAIN/VALIDATION/OOS readiness (60/20/20 splits from requested range, commonTimestamps, OOS isolation no silent shortening). NO PNL, no secrets in command: npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --smc --splits uses existing env.
+
+**Core/API contract for visual agent:**
+lib/backtest/core-api.ts exports OwnerInspectionResult, CoreReadOnlyService, BacktestsReadinessApiResponse, buildBacktestsReadinessResponse, CORE_API_DOC, re-exports safe types, no DB writes, no Signal Engine, no PnL, no process.env/Date.now.
+
+**Mutation results:**
+- allow SQL write → killed by readonly 89/89
+- off-grid as canonical → killed by data-plane mentions off-grid detection + canonical
+- wall-clock Date.now → killed by smc-observation no Date.now + causal clock
+- current eligibility historically → killed by eligibility CANNOT_RECONSTRUCT + currentValueUsed tracking
+- raw LONG into NEUTRAL → killed by structural proof raw LONG preserved
+- bypass PRE_REGISTRATION_REQUIRED → killed by pre-pnl-runner contains PRE_REGISTRATION_REQUIRED + NO_EXECUTION_POLICY
+- enter P2-A without policy → killed by no runBacktest import + no PnL fields
+- contaminate OOS → killed by splits-readiness OOS isolation checks
+- hidden default k/SL/TP → killed by execution-policy forbiddenDefaults includes k and ATR/SL
+All 21 mutation controls killed.
+
+**Tests after hardening:**
+- P2-A engine 442/442 (was 439, added isolation checks), hardening 567/567, metrics 123/123, splits 108/108
+- P2-B 427/427
+- P2-C contract 213/213 report 225/225 leakage 174/174 hardening 165/165
+- eligibility 96/96
+- data-plane 46/46 smc-observation 78/78 execution-policy 16/16 pre-pnl 28/28 full-pipeline 40/40 hardening-pre-pnl 47/47
+- new hardening: readonly-sql 89/89 clock 46/46 eligibility 32/32 structural-proof 19/19 mutation 21/21 owner-inspection 25/25
+- total >6700 checks
+- tsc --noEmit 0 errors (normal, not only --skipLibCheck)
+- build compiled successfully then fails at page data collection @prisma/client not initialized — identical to base 51eb129, not introduced
+- git diff --check clean
+- No DB writes, no PnL, no Signal Engine, no workers, no production deployment
+
+**Owner VPS command (no secrets):**
+```
+npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --smc --splits
+```
+Uses server's existing configured environment, fails closed if env missing, never echoes DATABASE_URL.
+
+**Unresolved owner decisions (still not chosen):**
+- E1/E2/E3 final methodology for historical eligibility CANNOT_RECONSTRUCT
+- Execution policy economic semantics SL anchor/buffer/TP model k/RR_min/timeout/conflict — currently PRE_REGISTRATION_REQUIRED truthful baseline SMC-Direction Baseline / EP-1
+- OHLCV PIT whether to store historical revisions or accept sync.ts upsert limitation
+
+**Status:** IMPLEMENTED / PENDING INDEPENDENT ADVERSARIAL REVIEW — NO REAL DB ACCESS / NO DB WRITES / NO REAL PNL / NO WORKERS / NO SIGNAL ENGINE / NO PRODUCTION DEPLOYMENT.
+
