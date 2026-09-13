@@ -96,37 +96,40 @@ Leave E1/E2/E3 unresolved — do NOT choose. Truthful labeling mandatory.
 - Distinguish: hardMinimumBars (~84 = min for minimal SMC signal) vs productionWindowBars (500 used in production) vs fetch cap (500) vs fidelity window (500 hypothesis) vs ROLLING_500 strategy memory.
 - Historical common-horizon must use causal clock H+D boundary not wall clock — common horizon = latest closed across markets at asOf.
 
-## 7. Owner-Run Read-Only CLI
+## 7. Owner-Run Read-Only CLI (BTC-only, no secrets)
 
 ```bash
 # READ ONLY NO DB WRITES NO PNL — fails closed if DB env missing or timezone local date used
 # Uses server's existing configured environment — do NOT paste secrets, never echo DATABASE_URL
+# BTC-only: --asset must be BTC, otherwise fail-closed (pre-registered scope)
 npx tsx scripts/backtest-historical-readonly.ts \
   --asset BTC \
   --timeframe 1h \
   --from 2024-01-01 \
   --to 2024-02-01 \
   --smartMoney \
-  --pageSize 1000 \
-  --maxPages 100
+  --pageSize 1000
 
-# Flags:
-# --asset BTC (only BTC allowed, fail-closed)
+# Flags (actual CLI):
+# --asset BTC (only BTC allowed, fail-closed — ETH etc rejected)
 # --timeframe 5m|15m|1h|4h|1d (BINGX excluded 1d via eligibility)
 # --from YYYY-MM-DD (UTC midnight, no local timezone)
 # --to YYYY-MM-DD
-# --smartMoney (uses isSmartMoneyExchangeEligible)
+# --smartMoney (uses isSmartMoneyExchangeEligible — timeless BINGX-1d policy only)
 # --pageSize 1..5000
-# --maxPages 1..1000
-# --eligibilityMode E1|E2|E3 (diagnostics only, does not choose)
+# --smc (raw SMC observations, no SL/TP, no PnL)
+# --splits (TRAIN/VALIDATION/OOS readiness, OOS isolation)
 ```
 
-CLI:
-- Defensive SET TRANSACTION READ ONLY intent documented (PostgreSQL read-only transaction)
+CLI truthfulness (independent audit confirmed):
+- Does NOT execute SET TRANSACTION READ ONLY — no raw SQL transaction enforcement added to avoid DB writes.
+- Read-only by capability-restricted Prisma surface: asset.findUnique, market.findMany (all markets for BTC, reporting current enabled/status as diagnostics), candle.findMany (CLOSED-only), $disconnect. No create/update/upsert/delete, no $executeRaw.
+- read-only-sql.ts remains as static/test defense (SELECT/WITH allowlist, forbidden write tokens), not as runtime CLI guard unless actually wired.
+- Current enabled/status survivorship: CLI queries ALL markets for BTC asset (no enabled:true/status:ACTIVE filter) and reports current enabled/status as diagnostic fields. Timeless exchange eligibility (BINGX-1d) applied separately. Universe narrowing reported as CURRENT_STATE_SURVIVORSHIP_LIMITATION if disabled markets exist.
 - SELECT-only, CLOSED-only, ASC ordering, duplicates fail-closed, canonical grid check
-- Coverage: requested-range basis, leading/internal/trailing missing, ratio canonical-grid based
+- Coverage: requested-range basis, leading/internal/trailing missing, ratio canonical-grid based, earliest/latest, canonical slots, common intersection/horizon feasibility
 - No PnL, no trades, no metrics, no writes
-- Output: JSON report with coverage per market, common timestamps, contiguous intervals, feasibility, eligibility diagnostics, provenance, limitations
+- Output: coverage per market, common timestamps, contiguous intervals, feasibility, eligibility diagnostics CANNOT_RECONSTRUCT, provenance revision diagnostics, limitations, TRAIN/VALIDATION/OOS readiness
 
 ## 8. Tests — How to Run (no DB)
 
