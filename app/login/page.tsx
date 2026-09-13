@@ -72,7 +72,8 @@ export default function LoginPage() {
         </h1>
 
         <p className="muted authIntro">
-          Избранное, персональные сигналы и настройки стратегий.
+          Вход в аккаунт: профиль и админка по роли.
+          Сигналы и избранное пока не подключены.
         </p>
 
         <div className="oauthComing">

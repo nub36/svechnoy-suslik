@@ -11,7 +11,8 @@ export default async function Home() {
         <div>
           <h1>Рынок под микроскопом 🔬</h1>
           <div className="muted">
-            500 крупнейших активов и алгоритмический анализ без AI
+            Рынок CoinGecko Top-500 и алгоритмический анализ без AI.
+            Основной universe стратегий — Top-100.
           </div>
         </div>
       </section>
