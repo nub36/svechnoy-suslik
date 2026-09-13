@@ -44,7 +44,7 @@ async function main() {
     return;
   }
 
-  // Enable trend-suslik for BTC pilot
+  // Enable trend-suslik for BTC pilot — also fix timeframes to include 1h for signal worker
   if (trendSuslik) {
     console.log(`\n${enable ? "Enabling" : "Disabling"} trend-suslik id=${trendSuslik.id}...`);
     const updated = await prisma.strategy.update({
@@ -52,9 +52,11 @@ async function main() {
       data: {
         enabled: enable,
         status: enable ? "PUBLISHED" : "DRAFT",
+        timeframes: ["15m", "1h", "4h", "1d"],
+        minExchanges: 2,
       },
     });
-    console.log(`  Updated: enabled=${updated.enabled} status=${updated.status}`);
+    console.log(`  Updated: enabled=${updated.enabled} status=${updated.status} timeframes=${updated.timeframes.join(",")} minExchanges=${updated.minExchanges}`);
   }
 
   // For smart-money, keep DRAFT for now unless explicitly enabled

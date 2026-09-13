@@ -5,9 +5,8 @@ import {
   EP1_BASELINE,
   EP2_STRUCTURAL_EXAMPLE,
   EP3_GENERIC_BOUNDARY,
-  listPolicies,
 } from "@/lib/backtest/execution-policy-registry";
-import { approvePolicy } from "@/lib/backtest/real-pnl-runner";
+import { approvePolicy } from "@/lib/backtest/execution-policy-approval";
 import type { ExecutionPolicyDefinition } from "@/lib/backtest/execution-policy";
 
 const ALL_POLICIES = [EP1_BASELINE, EP2_STRUCTURAL_EXAMPLE, EP3_GENERIC_BOUNDARY];

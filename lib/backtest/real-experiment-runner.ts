@@ -13,7 +13,7 @@ import type { BacktestBar } from "./contract";
 import type { RawSmcObservation } from "./smc-observation";
 import type { ExecutionPolicyDefinition } from "./execution-policy";
 import { validateExecutionPolicyDefinition } from "./execution-policy";
-import { approvePolicy } from "./real-pnl-runner";
+import { approvePolicy } from "./execution-policy-approval";
 import { getPolicyById as getRegistryPolicyById, listPolicies as listRegistryPolicies } from "./execution-policy-registry";
 import { runExperiment, runExperimentReport, type ExperimentReportOutcome } from "../experiment/run";
 import type { ExperimentInput, VariantDefinition, ExperimentOutcome } from "../experiment/contract";

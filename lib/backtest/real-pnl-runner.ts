@@ -21,9 +21,9 @@ import { evaluateHistoricalObservationsBatch } from "./smc-observation";
 import type { ExecutionPolicyDefinition } from "./execution-policy";
 import { validateExecutionPolicyDefinition, buildNonExecutableResult } from "./execution-policy";
 import { EP1_BASELINE } from "./execution-policy-registry";
-import { formatIsoUtc } from "./timeframe";
 import { deepFreeze } from "./immutable";
 import { runBacktest } from "./engine";
+import { approvePolicy } from "./execution-policy-approval";
 import type {
   BacktestInput,
   BacktestBar,
@@ -395,11 +395,4 @@ export function formatRealPnlReport(diag: RealPnlDiagnostics): string {
   return lines.join("\n");
 }
 
-export function approvePolicy(policy: ExecutionPolicyDefinition): ExecutionPolicyDefinition {
-  if (policy.status === "APPROVED") return policy;
-  return deepFreeze({
-    ...policy,
-    status: "APPROVED" as const,
-    approvedAt: formatIsoUtc(Date.parse("2024-01-03T00:00:00.000Z")),
-  });
-}
+export { approvePolicy } from "./execution-policy-approval";

@@ -155,6 +155,11 @@ export async function runSignalEngineForBtc(opts: {
 
   // 4. For each strategy, evaluate
   for (const strategy of strategies) {
+    // Only trend-suslik supported for signal engine BTC pilot — smart-money has different config structure
+    if (strategy.slug !== "trend-suslik") {
+      console.log(`  Skipping strategy ${strategy.slug} — only trend-suslik supported for BTC pilot signal engine`);
+      continue;
+    }
     const validation = validateTrendSuslikConfig(strategy.config);
     if (!validation.ok) {
       result.errors.push(`Strategy id=${strategy.id} config invalid: ${validation.errors.join("; ")}`);
