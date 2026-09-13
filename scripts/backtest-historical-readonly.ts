@@ -65,8 +65,10 @@ function parseArgs() {
   let help = false;
   let pageSize = 1000;
   let executionPolicyId: string | null = null;
+  let executionPolicyIds: string[] | null = null; // for multi-policy experiment
   let approve = false;
   let fullPipeline = false;
+  let realExperiment = false;
 
   for (let i = 0; i < raw.length; i++) {
     const a = raw[i];
@@ -101,11 +103,23 @@ function parseArgs() {
       const v = raw[i + 1];
       if (!v || v.startsWith("-")) fail("Missing value for --executionPolicy");
       executionPolicyId = v;
+      // Also support comma-separated list for experiment
+      if (v.includes(",")) {
+        executionPolicyIds = v.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+      }
+      i++;
+    } else if (a === "--executionPolicies" || a === "--eps") {
+      const v = raw[i + 1];
+      if (!v || v.startsWith("-")) fail("Missing value for --executionPolicies");
+      executionPolicyIds = v.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+      executionPolicyId = executionPolicyIds[0] ?? null;
       i++;
     } else if (a === "--approve") {
       approve = true;
     } else if (a === "--fullPipeline" || a === "--full-pipeline" || a === "--full") {
       fullPipeline = true;
+    } else if (a === "--realExperiment" || a === "--real-experiment" || a === "--experiment") {
+      realExperiment = true;
     } else if (a === "--smartMoney" || a === "--smart-money") {
       smartMoney = true;
     } else if (a === "--smc") {
@@ -119,7 +133,7 @@ function parseArgs() {
     }
   }
 
-  return { asset, timeframe, from, to, smartMoney, smc, splits, help, pageSize, executionPolicyId, approve, fullPipeline };
+  return { asset, timeframe, from, to, smartMoney, smc, splits, help, pageSize, executionPolicyId, executionPolicyIds, approve, fullPipeline, realExperiment };
 }
 
 function printHelp() {
@@ -135,9 +149,11 @@ Options:
   --from <ISO>           From timestamp ISO (e.g. 2024-01-01T00:00:00Z or YYYY-MM-DD)
   --to <ISO>             To timestamp ISO, must be > from
   --pageSize <n>         Page size 1..5000 (default 1000)
-  --executionPolicy <id> Execution policy registry id EP-1/EP-2/EP-3 — Phase G/H real PnL runner, truthful baseline EP-1 0 trades, EP-2/EP-3 DRAFT blocked until APPROVED
+  --executionPolicy <id> Execution policy registry id EP-1/EP-2/EP-3 — Phase G/H real PnL runner, truthful baseline EP-1 0 trades, EP-2/EP-3 DRAFT blocked until APPROVED — comma-separated for experiment e.g. EP-1,EP-2,EP-3
+  --executionPolicies <ids> Comma-separated list for Real Experiment Phase I — e.g. EP-1,EP-2,EP-3
   --approve              Simulate owner approval of DRAFT policy EP-2/EP-3 via approvePolicy utility — deterministic, no DB writes, for inspection only
   --fullPipeline         Run Full Pipeline Real PnL Phase H: data plane + raw SMC + EP registry + P2-A + splits OOS-blind — requires --executionPolicy
+  --realExperiment       Run Real Experiment Runner Phase I: multiple policies as variants, ranking TRAIN/VALIDATION only OOS final witness OOS-blind — requires --executionPolicy
   --smartMoney           Apply Smart Money eligibility (BINGX 1d excluded — timeless policy only)
   --smc                  Also evaluate raw SMC observations (no SL/TP, no PnL unless executionPolicy APPROVED)
   --splits               Also evaluate TRAIN/VALIDATION/OOS readiness (OOS isolation, no silent shortening)
@@ -541,16 +557,66 @@ async function main() {
           console.log(`\nFull Pipeline READY: policy ${fullDiag.policyId} trades ${fullDiag.tradesCount} coverage ${fullDiag.coverageRatio} common ${fullDiag.commonTimestampsCount} splits OOS-blind ${fullDiag.splitsReadiness?.oosIsolation.oosDoesNotInfluenceSelection}`);
         }
       }
+
+      if (args.realExperiment) {
+        console.log(`\n=== Real Experiment Runner Phase I — policies ${args.executionPolicyIds ? args.executionPolicyIds.join(",") : args.executionPolicyId} ${args.approve ? "APPROVED" : "DRAFT"} — READ ONLY — OOS-BLIND ===`);
+        const { runRealExperimentDiagnostics, formatRealExperimentReport } = await import("../lib/backtest/real-experiment-runner");
+        const { evaluateHistoricalObservationsBatch } = await import("../lib/backtest/smc-observation");
+        // Build observationsMap for experiment from first market
+        const firstMarket = markets[0];
+        const firstCandles = allCandlesPerMarket.get(firstMarket.id) ?? [];
+        const batch = evaluateHistoricalObservationsBatch({
+          market: firstMarket,
+          assetSymbol: args.asset,
+          timeframe: args.timeframe as any,
+          decisionBarsMs,
+          allCandlesAsc: firstCandles,
+          smcConfig,
+          participantCount: markets.length,
+        });
+        const obsMap = new Map<number, any>();
+        for (const obs of batch.observations) {
+          obsMap.set(obs.decisionBarOpenTimeMs, obs);
+        }
+        const barsForExp = firstCandles
+          .filter((c: any) => c.openTime.getTime() >= fromDate.getTime() && c.openTime.getTime() < toDate.getTime())
+          .map((c: any) => ({
+            time: c.openTime.getTime(),
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+          }))
+          .sort((a: any, b: any) => a.time - b.time);
+
+        const expDiag = await runRealExperimentDiagnostics({
+          assetSymbol: args.asset,
+          timeframe: args.timeframe as any,
+          timeframeMs: 3600_000,
+          bars: barsForExp,
+          observationsMap: obsMap,
+          executionPolicyRegistryIds: args.executionPolicyIds ?? (args.executionPolicyId ? [args.executionPolicyId] : null),
+          approve: args.approve,
+          selectionPolicy: { kind: "rank-only", stage: "TRAIN", criteria: ["netPnl", "profitFactor"] },
+        });
+        console.log("\n" + formatRealExperimentReport(expDiag));
+        if (expDiag.status === "PRE_REGISTRATION_REQUIRED") {
+          console.log(`\nReal Experiment PRE_REGISTRATION_REQUIRED: policies not APPROVED`);
+        } else if (expDiag.experimentOutcome?.ok) {
+          console.log(`\nReal Experiment READY: ${expDiag.approvedPoliciesCount} approved variants, ranking TRAIN OOS-blind ${expDiag.experimentOutcome.record.oosIsolation.oosConsultedForSelection === false}`);
+        }
+      }
     } else {
-      if (args.fullPipeline) {
-        fail("--fullPipeline requires --executionPolicy EP-1/EP-2/EP-3");
+      if (args.fullPipeline || args.realExperiment) {
+        fail("--fullPipeline / --realExperiment requires --executionPolicy EP-1/EP-2/EP-3");
       }
       console.log("\n=== Execution Policy Registry — available policies (no --executionPolicy supplied, no real PnL) ===");
       for (const p of listRegistryPolicies()) {
         console.log(`- ${p.id} v${p.version} status=${p.status} fingerprint=${p.fingerprint.slice(0, 48)}... required=${p.requiredEconomicFields.join(",")}`);
       }
-      console.log("Supply --executionPolicy EP-1/EP-2/EP-3 to run Real PnL Runner (EP-1 0 trades baseline truthful, EP-2/EP-3 DRAFT blocked until APPROVED, use --approve to simulate approval)");
+          console.log("Supply --executionPolicy EP-1/EP-2/EP-3 to run Real PnL Runner (EP-1 0 trades baseline truthful, EP-2/EP-3 DRAFT blocked until APPROVED, use --approve to simulate approval)");
       console.log("Add --fullPipeline to run Full Pipeline Phase H: data plane + raw SMC + EP registry + P2-A + splits OOS-blind");
+      console.log("Add --realExperiment with comma-separated --executionPolicies EP-1,EP-2,EP-3 to run Real Experiment Phase I: multiple policies as variants, ranking TRAIN/VALIDATION only OOS final witness, --approve to simulate owner approval");
     }
 
     console.log("\n=== READ ONLY — NO DB WRITES — BTC ONLY — CLI completed successfully ===");
