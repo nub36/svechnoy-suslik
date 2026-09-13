@@ -144,6 +144,8 @@ model Signal {
   // setupKey causal from BOS key, OB key, FVG key, sweep key, direction, phase — no score, no future outcome
   // Future unique: [strategyId, symbol, timeframe, setupKey] but not applied yet, keep signalCandleTime unique for now
   setupKey             String?
+  // EDGE/RE-ARM V1: triggerType EDGE or REVERSAL, for dedup analysis
+  triggerType          String?
 
   strategy Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
   outcome  SignalOutcome?
@@ -156,6 +158,7 @@ model Signal {
   @@index([createdAt])
   @@index([signalSource])
   @@index([setupKey])
+  @@index([triggerType])
   // Unique identity: one strategy + symbol + timeframe + candle can have max ONE signal
   // Direction NOT included to prevent LONG and SHORT on same candle
   // PostgreSQL treats NULL as distinct, so legacy rows with NULL signalCandleTime are not constrained
@@ -195,6 +198,27 @@ model SignalOutcome {
 
   @@index([status])
   @@index([entryTime])
+}
+
+// EDGE/RE-ARM V1: persistent state survives PM2 restart
+model StrategySignalState {
+  id                      Int       @id @default(autoincrement())
+  strategyId              Int
+  symbol                  String
+  timeframe               String
+  lastEvaluatedCandleTime DateTime?
+  aggregateState          String    @default("NEUTRAL") // NEUTRAL, LONG, SHORT, CANNOT_EVALUATE, DATA_UNAVAILABLE
+  lastSignalCandleTime    DateTime?
+  lastSignalDirection     String?
+  lastEvaluationStatus    String?
+  metadata                Json?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  @@unique([strategyId, symbol, timeframe])
+  @@index([symbol, timeframe])
+  @@index([strategyId])
+  @@index([aggregateState])
 }
 
 model Asset {

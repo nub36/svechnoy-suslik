@@ -1,22 +1,21 @@
 /**
  * Signal Engine — BTC ONLY pilot, production-ready, NO forbidden copy.
- * PHASE 2C FINAL HARDENING — last code phase before VPS migration.
+ * PHASE 2C + EDGE/RE-ARM V1 — SMC EVENT SEMANTICS
  *
- * Key PHASE 2C changes:
- * - No optimistic fallback entry = nextBarOpenPrice ?? referencePrice FORBIDDEN
- *   If NEXT_BAR_OPEN policy and next candle not yet available: entryPrice=NULL, entryTime=NULL, executionStatus=WAITING_ENTRY
- *   referencePrice analytic only, not executable.
- * - Next bar openTime must strictly = signalCandleTime + tf duration, if missing no silent gap skip => ENTRY_DATA_MISSING
- * - No SL/TP from non-existing entry. ATR frozen at signalCandleTime, levels calculated only after entry appears.
- *   LONG SL=entry-ATR*stop TP=entry+ATR*tp SHORT opposite.
- * - Separate Signal immutable observation vs SignalOutcome execution state
- * - SignalSource enum LIVE_FORWARD/SEEDED/BACKTEST/LEGACY, default LEGACY safe, new real rows explicit LIVE_FORWARD
- * - Score semantics LONG=longScore SHORT=shortScore, metadata stores both
- * - Confirmation structured: participantCount/evaluatedCount/longVotes/shortVotes/neutralVotes/minExchanges/confirmationCount/Total etc
- * - QUORUM data-quality guard referenceFallback metadata
- * - Candidate deepFreeze recursive
- * - Write guard AND (CLI --enable-smart-money-write AND ENV SMART_MONEY_WRITE_ENABLED=true)
- * - No backtest writing to Signal table, live stats WHERE signalSource=LIVE_FORWARD
+ * Key PHASE 2C: no optimistic fallback, WAITING_ENTRY, ENTRY_DATA_MISSING, SL/TP only after real NEXT_BAR_OPEN, Signal vs Outcome, LEGACY default, AND guard
+ * EDGE V1:
+ *   Aggregate states: NEUTRAL, LONG, SHORT, CANNOT_EVALUATE/DATA_UNAVAILABLE/QUORUM_NOT_MET etc
+ *   Transitions:
+ *     NEUTRAL->LONG/SHORT = EMIT EDGE
+ *     LONG->LONG, SHORT->SHORT = HOLD
+ *     LONG->NEUTRAL, SHORT->NEUTRAL = RE-ARM
+ *     LONG->SHORT, SHORT->LONG = EMIT reversal
+ *     Any->UNAVAILABLE = PRESERVE (no re-arm) — SHORT->DATA_UNAVAILABLE->SHORT must NOT emit second
+ *   Persistent: StrategySignalState unique [strategyId,symbol,timeframe] survives PM2 restart
+ *   Idempotent: same horizon twice no-op, older horizon refused
+ *   Transactional: Signal+Outcome+State in ONE prisma.$transaction, P2002 idempotent, concurrent safe
+ *   Bootstrap: no state + current SHORT => BOOTSTRAP SHORT NO SIGNAL default, only after SHORT->NEUTRAL->SHORT or reversal. Optional --emit-on-bootstrap default false
+ *   Dry-run: NEVER mutates StrategySignalState, READ-ONLY load, logs proposed transition
  */
 
 import { prisma } from "../prisma";
@@ -26,9 +25,11 @@ import { isSmartMoneyExchangeEligible } from "../strategies/smart-money-eligibil
 import { validateSmartMoneyConfig } from "../strategies/smart-money";
 import { evaluateMarketsAtCommonHorizon, type SmartMoneyMarketMeta } from "../strategies/smart-money";
 import { isSmcTimeframe, SMCTIMEFRAME_MS, type SmcRawCandle, type SmcTimeframe } from "../smc/types";
-import { formatCommonHorizonReport, decideAggregationAtCommonHorizon, truncateCandlesToHorizon } from "../strategies/common-horizon";
+import { formatCommonHorizonReport, decideAggregationAtCommonHorizon } from "../strategies/common-horizon";
 import { selectQuorumClosedHorizon } from "../strategies/common-horizon-quorum";
 import { buildSmartMoneySignalCandidate } from "./smart-money-candidate";
+import { computeEdgeTransition, type AggregateState } from "./edge-state-machine";
+import { buildSetupKeyFromCandidate } from "./setup-key";
 
 export type SignalEngineResult = {
   evaluatedMarkets: number;
@@ -62,7 +63,7 @@ type IndicatorSnapshotRow = {
 };
 
 // ---------------------------------------------------------------------------
-// TREND SUSLIK path (existing, untouched logic, but entry now nullable in schema)
+// TREND SUSLIK path (existing, untouched)
 // ---------------------------------------------------------------------------
 
 async function runTrendSuslikEngine(opts: {
@@ -255,7 +256,7 @@ async function runTrendSuslikEngine(opts: {
           status: "ACTIVE",
           reason: `${aggregation.explanation} | ${reasons} | confirmation ${aggregation.confirmation} | ATR ${avgAtrReal.toFixed(2)} | ${evaluated.length} markets`,
           strategyId: strategy.id,
-          signalSource: "LEGACY", // trend signals are legacy classification
+          signalSource: "LEGACY",
         },
       });
       console.log(`  CREATED signal id=${created.id} ${created.direction} ${created.symbol} ${created.timeframe} score=${created.score}`);
@@ -275,7 +276,7 @@ async function runTrendSuslikEngine(opts: {
 }
 
 // ---------------------------------------------------------------------------
-// SMART MONEY path — PHASE 2C FINAL HARDENING
+// SMART MONEY path — EDGE/RE-ARM V1
 // ---------------------------------------------------------------------------
 
 async function runSmartMoneyEngine(opts: {
@@ -287,9 +288,10 @@ async function runSmartMoneyEngine(opts: {
   asset: { id: number; symbol: string; rank: number | null };
   result: SignalEngineResult;
   enableSmartMoneyWrite?: boolean;
+  emitOnBootstrap?: boolean;
   commonHorizonPolicy?: "STRICT" | "QUORUM";
 }): Promise<void> {
-  const { timeframe, dryRun, symbol, strategies, eligibleMarkets, asset, result, enableSmartMoneyWrite, commonHorizonPolicy } = opts;
+  const { timeframe, dryRun, symbol, strategies, eligibleMarkets, asset, result, enableSmartMoneyWrite, emitOnBootstrap, commonHorizonPolicy } = opts;
 
   if (!isSmcTimeframe(timeframe)) {
     result.errors.push(`Timeframe ${timeframe} not in SMC whitelist`);
@@ -312,7 +314,7 @@ async function runSmartMoneyEngine(opts: {
     console.log(`  Using fallback strategy id=${strategy.id} slug=${strategy.slug} enabled=${strategy.enabled} status=${strategy.status} (dry-run allowed)`);
   }
 
-  console.log(`\nStrategy ${strategy.slug} v${strategy.version} id=${strategy.id} minExchanges=${strategy.minExchanges} timeframes=${strategy.timeframes.join(",")} policy=${policy}`);
+  console.log(`\nStrategy ${strategy.slug} v${strategy.version} id=${strategy.id} minExchanges=${strategy.minExchanges} timeframes=${strategy.timeframes.join(",")} policy=${policy} emitOnBootstrap=${emitOnBootstrap}`);
 
   if (!strategy.timeframes.includes(timeframe)) {
     console.log(`  Skipped timeframe ${timeframe} not in strategy timeframes ${strategy.timeframes.join(",")}`);
@@ -330,7 +332,6 @@ async function runSmartMoneyEngine(opts: {
   const filters = validation.filters;
 
   console.log(`  Config validated: minimumSignalScore=${smcConfig.minimumScore} swing ${smcConfig.swingLeft}/${smcConfig.swingRight} internal ${smcConfig.internalLeft}/${smcConfig.internalRight} atrPeriod=${smcConfig.atrPeriod}`);
-  console.log(`  Filters: top500Only=${filters.top500Only} minimumQuoteVolume24h=${filters.minimumQuoteVolume24h}`);
 
   type LoadedMarket = { meta: SmartMoneyMarketMeta; candles: SmcRawCandle[] };
   const loaded: LoadedMarket[] = [];
@@ -362,7 +363,7 @@ async function runSmartMoneyEngine(opts: {
     loaded.push({ meta, candles });
   }
 
-  console.log(`  Loaded CLOSED candles: ${loaded.length} markets, each up to 500 (CLOSED only, ASC)`);
+  console.log(`  Loaded CLOSED candles: ${loaded.length} markets, each up to 500`);
 
   const now = new Date();
 
@@ -372,14 +373,10 @@ async function runSmartMoneyEngine(opts: {
       tf,
       { now, minExchanges: strategy.minExchanges }
     );
-    console.log(`\n=== QUORUM POLICY ===`);
-    console.log(`now=${now.toISOString()} expectedLatestClosed=${quorumSel.expectedLatestClosed.toISOString()} status=${quorumSel.status} fresh=${quorumSel.freshCount} stale=${quorumSel.staleCount}`);
-    console.log(`fresh: ${quorumSel.freshMarkets.map((f) => f.exchange).join(", ") || "none"}`);
-    console.log(`stale: ${quorumSel.staleMarkets.map((s) => `${s.exchange}(${s.reason})`).join("; ") || "none"}`);
-    console.log(`reason: ${quorumSel.reason}`);
+    console.log(`\n=== QUORUM POLICY === now=${now.toISOString()} expectedLatestClosed=${quorumSel.expectedLatestClosed.toISOString()} status=${quorumSel.status} fresh=${quorumSel.freshCount} stale=${quorumSel.staleCount}`);
   }
 
-  // Build candidate — PHASE 2C: no optimistic fallback, entry NULL if next bar not available
+  // Build candidate — no optimistic fallback
   const builderResult = buildSmartMoneySignalCandidate({
     markets: loaded,
     timeframe: tf,
@@ -392,205 +389,376 @@ async function runSmartMoneyEngine(opts: {
     symbol,
     minExchanges: strategy.minExchanges,
     policy,
-    // nextBarCandles not loaded in this path — outcome will be WAITING_ENTRY until next bar appears
     nextBarCandles: undefined,
   });
 
-  if (builderResult.selection) {
-    console.log(`\n=== COMMON HORIZON (${policy}) ===`);
-    console.log(`now=${now.toISOString()} timeframe=${tf}`);
-    if (builderResult.selection.commonHorizon) {
-      console.log(`COMMON HORIZON: ${builderResult.selection.commonHorizon.toISOString()}`);
-    } else {
-      console.log(`COMMON HORIZON: null (status=${(builderResult.selection as any).status})`);
-    }
-    console.log(`status=${(builderResult.selection as any).status} participantCount=${(builderResult.selection as any).participantCount}`);
-    if ((builderResult.selection as any).expectedLatestClosed) {
-      console.log(`expectedLatestClosed=${(builderResult.selection as any).expectedLatestClosed.toISOString()}`);
-    }
+  // Determine current aggregate state for edge machine
+  let currentAggregate: AggregateState;
+  let currentCandleTime: Date | null = null;
+  let candidateForEmit: any = null;
 
-    const perMarket = (builderResult.selection as any).perMarketLatest ?? [];
-    for (const p of perMarket) {
-      const horizonStr = builderResult.selection.commonHorizon ? builderResult.selection.commonHorizon.toISOString() : "null";
-      const latestStr = p.latest ? p.latest.toISOString() : "no data";
-      const included = p.hasCommon && (builderResult.selection as any).status === "ok";
-      console.log(`${p.exchange} horizon=${included ? horizonStr : latestStr} ${included ? "INCLUDED" : "EXCLUDED"} latest=${latestStr} hasCommon=${p.hasCommon}`);
-    }
-
-    if (policy === "STRICT") {
-      const reportLines = formatCommonHorizonReport({
-        selection: builderResult.selection as any,
-        timeframe: tf,
-        marketCount: eligibleMarkets.length,
-        exchangeEligibleCount: eligibleMarkets.length,
-        exchangeExcluded: [],
-        filteredCount: (builderResult as any).filteredCount ?? 0,
-      });
-      for (const line of reportLines) console.log(`  ${line}`);
-    }
-
-    const gate = decideAggregationAtCommonHorizon({
-      selection: builderResult.selection as any,
-      results: builderResult.results as any,
-      timeframe: tf,
-    });
-    console.log(`\n=== GATE CHECK === allowed=${gate.allowed} alignment.safe=${gate.alignment.safe} anchor.ok=${gate.anchor.ok}`);
-    if (gate.refusalReasons.length > 0) console.log(`refusalReasons: ${gate.refusalReasons.join("; ")}`);
-  }
-
-  if (builderResult.status === "no_signal") {
-    console.log(`\nNO SIGNAL — ${builderResult.reason}`);
-    if (builderResult.insufficientReason) console.log(`Insufficient reason: ${builderResult.insufficientReason}`);
-    result.neutralGroups++;
-    result.evaluatedMarkets = loaded.length;
-    result.evaluatedAssets = 1;
-    return;
-  }
-
-  const { candidate, aggregation } = builderResult;
-
-  console.log(`\n=== PER-EXCHANGE SMC EVALUATION (raw CLOSED, same asOf) ===`);
-  console.log(`asOf=${candidate.asOf.toISOString()} signalCandleTime=${candidate.signalCandleTime.toISOString()} executionStatus=${candidate.executionStatus}`);
-  for (const per of candidate.metadata.perExchange) {
-    console.log(`\n--- ${per.exchange} ---`);
-    console.log(`exchange=${per.exchange} direction=${per.direction} longScore=${per.longScore} shortScore=${per.shortScore} evaluable=${per.evaluable} price=${per.price}`);
-    console.log(`hardFailures=${per.hardFailures.join("; ") || "none"}`);
-    console.log(`softUnavailable=${per.softUnavailable.join(", ") || "none"}`);
-    console.log(`A-I:`);
-    for (const r of per.reasons) {
-      console.log(`  ${r.code} long=${r.longPoints} short=${r.shortPoints} max=${r.maxPoints} label=${r.label}`);
-    }
-  }
-
-  console.log(`\n=== AGGREGATION (structured confirmation) ===`);
-  console.log(`eligible=${eligibleMarkets.length} participantCount=${candidate.participantCount} evaluated=${candidate.evaluatedCount} skipped=${aggregation.skipped} minExchanges=${candidate.metadata.minExchanges}`);
-  console.log(`longVotes=${aggregation.longVotes} shortVotes=${aggregation.shortVotes} neutralVotes=${aggregation.neutralVotes}`);
-  console.log(`direction=${aggregation.direction} confirmation=${aggregation.confirmation} (${candidate.confirmationCount}/${candidate.confirmationTotal}) conflict=${aggregation.conflict}`);
-  console.log(`score semantics: LONG=longScore SHORT=shortScore => score=${candidate.score} longScore=${candidate.longScore} shortScore=${candidate.shortScore}`);
-  console.log(`reference=${candidate.referenceExchange} referencePrice=${candidate.referencePrice} (analytic only) aggregatePrice=${candidate.aggregatePrice} (info only) fallback=${candidate.referenceFallback}`);
-  console.log(`explanation: ${aggregation.explanation}`);
-
-  console.log(`\n=== CANDIDATE (immutable, deepFreeze) ===`);
-  console.log(`signalCandleTime=${candidate.signalCandleTime.toISOString()} direction=${candidate.direction} score=${candidate.score}`);
-  console.log(`executionStatus=${candidate.executionStatus} entry=${candidate.entry} entryTime=${candidate.entryTime?.toISOString() ?? "NULL (WAITING_ENTRY)"}`);
-  console.log(`ATR frozen at signal: ${candidate.atrAtSignal} period=${candidate.metadata.atrPeriod}`);
-  if (candidate.executionStatus === "READY") {
-    console.log(`SL=${candidate.stopLoss} TP1=${candidate.takeProfit1} TP2=${candidate.takeProfit2} TP3=${candidate.takeProfit3} (anchored to real NEXT_BAR_OPEN)`);
+  if (builderResult.status === "ok") {
+    candidateForEmit = builderResult.candidate;
+    currentAggregate = candidateForEmit.direction as AggregateState; // LONG/SHORT
+    currentCandleTime = candidateForEmit.signalCandleTime;
   } else {
-    console.log(`SL/TP=NULL — no entry yet, will be calculated only after real NEXT_BAR_OPEN appears (ATR frozen but not applied)`);
+    // No signal — distinguish NEUTRAL vs UNAVAILABLE
+    const sel = builderResult.selection as any;
+    const reason = builderResult.reason || "";
+    const insufficient = builderResult.insufficientReason || "";
+
+    // Map to AggregateState
+    if (insufficient.includes("INSUFFICIENT") || sel?.status === "quorum_not_met") {
+      currentAggregate = "QUORUM_NOT_MET";
+    } else if (reason.includes("NEUTRAL") || insufficient === "NO_CONFIRMATION" || insufficient === "CONFLICT") {
+      currentAggregate = "NEUTRAL";
+    } else if (sel?.status === "future_horizon") {
+      currentAggregate = "FUTURE_HORIZON";
+    } else if (sel?.status === "absolute_stale" || reason.includes("stale")) {
+      currentAggregate = "ABSOLUTE_STALE";
+    } else if (reason.includes("CANNOT") || insufficient.includes("CANNOT")) {
+      currentAggregate = "CANNOT_EVALUATE";
+    } else {
+      currentAggregate = "DATA_UNAVAILABLE";
+    }
+    currentCandleTime = sel?.commonHorizon || sel?.expectedLatestClosed || now;
+    console.log(`\nNO SIGNAL — mapped to aggregateState=${currentAggregate} reason=${reason} insufficient=${insufficient}`);
   }
-  console.log(`reason: ${candidate.reason}`);
-  console.log(`metadata keys: ${Object.keys(candidate.metadata).join(", ")}`);
+
+  // Load persistent state
+  let stateRow: any = null;
+  try {
+    stateRow = await prisma.strategySignalState.findUnique({
+      where: { strategyId_symbol_timeframe: { strategyId: strategy.id, symbol, timeframe } },
+    });
+  } catch (e: any) {
+    console.log(`  StrategySignalState table not exists yet (migration not applied) — will use in-memory for dry-run, fail-closed for live`);
+    stateRow = null;
+  }
+
+  console.log(`\n=== EDGE STATE MACHINE V1 ===`);
+  console.log(`Previous state: ${stateRow ? `${stateRow.aggregateState} lastEvaluated=${stateRow.lastEvaluatedCandleTime?.toISOString()} lastSignal=${stateRow.lastSignalCandleTime?.toISOString()} ${stateRow.lastSignalDirection}` : "null (bootstrap)"}`);
+  console.log(`Current aggregate: ${currentAggregate} candleTime=${currentCandleTime?.toISOString()}`);
+
+  const transition = computeEdgeTransition({
+    previousStateRow: stateRow ? {
+      strategyId: stateRow.strategyId,
+      symbol: stateRow.symbol,
+      timeframe: stateRow.timeframe,
+      lastEvaluatedCandleTime: stateRow.lastEvaluatedCandleTime,
+      aggregateState: stateRow.aggregateState,
+      lastSignalCandleTime: stateRow.lastSignalCandleTime,
+      lastSignalDirection: stateRow.lastSignalDirection,
+      lastEvaluationStatus: stateRow.lastEvaluationStatus,
+    } : null,
+    currentAggregate,
+    currentCandleTime: currentCandleTime || now,
+    emitOnBootstrap: emitOnBootstrap || false,
+  });
+
+  console.log(`Transition: ${transition.previousState ?? "null"} -> ${transition.currentAggregate} action=${transition.action} shouldEmit=${transition.shouldEmit} emitDir=${transition.emitDirection} trigger=${transition.triggerType} reason=${transition.reason}`);
 
   result.evaluatedMarkets = loaded.length;
   result.evaluatedAssets = 1;
 
-  // WRITE GUARD AND — PHASE 2C: both flag AND env must be true
+  // WRITE GUARD AND
   const flagEnabled = enableSmartMoneyWrite === true;
   const envEnabled = process.env.SMART_MONEY_WRITE_ENABLED === "true";
   const writeAllowed = flagEnabled && envEnabled;
 
-  console.log(`\n=== WRITE GUARD AND (PHASE 2C) === flag=${flagEnabled} env=${envEnabled} => allowed=${writeAllowed}`);
-  console.log(`Truth table: flag false/env false=blocked, flag true/env false=blocked, flag false/env true=blocked, flag true/env true=allowed`);
+  console.log(`\n=== WRITE GUARD AND === flag=${flagEnabled} env=${envEnabled} => allowed=${writeAllowed}`);
 
-  if (candidate.direction === "NEUTRAL") {
-    result.neutralGroups++;
-    console.log(`\nNEUTRAL — no signal persisted`);
+  // Handle idempotent and refuse cases
+  if (transition.action === "NOOP_SAME_HORIZON") {
+    console.log(`Idempotent no-op — same horizon already evaluated, no state mutation, no signal`);
+    result.signalsSkippedDuplicate++;
+    return;
+  }
+  if (transition.action === "REFUSE_OLDER_HORIZON") {
+    console.log(`Refuse older horizon — regression, no state mutation`);
+    result.errors.push(`Refuse older horizon ${transition.currentCandleTime.toISOString()} < lastEvaluated`);
+    return;
+  }
+  if (transition.action === "PRESERVE_UNAVAILABLE") {
+    console.log(`Preserve unavailable — ${currentAggregate} does NOT re-arm, state preserved but lastEvaluated updated`);
+    if (dryRun) {
+      console.log(`DRY-RUN — would update lastEvaluatedCandleTime to ${transition.currentCandleTime.toISOString()} but preserve aggregateState=${transition.previousState}`);
+      result.neutralGroups++;
+      return;
+    }
+    if (!writeAllowed) {
+      console.log(`WRITE BLOCKED — dry-run forced for preserve unavailable`);
+      result.neutralGroups++;
+      return;
+    }
+    // Update only lastEvaluated, preserve aggregateState
+    try {
+      await prisma.$transaction(async (tx: any) => {
+        const existing = await tx.strategySignalState.findUnique({ where: { strategyId_symbol_timeframe: { strategyId: strategy.id, symbol, timeframe } } });
+        if (existing) {
+          // Check idempotency inside transaction
+          if (existing.lastEvaluatedCandleTime && existing.lastEvaluatedCandleTime.getTime() === transition.currentCandleTime.getTime()) {
+            return;
+          }
+          if (existing.lastEvaluatedCandleTime && transition.currentCandleTime.getTime() < existing.lastEvaluatedCandleTime.getTime()) {
+            throw new Error(`Refuse older horizon in tx`);
+          }
+          await tx.strategySignalState.update({
+            where: { id: existing.id },
+            data: {
+              lastEvaluatedCandleTime: transition.currentCandleTime,
+              lastEvaluationStatus: currentAggregate,
+              metadata: { lastReason: transition.reason, lastAction: transition.action } as any,
+            },
+          });
+        } else {
+          // No state yet and current is unavailable — bootstrap as NEUTRAL? Actually preserve null, but we should bootstrap NEUTRAL without signal
+          await tx.strategySignalState.create({
+            data: {
+              strategyId: strategy.id,
+              symbol,
+              timeframe,
+              lastEvaluatedCandleTime: transition.currentCandleTime,
+              aggregateState: "NEUTRAL",
+              lastEvaluationStatus: currentAggregate,
+              metadata: { bootstrapFromUnavailable: true, lastReason: transition.reason } as any,
+            },
+          });
+        }
+      });
+      console.log(`  State preserved for unavailable`);
+      result.neutralGroups++;
+    } catch (e: any) {
+      console.error(`  Error preserving unavailable state: ${e.message}`);
+      result.errors.push(`Preserve unavailable error: ${e.message}`);
+    }
     return;
   }
 
+  // For NEUTRAL, HOLD, REARM, BOOTSTRAP_NO_SIGNAL — update state only, no signal
+  if (!transition.shouldEmit) {
+    if (transition.action === "BOOTSTRAP_NO_SIGNAL") {
+      console.log(`\nBOOTSTRAP_NO_SIGNAL — ${transition.reason} — state will be created as ${currentAggregate} without signal (default)`);
+    } else if (transition.action === "REARM") {
+      console.log(`\nRE-ARM — ${transition.reason} — will update state to NEUTRAL`);
+    } else if (transition.action === "HOLD") {
+      console.log(`\nHOLD — ${transition.reason} — will update lastEvaluated but keep ${transition.previousState}`);
+    }
+
+    if (dryRun) {
+      console.log(`DRY-RUN — would update state to ${currentAggregate} at ${transition.currentCandleTime.toISOString()} but persist nothing (no Signal, no Outcome, no State mutation)`);
+      result.neutralGroups++;
+      return;
+    }
+
+    if (!writeAllowed) {
+      console.log(`WRITE BLOCKED — dry-run forced for state update ${transition.action}`);
+      result.neutralGroups++;
+      return;
+    }
+
+    // Live state-only update
+    try {
+      await prisma.$transaction(async (tx: any) => {
+        const existing = await tx.strategySignalState.findUnique({ where: { strategyId_symbol_timeframe: { strategyId: strategy.id, symbol, timeframe } } });
+        if (existing) {
+          if (existing.lastEvaluatedCandleTime && existing.lastEvaluatedCandleTime.getTime() === transition.currentCandleTime.getTime()) return;
+          if (existing.lastEvaluatedCandleTime && transition.currentCandleTime.getTime() < existing.lastEvaluatedCandleTime.getTime()) throw new Error("Refuse older horizon");
+          await tx.strategySignalState.update({
+            where: { id: existing.id },
+            data: {
+              lastEvaluatedCandleTime: transition.currentCandleTime,
+              aggregateState: currentAggregate,
+              lastEvaluationStatus: currentAggregate,
+              metadata: { lastReason: transition.reason, lastAction: transition.action } as any,
+            },
+          });
+        } else {
+          await tx.strategySignalState.create({
+            data: {
+              strategyId: strategy.id,
+              symbol,
+              timeframe,
+              lastEvaluatedCandleTime: transition.currentCandleTime,
+              aggregateState: currentAggregate,
+              lastEvaluationStatus: currentAggregate,
+              metadata: { lastReason: transition.reason, lastAction: transition.action } as any,
+            },
+          });
+        }
+      });
+      console.log(`  State updated to ${currentAggregate} at ${transition.currentCandleTime.toISOString()}`);
+      result.neutralGroups++;
+    } catch (e: any) {
+      if (e.code === "P2002" || e.message?.includes("Unique constraint")) {
+        console.log(`  Duplicate state unique — idempotent`);
+        result.signalsSkippedDuplicate++;
+      } else {
+        console.error(`  Error updating state: ${e.message}`);
+        result.errors.push(`State update error: ${e.message}`);
+      }
+    }
+    return;
+  }
+
+  // EMIT path — shouldEmit true
+  if (!candidateForEmit) {
+    console.log(`  Inconsistent: shouldEmit true but no candidate — no signal`);
+    result.errors.push("Emit true but no candidate");
+    return;
+  }
+
+  const candidate = candidateForEmit;
+  const setupKey = buildSetupKeyFromCandidate(candidate, strategy.version);
+
+  console.log(`\n=== CANDIDATE FOR EMIT (${transition.triggerType}) ===`);
+  console.log(`signalCandleTime=${candidate.signalCandleTime.toISOString()} direction=${candidate.direction} score=${candidate.score} trigger=${transition.triggerType} setupKey=${setupKey.slice(0, 80)}...`);
+  console.log(`reference=${candidate.referenceExchange} refPrice=${candidate.referencePrice} (analytic) fallback=${candidate.referenceFallback}`);
+  console.log(`executionStatus=${candidate.executionStatus} entry=${candidate.entry} atr=${candidate.atrAtSignal}`);
+
   if (dryRun) {
-    console.log(`\nDRY-RUN — candidate NOT persisted (would create signal with status ${candidate.executionStatus})`);
+    console.log(`\nDRY-RUN — would EMIT ${transition.emitDirection} with trigger ${transition.triggerType} at ${candidate.signalCandleTime.toISOString()} but persist nothing (no Signal, no Outcome, no State mutation)`);
+    console.log(`Previous state ${transition.previousState} -> ${transition.currentAggregate} action ${transition.action}`);
     result.signalsCreated++;
-    if (candidate.direction === "LONG") result.longSignals++;
+    if (transition.emitDirection === "LONG") result.longSignals++;
     else result.shortSignals++;
     return;
   }
 
   if (!writeAllowed) {
-    console.log(`\nPHASE 2C GUARD: write BLOCKED — need BOTH --enable-smart-money-write AND SMART_MONEY_WRITE_ENABLED=true`);
-    console.log(`DRY-RUN forced — candidate NOT persisted`);
+    console.log(`\nWRITE BLOCKED — need BOTH --enable-smart-money-write AND SMART_MONEY_WRITE_ENABLED=true — dry-run forced, would emit ${transition.emitDirection}`);
     result.signalsCreated++;
-    if (candidate.direction === "LONG") result.longSignals++;
+    if (transition.emitDirection === "LONG") result.longSignals++;
     else result.shortSignals++;
     return;
   }
 
-  // Live persistence — same candidate, no re-evaluation, explicit LIVE_FORWARD
-  // No backtest writing to Signal table — backtest separate contour
-  console.log(`\nLIVE WRITE ALLOWED — persisting candidate (same payload as dry-run) with signalSource=LIVE_FORWARD`);
+  // Transactional write: Signal + Outcome + State update in ONE transaction
+  console.log(`\nLIVE WRITE ALLOWED — transactional emit: Signal+Outcome+State update in ONE transaction`);
   try {
-    const created = await prisma.signal.create({
-      data: {
-        symbol: candidate.symbol,
-        timeframe: candidate.timeframe,
-        direction: candidate.direction,
-        score: candidate.score,
-        entry: candidate.entry, // NULL if WAITING_ENTRY — no optimistic fallback
-        stopLoss: candidate.stopLoss, // NULL if WAITING_ENTRY
-        takeProfit1: candidate.takeProfit1,
-        takeProfit2: candidate.takeProfit2,
-        takeProfit3: candidate.takeProfit3,
-        status: candidate.executionStatus === "READY" ? "ACTIVE" : candidate.executionStatus, // WAITING_ENTRY or ENTRY_DATA_MISSING
-        reason: candidate.reason.slice(0, 1000),
-        strategyId: candidate.strategyId,
-        signalCandleTime: candidate.signalCandleTime,
-        referenceExchange: candidate.referenceExchange,
-        referencePrice: candidate.referencePrice, // analytic only
-        aggregatePrice: candidate.aggregatePrice,
-        executionPolicy: candidate.executionPolicy,
-        signalSource: "LIVE_FORWARD", // explicit, not default LEGACY
-        metadata: candidate.metadata as any,
-        atrAtSignal: candidate.atrAtSignal,
-        nextBarOpenPrice: candidate.entry, // entry = nextBarOpenPrice when READY, else null
-        nextBarOpenTime: candidate.entryTime,
-        participantCount: candidate.participantCount,
-        evaluatedCount: candidate.evaluatedCount,
-        longVotes: candidate.metadata.longVotes,
-        shortVotes: candidate.metadata.shortVotes,
-        neutralVotes: candidate.metadata.neutralVotes,
-        confirmationCount: candidate.confirmationCount,
-        confirmationTotal: candidate.confirmationTotal,
-        commonHorizonPolicy: candidate.metadata.policy,
-        referenceFallback: candidate.referenceFallback,
-      },
-    });
-    console.log(`  CREATED signal id=${created.id} ${created.direction} ${created.symbol} ${created.timeframe} candleTime=${created.signalCandleTime?.toISOString()} score=${created.score} ref=${created.referenceExchange} status=${created.status} source=${created.signalSource}`);
+    await prisma.$transaction(async (tx: any) => {
+      // Re-check state inside transaction for concurrency
+      const existingState = await tx.strategySignalState.findUnique({ where: { strategyId_symbol_timeframe: { strategyId: strategy.id, symbol, timeframe } } });
+      if (existingState) {
+        if (existingState.lastEvaluatedCandleTime && existingState.lastEvaluatedCandleTime.getTime() === transition.currentCandleTime.getTime()) {
+          console.log(`  Concurrent same horizon already processed — idempotent no-op inside tx`);
+          return;
+        }
+        if (existingState.lastEvaluatedCandleTime && transition.currentCandleTime.getTime() < existingState.lastEvaluatedCandleTime.getTime()) {
+          throw new Error(`Refuse older horizon inside tx`);
+        }
+        // Also check if state already moved to same direction — prevent duplicate emit from concurrent workers
+        // If existingState.aggregateState === currentAggregate and existingState.lastSignalCandleTime close, skip
+        if (existingState.aggregateState === currentAggregate && existingState.lastSignalCandleTime && existingState.lastSignalCandleTime.getTime() === candidate.signalCandleTime.getTime()) {
+          console.log(`  Duplicate signal already exists for same candle — skip inside tx`);
+          return;
+        }
+      }
 
-    // Create SignalOutcome — separate model, does not mutate Signal
-    try {
-      const outcome = await prisma.signalOutcome.create({
+      // Create Signal
+      const created = await tx.signal.create({
         data: {
-          signalId: created.id,
-          status: candidate.executionStatus === "READY" ? "OPEN" : candidate.executionStatus, // WAITING_ENTRY or ENTRY_DATA_MISSING or OPEN
-          entryTime: candidate.entryTime,
-          entryPrice: candidate.entry,
+          symbol: candidate.symbol,
+          timeframe: candidate.timeframe,
+          direction: candidate.direction,
+          score: candidate.score,
+          entry: candidate.entry,
           stopLoss: candidate.stopLoss,
           takeProfit1: candidate.takeProfit1,
           takeProfit2: candidate.takeProfit2,
           takeProfit3: candidate.takeProfit3,
+          status: candidate.executionStatus === "READY" ? "ACTIVE" : candidate.executionStatus,
+          reason: candidate.reason.slice(0, 1000),
+          strategyId: candidate.strategyId,
+          signalCandleTime: candidate.signalCandleTime,
+          referenceExchange: candidate.referenceExchange,
+          referencePrice: candidate.referencePrice,
+          aggregatePrice: candidate.aggregatePrice,
           executionPolicy: candidate.executionPolicy,
-          executionParams: candidate.executionParams as any,
+          signalSource: "LIVE_FORWARD",
+          metadata: { ...candidate.metadata, triggerType: transition.triggerType, setupKey, edgeTransition: transition } as any,
           atrAtSignal: candidate.atrAtSignal,
-          timeoutCandles: (candidate.executionParams as any).timeoutCandles ?? null,
+          nextBarOpenPrice: candidate.entry,
+          nextBarOpenTime: candidate.entryTime,
+          participantCount: candidate.participantCount,
+          evaluatedCount: candidate.evaluatedCount,
+          longVotes: candidate.metadata.longVotes,
+          shortVotes: candidate.metadata.shortVotes,
+          neutralVotes: candidate.metadata.neutralVotes,
+          confirmationCount: candidate.confirmationCount,
+          confirmationTotal: candidate.confirmationTotal,
+          commonHorizonPolicy: candidate.metadata.policy,
+          referenceFallback: candidate.referenceFallback,
+          setupKey,
+          triggerType: transition.triggerType,
         },
       });
-      console.log(`  CREATED outcome id=${outcome.id} signalId=${outcome.signalId} status=${outcome.status} entry=${outcome.entryPrice} @ ${outcome.entryTime?.toISOString() ?? "NULL"}`);
-    } catch (e: any) {
-      console.error(`  Failed to create outcome for signal ${created.id}: ${e.message} — Signal remains, outcome can be created later by tracker`);
-      // Do not fail signal creation if outcome fails — outcome can be backfilled
-    }
+      console.log(`  CREATED signal id=${created.id} ${created.direction} ${created.symbol} ${created.timeframe} candle=${created.signalCandleTime?.toISOString()} trigger=${created.triggerType}`);
+
+      // Create Outcome
+      try {
+        const outcome = await tx.signalOutcome.create({
+          data: {
+            signalId: created.id,
+            status: candidate.executionStatus === "READY" ? "OPEN" : candidate.executionStatus,
+            entryTime: candidate.entryTime,
+            entryPrice: candidate.entry,
+            stopLoss: candidate.stopLoss,
+            takeProfit1: candidate.takeProfit1,
+            takeProfit2: candidate.takeProfit2,
+            takeProfit3: candidate.takeProfit3,
+            executionPolicy: candidate.executionPolicy,
+            executionParams: candidate.executionParams as any,
+            atrAtSignal: candidate.atrAtSignal,
+            timeoutCandles: (candidate.executionParams as any).timeoutCandles ?? null,
+          },
+        });
+        console.log(`  CREATED outcome id=${outcome.id} signalId=${outcome.signalId} status=${outcome.status}`);
+      } catch (e: any) {
+        console.error(`  Failed outcome for signal ${created.id}: ${e.message} — will be backfilled`);
+      }
+
+      // Update State
+      if (existingState) {
+        await tx.strategySignalState.update({
+          where: { id: existingState.id },
+          data: {
+            lastEvaluatedCandleTime: transition.currentCandleTime,
+            aggregateState: currentAggregate,
+            lastSignalCandleTime: candidate.signalCandleTime,
+            lastSignalDirection: candidate.direction,
+            lastEvaluationStatus: currentAggregate,
+            metadata: { lastReason: transition.reason, lastAction: transition.action, lastTrigger: transition.triggerType, setupKey } as any,
+          },
+        });
+      } else {
+        await tx.strategySignalState.create({
+          data: {
+            strategyId: strategy.id,
+            symbol,
+            timeframe,
+            lastEvaluatedCandleTime: transition.currentCandleTime,
+            aggregateState: currentAggregate,
+            lastSignalCandleTime: candidate.signalCandleTime,
+            lastSignalDirection: candidate.direction,
+            lastEvaluationStatus: currentAggregate,
+            metadata: { lastReason: transition.reason, lastAction: transition.action, lastTrigger: transition.triggerType, setupKey } as any,
+          },
+        });
+      }
+      console.log(`  State updated transactionally to ${currentAggregate} at ${transition.currentCandleTime.toISOString()}`);
+    });
 
     result.signalsCreated++;
-    if (candidate.direction === "LONG") result.longSignals++;
+    if (transition.emitDirection === "LONG") result.longSignals++;
     else result.shortSignals++;
   } catch (e: any) {
     if (e.code === "P2002" || e.message?.includes("Unique constraint") || e.message?.includes("unique")) {
-      console.log(`  Duplicate unique constraint [strategyId,symbol,timeframe,signalCandleTime] — same candle already has signal, blocked (LONG then SHORT on same candle not allowed)`);
+      console.log(`  Duplicate unique [strategyId,symbol,timeframe,signalCandleTime] — concurrent same-horizon max one Signal`);
       result.signalsSkippedDuplicate++;
     } else {
-      console.error(`  Error creating signal: ${e.message}`);
-      result.errors.push(`Create signal error: ${e.message}`);
+      console.error(`  Transaction failed — no partial Signal/Outcome/state: ${e.message}`);
+      result.errors.push(`Transaction error: ${e.message}`);
     }
   }
 }
@@ -606,6 +774,7 @@ export async function runSignalEngineForBtc(opts: {
   symbol?: string;
   strategy?: string;
   enableSmartMoneyWrite?: boolean;
+  emitOnBootstrap?: boolean;
   commonHorizonPolicy?: "STRICT" | "QUORUM";
 }): Promise<SignalEngineResult> {
   const timeframe = opts.timeframe ?? "1h";
@@ -614,6 +783,7 @@ export async function runSignalEngineForBtc(opts: {
   const symbol = opts.symbol ?? "BTC";
   const strategySlug = (opts as any).strategy ?? "trend-suslik";
   const enableSmartMoneyWrite = (opts as any).enableSmartMoneyWrite ?? false;
+  const emitOnBootstrap = (opts as any).emitOnBootstrap ?? false;
   const commonHorizonPolicy = (opts as any).commonHorizonPolicy ?? "QUORUM";
 
   const result: SignalEngineResult = {
@@ -737,6 +907,7 @@ export async function runSignalEngineForBtc(opts: {
       asset: asset as any,
       result,
       enableSmartMoneyWrite,
+      emitOnBootstrap,
       commonHorizonPolicy,
     });
   } else {
