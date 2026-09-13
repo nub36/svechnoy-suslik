@@ -16,6 +16,7 @@ import type { RawSmcObservation, HistoricalObservationBatch } from "./smc-observ
 import type { ExecutionPolicyDefinition, ExecutionPolicyResult } from "./execution-policy";
 import type { SplitsReadinessReport } from "./splits-readiness";
 import type { PrePnlDiagnostics } from "./pre-pnl-runner";
+import { deepFreeze } from "./immutable";
 
 // Read-only inspection result — what owner CLI produces, UI can display
 export type OwnerInspectionResult = {
@@ -85,7 +86,7 @@ export type BacktestsReadinessApiResponse = {
 };
 
 export function buildBacktestsReadinessResponse(): BacktestsReadinessApiResponse {
-  return Object.freeze({
+  return deepFreeze({
     p2a: { version: "p2a-1.2.0", status: "ACCEPTED" as const, vpsVerified: true },
     p2b: { status: "HARDENED_ACCEPTED" as const, tests: "427/427" },
     p2c: { version: "p2c-1.2.0", status: "ACCEPTED" as const, tests: "contract 213/213 report 225/225 leakage 174/174 hardening 165/165" },
@@ -104,14 +105,14 @@ export function buildBacktestsReadinessResponse(): BacktestsReadinessApiResponse
       readOnly: true as const,
       noPnl: true as const,
     },
-    limitations: Object.freeze([
+    limitations: [
       "Historical eligibility CANNOT_RECONSTRUCT — E1/E2/E3 unresolved",
       "OHLCV PIT not guaranteed — sync.ts upsert path",
       "No profitability until execution policy APPROVED — PRE_REGISTRATION_REQUIRED",
       "BINGX 1d excluded via isSmartMoneyExchangeEligible",
       "BTC only, 5m/15m/1h/4h/1d, costs 5bps fee 2bps slippage each side",
       "No DB writes, no workers, no Signal Engine, no production deployment",
-    ]),
+    ],
   });
 }
 
