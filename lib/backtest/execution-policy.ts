@@ -16,7 +16,101 @@
 
 import { formatIsoUtc } from "./timeframe";
 
-export type ExecutionPolicyId = string; // e.g. "EP-1" — owner-chosen
+export const FORBIDDEN_ECONOMIC_KEYS = Object.freeze([
+  "atrSlMultiplier",
+  "atrMultiplier",
+  "atr",
+  "k",
+  "rrMin",
+  "rr",
+  "timeoutBars",
+  "timeout",
+  "stopLoss",
+  "takeProfit",
+  "sl",
+  "tp",
+  "structuralAnchor",
+  "protectedLow",
+  "protectedHigh",
+  "buffer",
+  "slAnchor",
+  "tpModel",
+] as const);
+
+export type ForbiddenEconomicKey = typeof FORBIDDEN_ECONOMIC_KEYS[number];
+
+/**
+ * Check if object contains forbidden economic keys without explicit owner-approved declaration.
+ * When policy unresolved / PRE_REGISTRATION, any economic config must fail closed — no hidden defaults adopted.
+ * Mutation {atrSlMultiplier:1.5,k:1,rrMin:2,timeoutBars:24} must fail.
+ */
+export function findUndeclaredEconomicFields(
+  config: Readonly<Record<string, unknown>> | null | undefined,
+  allowedFields: readonly string[] | null | undefined
+): readonly string[] {
+  if (!config || typeof config !== "object") return [];
+  const allowed = new Set((allowedFields ?? []).map(s => s.toLowerCase()));
+  const found: string[] = [];
+  for (const key of Object.keys(config)) {
+    const lower = key.toLowerCase();
+    const isForbidden = (FORBIDDEN_ECONOMIC_KEYS as readonly string[]).some(
+      fk => fk.toLowerCase() === lower || lower.includes(fk.toLowerCase())
+    ) || ["atrslmultiplier","rrmin","timeoutbars","stoploss","takeprofit","structuralanchor"].includes(lower);
+    if (isForbidden) {
+      if (!allowed.has(lower) && !allowed.has(key)) {
+        const allowedHasKey = Array.from(allowed).some(a => a === lower || a === key.toLowerCase() || lower.includes(a) || a.includes(lower));
+        if (!allowedHasKey) {
+          found.push(key);
+        }
+      }
+    }
+  }
+  return Object.freeze(found);
+}
+
+export function validateNoHiddenEconomicDefaults(
+  config: Readonly<Record<string, unknown>> | null | undefined,
+  policy: ExecutionPolicyDefinition | null | undefined
+): { ok: true } | { ok: false; errors: readonly string[] } {
+  if (!config) return { ok: true };
+  const allowed = policy?.status === "APPROVED" ? policy.requiredEconomicFields : [];
+  if (!policy || policy.status !== "APPROVED") {
+    const undeclared = findUndeclaredEconomicFields(config, []);
+    if (undeclared.length > 0) {
+      return {
+        ok: false,
+        errors: Object.freeze([
+          `Economic fields ${undeclared.join(", ")} cannot appear without explicitly declared owner-approved inputs — policy unresolved/PRE_REGISTRATION_REQUIRED. Mutation ${JSON.stringify(config)} must fail.`,
+        ]),
+      };
+    }
+    const suspicious = Object.keys(config).filter(k => {
+      const l = k.toLowerCase();
+      return l.includes("atr") || l === "k" || l.includes("rr") || l.includes("timeout") || l.includes("stoploss") || l.includes("takeprofit") || l.includes("anchor");
+    });
+    if (suspicious.length > 0) {
+      return {
+        ok: false,
+        errors: Object.freeze([
+          `Suspicious economic fields ${suspicious.join(", ")} rejected when policy unresolved — no hidden defaults allowed.`,
+        ]),
+      };
+    }
+    return { ok: true };
+  }
+  const undeclared = findUndeclaredEconomicFields(config, allowed);
+  if (undeclared.length > 0) {
+    return {
+      ok: false,
+      errors: Object.freeze([
+        `Economic fields ${undeclared.join(", ")} appear without being declared in requiredEconomicFields — must be explicit owner-approved.`,
+      ]),
+    };
+  }
+  return { ok: true };
+}
+
+export type ExecutionPolicyId = string;
 
 export type ExecutabilityStatus = "EXECUTABLE" | "NON_EXECUTABLE";
 
@@ -56,9 +150,6 @@ export function nonExecutable(
   });
 }
 
-/**
- * Generic execution policy definition — NO economic defaults.
- */
 export type ExecutionPolicyDefinition = {
   readonly id: ExecutionPolicyId;
   readonly version: string;
@@ -76,8 +167,6 @@ export type ExecutionPolicyValidationResult =
   | { readonly ok: false; readonly errors: readonly string[] };
 
 function isValidIsoDateString(s: string): boolean {
-  // Simple ISO validation without new Date token: use Date.parse via Reflect? Use regex + Date.parse
-  // Date.parse is allowed (not in forbidden list), but we avoid new Date
   const ms = Date.parse(s);
   return Number.isFinite(ms);
 }
@@ -138,6 +227,13 @@ export function validateExecutionPolicyDefinition(
         }
       }
     }
+    // Architectural prohibition: economic values cannot appear without explicit declaration
+    if (Array.isArray(r.requiredEconomicFields)) {
+      const undeclared = findUndeclaredEconomicFields(cfg as Readonly<Record<string, unknown>>, r.requiredEconomicFields as string[]);
+      if (undeclared.length > 0) {
+        errors.push(`Economic fields ${undeclared.join(", ")} appear without being declared in requiredEconomicFields — must be explicit owner-approved (no hidden defaults)`);
+      }
+    }
   }
 
   if (r.status !== "DRAFT" && r.status !== "APPROVED" && r.status !== "REJECTED") {
@@ -177,7 +273,6 @@ export type ExecutionPolicyResult = {
 };
 
 function deterministicValidatedAt(): string {
-  // Deterministic placeholder, no wall clock, no new Date token
   return formatIsoUtc(0);
 }
 
@@ -252,6 +347,13 @@ export const EXECUTION_POLICY_NOT_APPROVED_DOC = Object.freeze({
     "RR_min",
     "timeoutBars",
     "new conflict behavior",
+    "atrSlMultiplier",
+    "k",
+    "rrMin",
+    "timeoutBars",
+    "stopLoss",
+    "takeProfit",
+    "structuralAnchor",
   ],
-  requiredExplicit: "All economic values must be explicit required configuration values, no hidden defaults",
+  requiredExplicit: "All economic values must be explicit required configuration values, no hidden defaults — architectural prohibition, not keyword grep",
 });

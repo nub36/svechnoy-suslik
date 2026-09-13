@@ -59,7 +59,7 @@ const validDraft = {
   version: "1.0.0",
   description: "Draft policy with explicit fields but not approved",
   fingerprint: "fingerprint-123",
-  requiredEconomicFields: ["slAnchor", "tpModel", "k", "rrMin", "timeoutBars"],
+  requiredEconomicFields: ["slAnchor", "tpModel", "k", "rrMin", "timeoutBars", "buffer"],
   config: {
     slAnchor: "STRUCTURAL_SWING",
     tpModel: "FIXED_R",
