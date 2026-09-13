@@ -109,43 +109,46 @@ module.exports = {
       // BTC-only Signal Engine: creates real LONG/SHORT signals from Strategy Runtime (trend-suslik 1h)
       // Runs every 5m, checks trend-suslik PUBLISHED enabled, respects cooldown, BINGX 1d excluded, ATR SL/TP
       // .env loaded via dotenv in signal-worker via lib/prisma.ts
+      // FIX: --once + restart_delay + cron_restart caused unnecessary restart races
+      // Now: autorestart false, restart_delay 0, cron only — one reliable launch, idempotent NOOP prevents duplicates
       script: "npx",
       args: "tsx scripts/signal-worker.ts --symbol=BTC --timeframe=1h --once --no-dry-run",
       cwd: "/root/svechnoy-suslik",
       interpreter: "none",
       instances: 1,
       exec_mode: "fork",
-      autorestart: true,
+      autorestart: false,
       watch: false,
       env: {
         NODE_ENV: "production",
       },
-      restart_delay: 300000, // 5m between runs — conservative for 1h timeframe with cooldown 1
+      restart_delay: 0,
       max_memory_restart: "300M",
-      cron_restart: "*/5 * * * *", // Also restart every 5m via cron as backup
+      cron_restart: "2 * * * *", // 2 minutes after each hour close, ensures OHLCV 1h CLOSED ingested (1h candle closes at hour boundary, expected previous hour)
     },
     {
       name: "svechnoy-suslik-signal-btc-15m-smart",
       // BTC 15m Smart Money EDGE/RE-ARM V1 — LIVE production worker
-      // One signal per EDGE, SHORT->SHORT HOLD, NEUTRAL->SHORT EDGE, SHORT->LONG REVERSAL, NEUTRAL REARM, unavailable PRESERVE, same horizon NOOP, bootstrap default no signal, PM2 restart preserves StrategySignalState
+      // One signal per EDGE, SHORT->SHORT HOLD, NEUTRAL->SHORT EDGE, SHORT->LONG REVERSAL, NEUTRAL REARM, unavailable PRESERVE, same horizon NOOP with provisional fix, bootstrap default no signal, PM2 restart preserves StrategySignalState
       // STRICT ATOMIC: Signal+Outcome+State in ONE tx, no catch inside, P2002 outside idempotent
       // Requires SMART_MONEY_WRITE_ENABLED=true env AND --enable-smart-money-write flag (AND guard)
-      // Runs every 3m for 15m timeframe (conservative, checks CLOSED 15m quorum 3/5)
+      // FIX: --once + restart_delay 3m + cron */3 caused overlapping restart races
+      // Now: autorestart false, restart_delay 0, cron at 2,17,32,47 — 2 minutes after each 15m close (00,15,30,45), ensures OHLCV CLOSED ingested (OHLCV worker 2m cadence)
       script: "npx",
       args: "tsx scripts/signal-worker.ts --strategy=smart-money-suslik --symbol=BTC --timeframe=15m --once --no-dry-run --enable-smart-money-write",
       cwd: "/root/svechnoy-suslik",
       interpreter: "none",
       instances: 1,
       exec_mode: "fork",
-      autorestart: true,
+      autorestart: false,
       watch: false,
       env: {
         NODE_ENV: "production",
         SMART_MONEY_WRITE_ENABLED: "true",
       },
-      restart_delay: 180000, // 3m between runs — for 15m timeframe
+      restart_delay: 0,
       max_memory_restart: "300M",
-      cron_restart: "*/3 * * * *", // Every 3m via cron backup, ensures new CLOSED 15m horizon processed
+      cron_restart: "2,17,32,47 * * * *", // 2m after 15m close: 00->02, 15->17, 30->32, 45->47, reliable launch after CLOSED data
     },
   ],
 };
