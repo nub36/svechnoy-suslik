@@ -23,6 +23,7 @@ function parseArgs() {
   const raw = process.argv.slice(2);
   let symbol = "BTC";
   let timeframe = "1h";
+  let strategy = "trend-suslik";
   let dryRun = true;
   let help = false;
 
@@ -31,9 +32,18 @@ function parseArgs() {
     if (a === "--symbol") {
       symbol = raw[i + 1];
       i++;
+    } else if (a.startsWith("--symbol=")) {
+      symbol = a.split("=")[1];
     } else if (a === "--timeframe") {
       timeframe = raw[i + 1];
       i++;
+    } else if (a.startsWith("--timeframe=")) {
+      timeframe = a.split("=")[1];
+    } else if (a === "--strategy") {
+      strategy = raw[i + 1];
+      i++;
+    } else if (a.startsWith("--strategy=")) {
+      strategy = a.split("=")[1];
     } else if (a === "--dry-run") {
       dryRun = true;
     } else if (a === "--no-dry-run" || a === "--live" || a === "--once") {
@@ -43,45 +53,61 @@ function parseArgs() {
     }
   }
 
-  return { symbol, timeframe, dryRun, help };
+  return { symbol, timeframe, strategy, dryRun, help };
 }
 
 function printHelp() {
   console.log(`
-Signal Worker — BTC ONLY — 3001 test → 3000 production
+Signal Worker — BTC ONLY — 3001 test → 3000 production + PHASE 2A Smart Money DRY-RUN
 
 Usage:
   npx tsx scripts/signal-worker.ts --symbol=BTC --timeframe=1h --dry-run
+  npx tsx scripts/signal-worker.ts --symbol=BTC --timeframe=1h --strategy=trend-suslik --dry-run
+  npx tsx scripts/signal-worker.ts --symbol=BTC --timeframe=1h --strategy=smart-money-suslik --dry-run
   npx tsx scripts/signal-worker.ts --symbol=BTC --timeframe=1h --once --no-dry-run
 
 Options:
   --symbol <symbol>    Asset symbol (default BTC) — BTC only pilot
   --timeframe <tf>     Timeframe 5m/15m/1h/4h/1d (default 1h)
+  --strategy <slug>    Strategy slug: trend-suslik (default) or smart-money-suslik (PHASE 2A dry-run only)
   --dry-run            Dry run, no DB writes (default)
-  --no-dry-run --once  Live run, creates real signals in DB
+  --no-dry-run --once  Live run, creates real signals in DB (trend-suslik only, smart-money is always dry-run in PHASE 2A)
   --help               Show help
 
-What it does:
+What it does (trend-suslik):
   - Loads enabled PUBLISHED strategies (trend-suslik)
   - Loads BTC ACTIVE SPOT USDT markets, filters BINGX 1d excluded
   - Loads last IndicatorSnapshot per market for timeframe
   - Evaluates via Strategy Runtime (real production path)
   - Aggregates per asset/timeframe with minExchanges confirmation
   - Creates Signal with entry/SL/TP via ATR multipliers
-  - Duplicate protection: one signal per strategy+symbol+timeframe+candleTime+direction
-  - Cooldown: respects execution.cooldownCandles
+
+What it does (smart-money-suslik) PHASE 2A DRY-RUN:
+  - Loads Strategy smart-money-suslik (even if disabled, dry-run allowed)
+  - Validates config via validateSmartMoneyConfig (production function)
+  - Loads eligible BTC markets BINGX 1d excluded via isSmartMoneyExchangeEligible()
+  - Loads CLOSED raw candles (500 latest, closed=true only)
+  - Determines ONE common CLOSED causal horizon via selectCommonClosedHorizon()
+  - Truncates each exchange to that horizon via truncateCandlesToHorizon()
+  - Evaluates via evaluateSmc() for every participant with identical asOf
+  - CANNOT_EVALUATE/stale exchanges must not vote
+  - Aggregates via aggregateAssetGroup() using Strategy.minExchanges
+  - Outputs candidate LONG/SHORT/NEUTRAL with full A-I explanation
+  - NEVER prisma.signal.create for smart-money (PHASE 2A guard)
 
 VPS Production (3000):
   cd ~/svechnoy-suslik
   git pull
   npx prisma generate
-  npx tsx scripts/signal-worker.ts --symbol=BTC --timeframe=1h --dry-run
-  npx tsx scripts/signal-worker.ts --symbol=BTC --timeframe=1h --once --no-dry-run
+  npx tsx scripts/signal-worker.ts --symbol=BTC --timeframe=1h --strategy=trend-suslik --dry-run
+  npx tsx scripts/signal-worker.ts --symbol=BTC --timeframe=1h --strategy=smart-money-suslik --dry-run
+  npx tsx scripts/signal-worker.ts --symbol=BTC --timeframe=1h --strategy=trend-suslik --once --no-dry-run
   pm2 logs svechnoy-suslik
 
 Test on 3001:
   PORT=3001 npm run dev
-  npx tsx scripts/signal-worker.ts --symbol=BTC --timeframe=1h --dry-run
+  npx tsx scripts/signal-worker.ts --symbol=BTC --timeframe=1h --strategy=trend-suslik --dry-run
+  npx tsx scripts/signal-worker.ts --symbol=BTC --timeframe=1h --strategy=smart-money-suslik --dry-run
 `);
 }
 
@@ -92,7 +118,7 @@ async function main() {
     process.exit(0);
   }
 
-  console.log(`=== SIGNAL WORKER — BTC ${args.symbol} ${args.timeframe} ${args.dryRun ? "DRY-RUN" : "LIVE"} — 3001 TEST → 3000 PROD ===`);
+  console.log(`=== SIGNAL WORKER — BTC ${args.symbol} ${args.timeframe} strategy=${args.strategy} ${args.dryRun ? "DRY-RUN" : "LIVE"} — 3001 TEST → 3000 PROD ===`);
 
   if (args.symbol !== "BTC") {
     console.error(`Only BTC supported for pilot, got ${args.symbol}`);
@@ -105,12 +131,24 @@ async function main() {
     process.exit(1);
   }
 
+  const allowedStrategies = ["trend-suslik", "smart-money-suslik"];
+  if (!allowedStrategies.includes(args.strategy)) {
+    console.error(`Strategy must be one of ${allowedStrategies.join(", ")}, got ${args.strategy}`);
+    process.exit(1);
+  }
+
+  if (args.strategy === "smart-money-suslik" && !args.dryRun) {
+    console.log(`WARNING: smart-money-suslik in PHASE 2A is DRY-RUN only — forcing dryRun=true, no DB writes`);
+    args.dryRun = true;
+  }
+
   try {
     const result = await runSignalEngineForBtc({
       symbol: args.symbol,
       timeframe: args.timeframe,
+      strategy: args.strategy,
       dryRun: args.dryRun,
-    });
+    } as any);
 
     console.log(`\n=== DONE ===`);
     console.log(`Signals created: ${result.signalsCreated} (LONG ${result.longSignals} SHORT ${result.shortSignals})`);
