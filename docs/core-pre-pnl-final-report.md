@@ -73,7 +73,8 @@ Changed files total 17: PROJECT_CONTEXT.md, app/admin/backtests/page.tsx, docs/b
 
 ```bash
 # On VPS, in repo root, no DB writes, no PnL, read-only inspection
-DATABASE_URL="postgresql://..." npx tsx scripts/backtest-historical-readonly.ts \
+# Uses server's existing configured environment — do NOT paste DATABASE_URL/secrets, never echo credentials
+npx tsx scripts/backtest-historical-readonly.ts \
   --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 \
   --pageSize 1000 --smartMoney --smc --splits
 

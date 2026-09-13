@@ -6,8 +6,8 @@
  * Owner will execute it later on VPS. We do NOT execute it against real DB in sandbox.
  * CLI errors must fail closed. Do not hide incomplete coverage. No misleading 100% coverage on non-aligned ranges.
  *
- * Usage (VPS):
- *   DATABASE_URL=... npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney
+ * Usage (VPS — uses server's existing configured env, do NOT paste secrets):
+ *   npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney
  *
  * This script:
  * - Connects via Prisma with read-only transaction
@@ -99,8 +99,8 @@ function printHelp() {
   console.log(`
 Owner-run READ-ONLY historical data inspection CLI — NO DB WRITES — NO PNL
 
-Usage:
-  DATABASE_URL=... npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 [--smartMoney] [--smc] [--splits]
+Usage (uses server's existing env, no secrets, never echo DATABASE_URL):
+  npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 [--smartMoney] [--smc] [--splits]
 
 Options:
   --asset <symbol>       Asset symbol (default BTC)
@@ -120,9 +120,9 @@ Safety:
   - Fail-closed on invalid inputs, non-aligned ranges reported explicitly, never misleading 100% coverage
   - TRAIN/VALIDATION/OOS: OOS does not influence selection, selection stages TRAIN/VALIDATION only, OOS final witness only
 
-Examples:
-  DATABASE_URL=... npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney
-  DATABASE_URL=... npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1d --from 2024-01-01 --to 2024-03-01 --smartMoney --smc --splits
+Examples (no secrets, uses existing env):
+  npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney
+  npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1d --from 2024-01-01 --to 2024-03-01 --smartMoney --smc --splits
 `);
 }
 

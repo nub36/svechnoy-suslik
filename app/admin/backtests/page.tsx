@@ -168,7 +168,7 @@ export default async function AdminBacktestsPage() {
               <li>New work = IMPLEMENTED / PENDING REVIEW — even though own tests pass: 15 commits from exact base, no squash/amend/force-push, no accepted branches altered</li>
               <li>Tests: engine 439/439, p2b 427/427, metrics 123/123, splits 108/108, contract 213/213, report 225/225, leakage 174/174, hardening 165/165, eligibility 96/96, data-plane 46/46, execution-policy 16/16, smc-observation 78/78, pre-pnl 28/28, full-pipeline 40/40 = 2178 checks all green, tsc 0, diff-check clean, build compiled successfully</li>
               <li>No real PnL calculated, no profitability claim, no real DB access in sandbox, no DB writes, no workers, no Prisma migration, no production deployment, Signal Engine NOT introduced, BTC only 5m/15m/1h/4h/1d BINGX excluded 1d costs 5bps fee 2bps slippage</li>
-              <li>Owner-run read-only CLI: DATABASE_URL=... npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --smc --splits</li>
+              <li>Owner-run read-only CLI (uses existing server env, no secrets): npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --smc --splits</li>
               <li>Next: owner chooses E1/E2/E3, approves execution policy economic semantics, VPS verification owner-run read-only CLI</li>
             </ul>
           </div>
