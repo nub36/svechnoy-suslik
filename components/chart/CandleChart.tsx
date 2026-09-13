@@ -2094,8 +2094,17 @@ export default function CandleChart({
         setHistoryEnded(true);
         setHistoryError(true);
       } finally {
-        loadingOlderRef.current = false;
-        setHistoryLoading(false);
+        // Разбираемся только если этот controller всё ещё активный.
+        // Смена рынка/таймфрейма уже сбросила loadingOlderRef и
+        // «Загрузка истории» для НОВОГО окна; если бы старый (аборт-
+        // нутый) проход очищал гейты в finally, он снял бы защиту с
+        // параллельного loadOlder нового рынка (двойной prepend) и
+        // погасил бы его статус.
+        if (olderAbortRef.current === controller) {
+          olderAbortRef.current = null;
+          loadingOlderRef.current = false;
+          setHistoryLoading(false);
+        }
       }
     },
     [

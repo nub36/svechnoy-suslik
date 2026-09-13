@@ -506,6 +506,18 @@ ok(/subscribeVisibleLogicalRangeChange/.test(chartCode), "chart: подгруз�
 ok(/range\.from <= 2/.test(chartCode), "chart: триггер подгрузки истории не менялся");
 ok(/mergeOlder\(/.test(chartCode), "chart: слияние истории — прежний lib/chart/history (semantics не менялись)");
 
+/* Гонка «смена рынка во время older-запроса»: старый прерванный проход
+   не имеет права снимать гейды loadOlder и гасить статус НОВОГО окна —
+   finally чистит состояние только если controller всё ещё активный. */
+ok(
+  /if \(olderAbortRef\.current === controller\) \{/.test(loadOlderCode),
+  "loadOlder: finally с identity-проверкой controller — абортированный старый проход не трогает гейты новой загрузки"
+);
+ok(
+  /olderAbortRef\.current\?\.abort\(\);/.test(chartCode),
+  "loadCandles: смена окна по-прежнему обрывает older-запрос"
+);
+
 // fitContent остаётся ТОЛЬКО на свежей загрузке окна.
 const applyDataCode = stripComments(
   extractBetween(CHART_SRC, "const applyData = useCallback(", "const applyVisibility = useCallback(", "applyData CandleChart")
