@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { redirect, notFound } from "next/navigation";
 import StrategyEditor from "@/components/admin/StrategyEditor";
 import SmartMoneyStrategyEditor from "@/components/admin/SmartMoneyStrategyEditor";
+import SmartMoneyV2Editor from "@/components/admin/SmartMoneyV2Editor";
 import AdminNav from "@/components/admin/AdminNav";
 
 export default async function Page({
@@ -43,7 +44,23 @@ export default async function Page({
       <AdminNav active="strategies" />
 
       <section className="adminDashboard">
-        {strategy.slug === "smart-money-suslik" ? (
+        {strategy.slug === "smart-money-v2" ? (
+          <SmartMoneyV2Editor
+            strategy={{
+              id: strategy.id,
+              slug: strategy.slug,
+              name: strategy.name,
+              description: strategy.description,
+              version: strategy.version,
+              enabled: strategy.enabled,
+              status: strategy.status,
+              mode: (strategy as any).mode || "DISABLED",
+              minExchanges: strategy.minExchanges,
+              timeframes: strategy.timeframes,
+              config: strategy.config as any,
+            }}
+          />
+        ) : strategy.slug === "smart-money-suslik" ? (
           <SmartMoneyStrategyEditor
             strategy={{
               id: strategy.id,

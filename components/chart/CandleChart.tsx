@@ -40,6 +40,18 @@ import {
   parseChartUrlState
 } from "@/lib/chart/url-state";
 import {
+  LEGEND_BOTTOM_GAP_PX,
+  SUSLIK_HANDLE_SCALE,
+  SUSLIK_HANDLE_SCROLL,
+  SUSLIK_KINETIC_SCROLL,
+  SUSLIK_MAIN_PANE_SCALE_MARGINS,
+  SUSLIK_RIGHT_PRICE_SCALE,
+  SUSLIK_TIME_SCALE_NAVIGATION,
+  createMainPaneAutoscaleProvider,
+  legendSpace,
+  shiftLogicalRange
+} from "@/lib/chart/chart-ux";
+import {
   SMC_NETWORK_ERROR_MESSAGE,
   SmartMoneyPanel,
   buildSmcPanelViewModel,
@@ -75,6 +87,22 @@ import {
  * поэтому exchange в SMC-запрос не передаётся. Отрисовка
  * SMC-примитивов поверх свечей — следующий этап P1-D, здесь
  * её нет.
+ *
+ * CHART UX (fix поверх P1-C):
+ *  - легенда OHLC/индикаторов и кнопка «Сбросить масштаб» не
+ *    перекрывают правую ценовую шкалу: место резервируется по
+ *    ФАКТИЧЕСКИМ измерениям lightweight-charts (timeScale().width(),
+ *    priceScale("right").width(), legend.offsetLeft), арифметика —
+ *    чистая функция legendSpace() в lib/chart/chart-ux.ts;
+ *  - навигация/масштаб — ШТАТНЫЕ options библиотеки 5.2.1
+ *    (handleScroll / handleScale / kineticScroll / rightPriceScale /
+ *    timeScale), явно зафиксированные в том же модуле: колесо → zoom,
+ *    drag внутри plot → движение по истории, драг по осям → масштаб
+ *    осей, двойной клик по оси → auto-scale, touch — драг и pinch;
+ *  - ручной уход назад в историю сохраняется при подгрузке старых
+ *    свечей (shiftLogicalRange), fitContent/scrollToRealTime при
+ *    mergeOlder не вызываются; переключение индикаторов не
+ *    пересоздаёт график и не перезапрашивает свечи.
  */
 
 type SymbolInfo = {
@@ -373,6 +401,73 @@ function fmtTime(time: number): string {
   );
 }
 
+/**
+ * HTML легенды под курсором (чистая функция: те же строки, что и
+ * раньше, — меняется только место вызова).
+ *
+ * Вынесена из renderLegendAt, чтобы метрики графика пересчитывались
+ * ПОСЛЕ записи в DOM: высота legend-бокса участвует в AUTO-запасе
+ * основной панели (длинная свеча не должна уходить под легенду).
+ */
+function legendHtml(
+  time: number | null,
+  maps: LegendMaps | null
+): string {
+  if (!maps || maps.index.size === 0) {
+    return '<span class="k">Загрузка данных…</span>';
+  }
+
+  const t =
+    time !== null && maps.index.has(time)
+      ? time
+      : maps.lastTime;
+  const i = maps.index.get(t);
+  const candle = maps.candles[i ?? -1];
+
+  if (!candle) {
+    return '<span class="k">Нет данных</span>';
+  }
+
+  const up = candle.close >= candle.open;
+  const span = (
+    key: string,
+    value: string,
+    cls?: string
+  ) =>
+    `<span class="k">${key}</span> ` +
+    `<b class="${cls ?? ""}">${value}</b>`;
+
+  return [
+    `<span class="lgTime">${fmtTime(t)}</span>`,
+    span("O", fmtPrice(candle.open)),
+    span("H", fmtPrice(candle.high)),
+    span("L", fmtPrice(candle.low)),
+    span(
+      "C",
+      fmtPrice(candle.close),
+      up ? "up" : "down"
+    ),
+    span(
+      "Объём",
+      fmtVolume(maps.volume.get(t))
+    ),
+    span("EMA20", fmtPrice(maps.ema20.get(t))),
+    span("EMA50", fmtPrice(maps.ema50.get(t))),
+    span("EMA200", fmtPrice(maps.ema200.get(t))),
+    span("SMA20", fmtPrice(maps.sma20.get(t))),
+    span("RSI14", fmtPrice(maps.rsi14.get(t))),
+    span("MACD", fmtPrice(maps.macdM.get(t))),
+    span("сигн.", fmtPrice(maps.macdS.get(t))),
+    span(
+      "гист.",
+      fmtPrice(maps.macdH.get(t)),
+      (maps.macdH.get(t) ?? 0) >= 0
+        ? "up"
+        : "down"
+    )
+  ].join(" ");
+}
+
 function valueMap(
   points: TimePoint[] | undefined
 ): Map<number, number> {
@@ -452,6 +547,22 @@ export default function CandleChart({
     useRef<HTMLDivElement | null>(null);
   const legendMapsRef =
     useRef<LegendMaps | null>(null);
+
+  /* ---------- резерв места под правую ценовую шкалу ---------- */
+
+  // Обёртка графика: на неё пишутся измеренные CSS-переменные
+  // (--chart-legend-max-w, --chart-price-scale-w), поэтому легенда и
+  // кнопка сброса масштаба не залезают на правую price scale.
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  // Последнее записанное значение ширины легенды — чтобы не дёргать
+  // style на каждом движении курсора (легенда обновляется часто).
+  const legendMaxWidthRef = useRef<number | null>(null);
+  const priceScaleWidthRef = useRef<number | null>(null);
+  // Вертикальная геометрия основной панели: нижний край легенды (px от
+  // верха панели) и высота панели. -1 — «ещё не измеряли», поэтому
+  // первое же измерение считается изменением и включает AUTO-запас.
+  const legendBottomPxRef = useRef(-1);
+  const mainPaneHeightPxRef = useRef(-1);
 
   const [historyLoading, setHistoryLoading] =
     useState(false);
@@ -664,8 +775,174 @@ export default function CandleChart({
     }
   }, []);
 
+  /* ---------- метрики графика: шкала, легенда, вертикаль ---------- */
+
+  /**
+   * Явные scaleMargins правой ценовой шкалы ОСНОВНОЙ панели (свечи).
+   *
+   * Шкала берётся у самой серии (candleSeries.priceScale()), а НЕ через
+   * chart.applyOptions({ rightPriceScale }): chart-level опции
+   * библиотека применяет сразу ко всем панелям, а RSI и MACD обязаны
+   * остаться на штатных дефолтах со своим autoscale.
+   *
+   * Ручной вертикальный масштаб это НЕ отменяет: значения одинаковы в
+   * обоих режимах, auto-scale возвращается только явным действием
+   * пользователя (кнопка «Сбросить масштаб» / двойной клик), а при
+   * выключенном auto-scale шкала вообще не трогается.
+   */
+  const applyMainPaneScaleMargins = useCallback(() => {
+    const candle = candleSeriesRef.current;
+
+    if (!candle) {
+      return;
+    }
+
+    try {
+      const scale = candle.priceScale();
+
+      if (scale.options().autoScale !== true) {
+        // Пользователь увёл масштаб вручную (drag по ценовой шкале) —
+        // никаких повторных applyOptions: ручной диапазон остаётся его.
+        return;
+      }
+
+      scale.applyOptions({
+        scaleMargins: SUSLIK_MAIN_PANE_SCALE_MARGINS
+      });
+    } catch {
+      // Шкала панели ещё не готова — отступы применятся при следующем
+      // пересчёте метрик.
+    }
+  }, []);
+
+  /**
+   * Легенда (дата/O/H/L/C/объём/EMA/RSI/MACD) и кнопка сброса масштаба
+   * обязаны оставаться ВНУТРИ plot-области: справа находится ценовая
+   * шкала, и её подписи не должны перекрываться.
+   *
+   * Здесь же измеряется ВЕРТИКАЛЬНАЯ геометрия основной панели — высота
+   * панели и нижний край legend-бокса; от них зависит AUTO-запас
+   * ценового диапазона (см. createMainPaneAutoscaleProvider в
+   * lib/chart/chart-ux.ts).
+   *
+   * Ширина берётся из ФАКТИЧЕСКИХ измерений lightweight-charts, а не из
+   * hardcoded координат:
+   *  - chart.timeScale().width() — ширина plot-области БЕЗ колонок
+   *    ценовых шкал (layout-конвенция библиотеки);
+   *  - chart.priceScale("right").width() — ширина самой шкалы;
+   *  - legend.offsetLeft — фактический левый отступ легенды из CSS
+   *    (включая media-правила узких экранов).
+   * Арифметика — чистая функция legendSpace() в lib/chart/chart-ux.ts.
+   * Результат пишется CSS-переменными на обёртку графика, поэтому при
+   * недостатке места легенда корректно переносится (flex-wrap) и не
+   * вылезает под ценовую шкалу.
+   */
+  const applyChartMetrics = useCallback(() => {
+    const chart = chartRef.current;
+    const wrap = wrapRef.current;
+
+    if (!chart || !wrap) {
+      return;
+    }
+
+    let plotWidth = 0;
+    let priceScaleWidth = 0;
+    let paneHeightPx = 0;
+
+    try {
+      plotWidth = chart.timeScale().width();
+      priceScaleWidth = chart
+        .priceScale("right")
+        .width();
+      paneHeightPx =
+        chart.panes()[0]?.getHeight() ?? 0;
+    } catch {
+      // Plot-область/шкала/панели ещё не созданы (first paint) — ниже
+      // сработает fallback по ширине контейнера, а вертикальная
+      // геометрия пересчитается при следующем измерении.
+    }
+
+    const legendEl = legendRef.current;
+
+    const space = legendSpace({
+      plotWidth,
+      priceScaleWidth,
+      leftInset: legendEl ? legendEl.offsetLeft : 0,
+      containerWidth: wrap.clientWidth
+    });
+
+    const unchanged =
+      space.maxWidthPx === legendMaxWidthRef.current &&
+      space.priceScaleWidthPx === priceScaleWidthRef.current;
+
+    if (!unchanged) {
+      legendMaxWidthRef.current = space.maxWidthPx;
+      priceScaleWidthRef.current = space.priceScaleWidthPx;
+
+      if (space.maxWidthPx === null) {
+        // Измерить не удалось — оставляем CSS-fallback.
+        wrap.style.removeProperty("--chart-legend-max-w");
+      } else {
+        wrap.style.setProperty(
+          "--chart-legend-max-w",
+          `${space.maxWidthPx}px`
+        );
+      }
+
+      wrap.style.setProperty(
+        "--chart-price-scale-w",
+        `${space.priceScaleWidthPx}px`
+      );
+    }
+
+    /* -------- вертикальная геометрия основной панели -------- */
+
+    // Нижний край legend-бокса в координатах панели: легенда — overlay
+    // внутри графика (offsetParent — chartWrap, а верх chartWrap
+    // совпадает с верхом контейнера и панели 0). Скрытая легенда
+    // (offsetHeight = 0, например на экранах уже 360px) резерва не даёт.
+    const legendBottomPx =
+      legendEl && legendEl.offsetHeight > 0
+        ? legendEl.offsetTop +
+          legendEl.offsetHeight +
+          LEGEND_BOTTOM_GAP_PX
+        : 0;
+
+    const verticalUnchanged =
+      legendBottomPx === legendBottomPxRef.current &&
+      paneHeightPx === mainPaneHeightPxRef.current;
+
+    legendBottomPxRef.current = legendBottomPx;
+    mainPaneHeightPxRef.current = paneHeightPx;
+
+    if (verticalUnchanged) {
+      return;
+    }
+
+    // Высота панели или легенды изменилась → AUTO-запас надо
+    // пересчитать. Штатный способ: повторное применение тех же
+    // scaleMargins даёт fullUpdate, после которого библиотека
+    // пересчитывает ценовой диапазон — и только в auto-scale
+    // (в ручном режиме пересчёт не выполняется, ручной диапазон
+    // остаётся нетронутым).
+    applyMainPaneScaleMargins();
+  }, [applyMainPaneScaleMargins]);
+
   /* ---------- наполнение серий данными ---------- */
 
+  /**
+   * «Сбросить масштаб» — ТОЛЬКО кнопка (не двойной клик по графику):
+   * возврат к ожидаемому виду ШТАТНЫМИ средствами lightweight-charts
+   * 5.2.1 — timeScale().resetTimeScale() (barSpacing/rightOffset к
+   * дефолту), setAutoScale(true) на правой ценовой шкале каждой панели
+   * и timeScale().scrollToRealTime() (последние закрытые бары).
+   * Собственная «физика» масштаба не реализуется.
+   *
+   * Разделение жестов (урок проваленного ревью 5ff7795 — см.
+   * PROJECT_CONTEXT §31m): двойной клик по ценовой шкале обязан возвращать ТОЛЬКО
+   * авто-масштаб цены (штатный axisDoubleClickReset.price) и не трогать
+   * время; полный сброс времени — явное действие пользователя кнопкой.
+   */
   const resetChartScale = useCallback(() => {
     const chart = chartRef.current;
 
@@ -675,12 +952,22 @@ export default function CandleChart({
 
     chart.timeScale().resetTimeScale();
 
-    chart
-      .priceScale("right")
-      .applyOptions({
-        autoScale: true
-      });
-  }, []);
+    // У панелей RSI и MACD собственные правые ценовые шкалы:
+    // auto-scale возвращается во всех панелях, иначе индикаторы
+    // остались бы в растянутом вручную состоянии.
+    try {
+      for (const pane of chart.panes()) {
+        pane.priceScale("right").setAutoScale(true);
+      }
+    } catch {
+      // Шкалы панелей ещё не готовы; масштаб времени уже сброшен,
+      // auto-scale вернётся при следующей отрисовке.
+    }
+
+    chart.timeScale().scrollToRealTime();
+
+    applyChartMetrics();
+  }, [applyChartMetrics]);
 
   const rebuildLegendMaps = useCallback(
     (data: CandlesResponse) => {
@@ -732,73 +1019,22 @@ export default function CandleChart({
   const renderLegendAt = useCallback(
     (time: number | null) => {
       const el = legendRef.current;
-      const maps = legendMapsRef.current;
 
-      if (!el) {
-        return;
+      if (el) {
+        el.innerHTML = legendHtml(
+          time,
+          legendMapsRef.current
+        );
       }
 
-      if (!maps || maps.index.size === 0) {
-        el.innerHTML =
-          '<span class="k">Загрузка данных…</span>';
-
-        return;
-      }
-
-      const t =
-        time !== null && maps.index.has(time)
-          ? time
-          : maps.lastTime;
-      const i = maps.index.get(t);
-      const candle = maps.candles[i ?? -1];
-
-      if (!candle) {
-        el.innerHTML =
-          '<span class="k">Нет данных</span>';
-
-        return;
-      }
-
-      const up = candle.close >= candle.open;
-      const span = (
-        key: string,
-        value: string,
-        cls?: string
-      ) =>
-        `<span class="k">${key}</span> ` +
-        `<b class="${cls ?? ""}">${value}</b>`;
-
-      el.innerHTML = [
-        `<span class="lgTime">${fmtTime(t)}</span>`,
-        span("O", fmtPrice(candle.open)),
-        span("H", fmtPrice(candle.high)),
-        span("L", fmtPrice(candle.low)),
-        span(
-          "C",
-          fmtPrice(candle.close),
-          up ? "up" : "down"
-        ),
-        span(
-          "Объём",
-          fmtVolume(maps.volume.get(t))
-        ),
-        span("EMA20", fmtPrice(maps.ema20.get(t))),
-        span("EMA50", fmtPrice(maps.ema50.get(t))),
-        span("EMA200", fmtPrice(maps.ema200.get(t))),
-        span("SMA20", fmtPrice(maps.sma20.get(t))),
-        span("RSI14", fmtPrice(maps.rsi14.get(t))),
-        span("MACD", fmtPrice(maps.macdM.get(t))),
-        span("сигн.", fmtPrice(maps.macdS.get(t))),
-        span(
-          "гист.",
-          fmtPrice(maps.macdH.get(t)),
-          (maps.macdH.get(t) ?? 0) >= 0
-            ? "up"
-            : "down"
-        )
-      ].join(" ");
+      // Метрики пересчитываются ПОСЛЕ записи в DOM: легенда обновляется
+      // чаще всего остального (движение курсора, данные, история), а
+      // измеряются и ширина ценовой шкалы (зависит от разрядности цен),
+      // и фактическая высота legend-бокса (от неё зависит AUTO-запас
+      // основной панели по вертикали).
+      applyChartMetrics();
     },
-    []
+    [applyChartMetrics]
   );
 
   const applyData = useCallback(
@@ -929,7 +1165,15 @@ export default function CandleChart({
         ) ?? []
       );
 
+      // fitContent — ТОЛЬКО на свежей загрузке окна (первая
+      // отрисовка, смена актива/биржи/таймфрейма, «Повторить»):
+      // это ожидаемый default view. Подгрузка более старой истории
+      // (loadOlder) fitContent/scrollToRealTime НЕ вызывает —
+      // ручной уход назад в историю там сохраняется.
       chartRef.current?.timeScale().fitContent();
+
+      // renderLegendAt заодно пересчитывает резерв места под
+      // ценовую шкалу (applyChartMetrics).
       renderLegendAt(null);
     },
     [rebuildLegendMaps, renderLegendAt]
@@ -964,6 +1208,17 @@ export default function CandleChart({
       visible: showMacd
     });
   }, [showVolume, showEma, showSma, showRsi, showMacd]);
+
+  // Видимость индикаторов применяется к УЖЕ созданным сериям отдельным
+  // эффектом ниже. Потребители (создание графика и загрузка свечей)
+  // держат стабильную ссылку, поэтому переключение EMA/SMA/RSI/MACD/
+  // Volume НЕ пересоздаёт график и НЕ перезапрашивает свечи: ручной
+  // уход назад в историю при этом не сбрасывается на последние бары.
+  const applyVisibilityRef = useRef(applyVisibility);
+
+  useEffect(() => {
+    applyVisibilityRef.current = applyVisibility;
+  }, [applyVisibility]);
 
   /* ---------- создание графика ---------- */
 
@@ -1000,10 +1255,33 @@ export default function CandleChart({
         vertLines: { color: colors.line },
         horzLines: { color: colors.line }
       },
+      /*
+       * Навигация и масштаб — ШТАТНЫЕ interaction options
+       * lightweight-charts 5.2.1 (значения и обоснование каждого
+       * флага — в lib/chart/chart-ux.ts):
+       *  - колесо мыши (deltaY) → zoom временной шкалы в точке
+       *    курсора, горизонтальный свайп/колесо (deltaX) → движение
+       *    по истории;
+       *  - click+drag внутри plot → горизонтальное перемещение
+       *    истории (pressedMouseMove);
+       *  - драг по оси времени → растянуть/сжать временную шкалу,
+       *    драг по правой ценовой шкале → вертикальный масштаб
+       *    (axisPressedMouseMove.time/.price);
+       *  - двойной клик по оси времени/цены → возврат к auto-scale
+       *    (axisDoubleClickReset), как и кнопка «Сбросить масштаб»;
+       *  - touch: горизонтальный драг и pinch работают, вертикальный
+       *    драг отдан странице (vertTouchDrag false).
+       * Собственная «физика» drag/zoom поверх библиотеки не пишется.
+       */
+      handleScroll: SUSLIK_HANDLE_SCROLL,
+      handleScale: SUSLIK_HANDLE_SCALE,
+      kineticScroll: SUSLIK_KINETIC_SCROLL,
       rightPriceScale: {
+        ...SUSLIK_RIGHT_PRICE_SCALE,
         borderColor: colors.line
       },
       timeScale: {
+        ...SUSLIK_TIME_SCALE_NAVIGATION,
         borderColor: colors.line,
         timeVisible: true,
         secondsVisible: false
@@ -1032,7 +1310,36 @@ export default function CandleChart({
         wickDownColor: colors.red,
         borderUpColor: colors.green,
         borderDownColor: colors.red,
-        priceLineWidth: 1
+        priceLineWidth: 1,
+        /*
+         * ВЕРТИКАЛЬНЫЙ AUTO-запас основной панели — штатный
+         * autoscaleInfoProvider библиотеки: базовый диапазон (видимые
+         * high/low свечей) расширяется в ценовых единицах так, чтобы
+         * экстремумы pump/dump не ложились вплотную к краю полосы и не
+         * уходили под legend-бокс.
+         *
+         * На ручной масштаб не влияет: в ручном режиме библиотека не
+         * пересчитывает диапазон (PriceScale
+         * ._private__recalculatePriceRangeImpl сразу завершается при
+         * isCustomPriceRange() && !isAutoScale()), провайдер не
+         * вызывается, и пользователь свободно сжимает/растягивает цену
+         * drag'ом по правой ценовой шкале. Собственных min/max
+         * ограничений приложение не добавляет.
+         */
+        autoscaleInfoProvider:
+          createMainPaneAutoscaleProvider({
+            paneHeightPx: () => {
+              try {
+                return (
+                  chart.panes()[0]?.getHeight() ?? 0
+                );
+              } catch {
+                return 0;
+              }
+            },
+            legendBottomPx: () =>
+              legendBottomPxRef.current
+          })
       });
 
     volumeSeriesRef.current =
@@ -1158,7 +1465,7 @@ export default function CandleChart({
       // пропорции панелей не критичны
     }
 
-    applyVisibility();
+    applyVisibilityRef.current();
 
     // Прокрутка влево до начала видимой области —
     // подгружаем более старую историю (cursor по openTime).
@@ -1188,6 +1495,18 @@ export default function CandleChart({
           : null
       );
     });
+
+    // Размер plot-области меняется (resize окна, перестройка панелей
+    // RSI/MACD, смена разрядности цен) — резерв места под легенду и
+    // кнопку сброса пересчитывается ШТАТНОЙ подпиской библиотеки,
+    // а не самодельным ResizeObserver поверх неё.
+    chart
+      .timeScale()
+      .subscribeSizeChange(() => {
+        applyChartMetrics();
+      });
+
+    applyChartMetrics();
 
     // реакция на смену темы
     const observer =
@@ -1221,7 +1540,9 @@ export default function CandleChart({
       macdHistRef.current = null;
       rsiGuideLinesRef.current = [];
     };
-  }, [applyChartTheme, applyVisibility]);
+    // applyVisibility намеренно НЕ в зависимостях: график создаётся
+    // один раз, а видимость серий применяет отдельный эффект.
+  }, [applyChartTheme, renderLegendAt, applyChartMetrics]);
 
   /* ---------- загрузка списков ---------- */
 
@@ -1354,27 +1675,46 @@ export default function CandleChart({
         if (list.length === 0) {
           setStatus("empty");
           setErrorMessage(
-            `Нет данных: у ${symbol} пока нет рынков со свечами`
+            `Нет поддерживаемого рынка для live-графика: у ${symbol} нет ACTIVE SPOT USDT рынков на BINANCE/BYBIT/GATE/KUCOIN/BINGX`
           );
-
+          setLiveStatus("NO_MARKET");
           return;
         }
 
-        // URL-биржа имеет приоритет, если реально есть
-        const urlExchange = parseChartUrlState(
+        // Fallback policy: BINANCE > BYBIT > GATE > KUCOIN > BINGX
+        // URL exchange has priority if pair exists, else deterministic priority
+        // Fallback must NOT mask exchange: UI shows Requested vs Actual
+        const availableExchanges = list.map((m) => m.exchange);
+        const EXCHANGE_PRIORITY = ["BINANCE", "BYBIT", "GATE", "KUCOIN", "BINGX"] as const;
+        const urlExchangeParsed = parseChartUrlState(
           initialExchange,
           initialTimeframe,
-          list.map((m) => m.exchange)
+          availableExchanges
         ).exchange;
 
-        setExchange(
-          urlExchange ?? list[0].exchange
-        );
+        let chosenExchange: string | null = null;
+        let fallback = false;
+        const requested = urlExchangeParsed || initialExchange?.toUpperCase() || null;
 
-        const first = urlExchange
-          ? list.find((m) => m.exchange === urlExchange) ??
-            list[0]
-          : list[0];
+        if (urlExchangeParsed && availableExchanges.includes(urlExchangeParsed)) {
+          chosenExchange = urlExchangeParsed;
+          fallback = false;
+        } else {
+          for (const pri of EXCHANGE_PRIORITY) {
+            if (availableExchanges.includes(pri)) {
+              chosenExchange = pri;
+              fallback = requested !== null && requested !== pri;
+              break;
+            }
+          }
+          if (!chosenExchange) chosenExchange = list[0].exchange;
+        }
+
+        setExchange(chosenExchange);
+        setRequestedExchange(requested);
+        setIsFallback(fallback);
+
+        const first = list.find((m) => m.exchange === chosenExchange) ?? list[0];
 
         if (
           !first.timeframes.some(
@@ -1483,7 +1823,7 @@ export default function CandleChart({
         }
 
         applyData(data);
-        applyVisibility();
+        applyVisibilityRef.current();
         applyChartTheme();
         setStatus("ok");
       } catch (error) {
@@ -1511,10 +1851,353 @@ export default function CandleChart({
       exchange,
       timeframe,
       applyData,
-      applyVisibility,
       applyChartTheme
     ]
   );
+
+  /* ---------- LIVE WebSocket — visualization only, NOT for Signal Engine ----------
+   * DISPLAY: PostgreSQL history (CLOSED) + LIVE trade tick (price) + LIVE kline (forming candle) via native WS
+   * SIGNALS: ONLY canonical CLOSED PostgreSQL candles — NO websocket tick enters Signal Engine
+   * All 5 exchanges native WS: BINANCE, BYBIT, GATE, KUCOIN, BINGX
+   * Price stream high-frequency (trade), candle stream lower (kline)
+   * PERFORMANCE: tick coalesced to rAF/100-250ms max 4-10 render/s, candle via series.update() only, no indicator recalc per tick
+   */
+
+  const [livePrice, setLivePrice] = useState<number | null>(null);
+  const [livePriceRaw, setLivePriceRaw] = useState<number | null>(null); // raw latest tick before coalesce
+  const [lastLiveUpdate, setLastLiveUpdate] = useState<Date | null>(null);
+  const [liveStatus, setLiveStatus] = useState<"CONNECTING" | "LIVE" | "RECONNECTING" | "STALE" | "CLOSED" | "ERROR" | "NO_MARKET">("CLOSED");
+  const [liveExchange, setLiveExchange] = useState<string | null>(null);
+  const [requestedExchange, setRequestedExchange] = useState<string | null>(null);
+  const [isFallback, setIsFallback] = useState(false);
+  const liveProviderRef = useRef<any>(null);
+  const lastLiveCandleTimeRef = useRef<number | null>(null);
+  const reconcileTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Tick coalescing: store latest tick, render max 10/sec via rAF
+  const latestTickRef = useRef<{ price: number; eventTime: number } | null>(null);
+  const tickRafRef = useRef<number | null>(null);
+  const lastTickRenderRef = useRef<number>(0);
+  const tickCountRef = useRef(0); // for benchmark
+  const candleCountRef = useRef(0);
+
+  const isLive = liveStatus === "LIVE";
+
+  // Lightweight candle update — NO indicator recalc per tick (performance)
+  // Uses series.update() for same candle, setData only for new candle append
+  const updateChartWithLiveCandle = useCallback(
+    (liveCandle: { time: number; open: number; high: number; low: number; close: number; volume?: number }) => {
+      const candleSeries = candleSeriesRef.current;
+      if (!candleSeries) return;
+      const existing = rawCandlesRef.current;
+      if (existing.length === 0) return;
+
+      const lastTime = existing[existing.length - 1].time;
+
+      if (liveCandle.time === lastTime) {
+        // Same forming candle — incremental update only, no history rebuild
+        const last = existing[existing.length - 1];
+        // Update raw ref for future comparisons but avoid full array copy for perf
+        existing[existing.length - 1] = {
+          time: liveCandle.time,
+          open: liveCandle.open,
+          high: liveCandle.high,
+          low: liveCandle.low,
+          close: liveCandle.close,
+        };
+        try {
+          candleSeries.update({
+            time: liveCandle.time as UTCTimestamp,
+            open: liveCandle.open,
+            high: liveCandle.high,
+            low: liveCandle.low,
+            close: liveCandle.close,
+          } as CandlestickData);
+        } catch {
+          // Fallback if update fails (e.g., time not in order)
+          try {
+            candleSeries.setData(
+              existing.map((c) => ({
+                time: c.time as UTCTimestamp,
+                open: c.open,
+                high: c.high,
+                low: c.low,
+                close: c.close,
+              }) as CandlestickData)
+            );
+          } catch {}
+        }
+        // Volume incremental
+        if (liveCandle.volume !== undefined) {
+          const vol = volumeRawRef.current;
+          if (vol.length > 0 && vol[vol.length - 1].time === liveCandle.time) {
+            vol[vol.length - 1] = { time: liveCandle.time, value: liveCandle.volume };
+            try {
+              volumeSeriesRef.current?.update({
+                time: liveCandle.time as UTCTimestamp,
+                value: liveCandle.volume,
+                color: readThemeColors().muted + "55",
+              } as HistogramData);
+            } catch {}
+          }
+        }
+      } else if (liveCandle.time > lastTime) {
+        // New candle — append, old becomes historical
+        const newCandle: RawCandle = {
+          time: liveCandle.time,
+          open: liveCandle.open,
+          high: liveCandle.high,
+          low: liveCandle.low,
+          close: liveCandle.close,
+        };
+        existing.push(newCandle);
+        try {
+          candleSeries.update({
+            time: newCandle.time as UTCTimestamp,
+            open: newCandle.open,
+            high: newCandle.high,
+            low: newCandle.low,
+            close: newCandle.close,
+          } as CandlestickData);
+        } catch {
+          candleSeries.setData(
+            existing.map((c) => ({
+              time: c.time as UTCTimestamp,
+              open: c.open,
+              high: c.high,
+              low: c.low,
+              close: c.close,
+            }) as CandlestickData)
+          );
+        }
+        setDataMeta((prev) => (prev ? { ...prev, count: existing.length, lastTime: newCandle.time } : prev));
+        if (liveCandle.volume !== undefined) {
+          volumeRawRef.current.push({ time: liveCandle.time, value: liveCandle.volume });
+          try {
+            volumeSeriesRef.current?.update({
+              time: liveCandle.time as UTCTimestamp,
+              value: liveCandle.volume,
+              color: readThemeColors().muted + "55",
+            } as HistogramData);
+          } catch {}
+        }
+      }
+      // NO indicator recalc here for performance — historical indicators stay, live candle is DISPLAY only
+      candleCountRef.current++;
+    },
+    []
+  );
+
+  const reconcileWithDb = useCallback(async () => {
+    if (!symbol || !exchange || !timeframe) return;
+    if (status !== "ok") return;
+    try {
+      const res = await fetch(
+        `/api/chart/live?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}&timeframe=${encodeURIComponent(timeframe)}`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      const closedRaw = data.latestClosedDb;
+      if (!closedRaw) return;
+      const lastTime = rawCandlesRef.current.length > 0 ? rawCandlesRef.current[rawCandlesRef.current.length - 1].time : null;
+      if (lastTime !== null && closedRaw.time === lastTime) {
+        const lastClose = rawCandlesRef.current[rawCandlesRef.current.length - 1].close;
+        if (Math.abs(closedRaw.close - lastClose) > 0.0000001) {
+          updateChartWithLiveCandle({
+            time: closedRaw.time,
+            open: closedRaw.open,
+            high: closedRaw.high,
+            low: closedRaw.low,
+            close: closedRaw.close,
+            volume: closedRaw.volume,
+          });
+        }
+      }
+    } catch {}
+  }, [symbol, exchange, timeframe, status, updateChartWithLiveCandle]);
+
+  // Tick handler with coalescing to avoid React thrash on 30-100 trades/sec
+  // Also updates forming candle DISPLAY ONLY: close=price, high=max(high,price), low=min(low,price), open stays real
+  const handleLiveTick = useCallback((price: number, eventTime: number) => {
+    latestTickRef.current = { price, eventTime };
+    tickCountRef.current++;
+
+    // Update forming candle from real trade/ticker price — DISPLAY ONLY
+    // Open stays real open of current candle, volume not falsified (only from kline)
+    try {
+      const existing = rawCandlesRef.current;
+      if (existing.length > 0) {
+        const last = existing[existing.length - 1];
+        const newHigh = Math.max(last.high, price);
+        const newLow = Math.min(last.low, price);
+        if (newHigh !== last.high || newLow !== last.low || last.close !== price) {
+          updateChartWithLiveCandle({
+            time: last.time,
+            open: last.open,
+            high: newHigh,
+            low: newLow,
+            close: price,
+          });
+        }
+      }
+    } catch {}
+
+    const now = Date.now();
+    // Coalesce to max ~10/sec (100ms) but allow immediate first
+    if (now - lastTickRenderRef.current < 100) {
+      if (tickRafRef.current === null) {
+        tickRafRef.current = window.requestAnimationFrame(() => {
+          tickRafRef.current = null;
+          if (latestTickRef.current) {
+            setLivePriceRaw(latestTickRef.current.price);
+            setLivePrice(latestTickRef.current.price);
+            setLastLiveUpdate(new Date(latestTickRef.current.eventTime));
+            lastTickRenderRef.current = Date.now();
+          }
+        });
+      }
+      return;
+    }
+
+    // Immediate update
+    setLivePriceRaw(price);
+    setLivePrice(price);
+    setLastLiveUpdate(new Date(eventTime));
+    lastTickRenderRef.current = now;
+  }, [updateChartWithLiveCandle]);
+
+  // Honest LIVE status: if price stream silent >10s for liquid BTC, show STALE even if kline heartbeat continues
+  // Price stream is primary for LIVE PRICE, kline alone not enough for fresh price
+  useEffect(() => {
+    if (liveStatus !== "LIVE") return;
+    const timer = setInterval(() => {
+      const latest = latestTickRef.current;
+      if (!latest) return;
+      if (Date.now() - latest.eventTime > 10000) {
+        setLiveStatus("STALE");
+      }
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [liveStatus]);
+
+  // Start live WebSocket when chart ok, close old on change/unmount
+  useEffect(() => {
+    if (liveProviderRef.current) {
+      try {
+        liveProviderRef.current.disconnect();
+      } catch {}
+      liveProviderRef.current = null;
+    }
+    if (reconcileTimerRef.current) {
+      clearInterval(reconcileTimerRef.current);
+      reconcileTimerRef.current = null;
+    }
+    if (tickRafRef.current !== null) {
+      cancelAnimationFrame(tickRafRef.current);
+      tickRafRef.current = null;
+    }
+
+    if (status !== "ok" || !symbol || !exchange) {
+      setLiveStatus("CLOSED");
+      setLivePrice(null);
+      setLiveExchange(null);
+      setRequestedExchange(null);
+      setIsFallback(false);
+      return;
+    }
+
+    const market = markets.find((m) => m.exchange === exchange);
+    const exchangeSymbol = market?.exchangeSymbol || `${symbol}USDT`;
+
+    let provider: any = null;
+
+    import("@/lib/live").then(({ createLiveProvider }) => {
+      provider = createLiveProvider({
+        symbol,
+        exchange,
+        exchangeSymbol,
+        timeframe,
+        onTick: (tick) => {
+          // Real market tick — high frequency
+          handleLiveTick(tick.price, tick.eventTime);
+          setLiveExchange(tick.exchange);
+        },
+        onCandle: (candle) => {
+          const lastTime = rawCandlesRef.current.length > 0 ? rawCandlesRef.current[rawCandlesRef.current.length - 1].time : null;
+          if (lastTime === null) return;
+
+          if (candle.time > lastTime) {
+            updateChartWithLiveCandle({
+              time: candle.time,
+              open: candle.open,
+              high: candle.high,
+              low: candle.low,
+              close: candle.close,
+              volume: candle.volume,
+            });
+            // Also update price from candle close if no tick recently
+            if (!latestTickRef.current || Date.now() - latestTickRef.current.eventTime > 2000) {
+              handleLiveTick(candle.close, candle.eventTime || Date.now());
+            }
+            setLiveExchange(candle.exchange);
+            lastLiveCandleTimeRef.current = candle.time;
+            setTimeout(() => void reconcileWithDb(), 5000);
+          } else if (candle.time === lastTime) {
+            const lastClose = rawCandlesRef.current[rawCandlesRef.current.length - 1].close;
+            if (Math.abs(candle.close - lastClose) < 0.0000001 && lastLiveCandleTimeRef.current === candle.time) {
+              setLastLiveUpdate(new Date(candle.eventTime || Date.now()));
+              return;
+            }
+            updateChartWithLiveCandle({
+              time: candle.time,
+              open: candle.open,
+              high: candle.high,
+              low: candle.low,
+              close: candle.close,
+              volume: candle.volume,
+            });
+            if (!latestTickRef.current || Date.now() - latestTickRef.current.eventTime > 2000) {
+              handleLiveTick(candle.close, candle.eventTime || Date.now());
+            }
+            setLiveExchange(candle.exchange);
+            lastLiveCandleTimeRef.current = candle.time;
+          }
+        },
+        onStatus: (s, info) => {
+          setLiveStatus(s as any);
+          if (s === "LIVE") {
+            setLiveExchange(exchange);
+          }
+        },
+      });
+
+      liveProviderRef.current = provider;
+      provider.connect();
+    });
+
+    const reconTimer = setInterval(() => {
+      void reconcileWithDb();
+    }, 60000);
+    reconcileTimerRef.current = reconTimer;
+
+    return () => {
+      if (liveProviderRef.current) {
+        try {
+          liveProviderRef.current.disconnect();
+        } catch {}
+        liveProviderRef.current = null;
+      }
+      if (reconcileTimerRef.current) {
+        clearInterval(reconcileTimerRef.current);
+        reconcileTimerRef.current = null;
+      }
+      if (tickRafRef.current !== null) {
+        cancelAnimationFrame(tickRafRef.current);
+        tickRafRef.current = null;
+      }
+    };
+  }, [status, symbol, exchange, timeframe, markets, updateChartWithLiveCandle, reconcileWithDb, handleLiveTick]);
 
   /* ---------- подгрузка истории при прокрутке влево ---------- */
 
@@ -1628,8 +2311,8 @@ export default function CandleChart({
         const chart = chartRef.current;
         const colors = readThemeColors();
 
-        // Сохраняем видимую область: после setData
-        // сдвигаем её на число добавленных свечей.
+        // Сохраняем видимую область: запоминаем логический диапазон
+        // ДО setData (после слияния индексы баров сдвинутся).
         const range =
           chart
             ?.timeScale()
@@ -1714,14 +2397,28 @@ export default function CandleChart({
           )
         );
 
-        if (chart && range) {
+        // РУЧНОЙ VIEWPORT СОХРАНЯЕТСЯ: диапазон сдвигается ровно на
+        // число добавленных свечей (чистая арифметика —
+        // lib/chart/chart-ux.ts, покрыта scripts/test-chart-ux.ts).
+        // fitContent / scrollToRealTime / setVisibleRange здесь
+        // сознательно НЕ вызываются: подгрузка более старой истории не
+        // имеет права неожиданно возвращать пользователя к последним
+        // барам. Если диапазон неизвестен либо добавлено 0 свечей,
+        // shiftLogicalRange вернёт null и viewport не трогается вовсе.
+        const shifted = shiftLogicalRange(
+          range,
+          candlesMerge.added
+        );
+
+        if (chart && shifted !== null) {
           chart
             .timeScale()
-            .setVisibleLogicalRange({
-              from: range.from + candlesMerge.added,
-              to: range.to + candlesMerge.added
-            });
+            .setVisibleLogicalRange(shifted);
         }
+
+        // Порядок цен в окне мог измениться → ширина ценовой шкалы
+        // тоже; резерв места под легенду пересчитывается.
+        applyChartMetrics();
 
         if (!hasMoreRef.current) {
           setHistoryEnded(true);
@@ -1744,7 +2441,14 @@ export default function CandleChart({
         setHistoryLoading(false);
       }
     },
-    [symbol, exchange, timeframe, rebuildLegendMaps, renderLegendAt]
+    [
+      symbol,
+      exchange,
+      timeframe,
+      rebuildLegendMaps,
+      renderLegendAt,
+      applyChartMetrics
+    ]
   );
 
   useEffect(() => {
@@ -2171,9 +2875,23 @@ export default function CandleChart({
           <p>{errorMessage}</p>
         </div>
       ) : (
+        /*
+          НА ОБЁРТКЕ НАМЕРЕННО НЕТ React-обработчика двойного клика.
+
+          Двойной клик по правой ценовой шкале библиотека обрабатывает
+          сама (handleScale.axisDoubleClickReset.price → Pane
+          ._internal_resetPriceScale → autoScale true), двойной клик по
+          оси времени — тоже сама (axisDoubleClickReset.time). Обработчик
+          на обёртке всплывал бы от canvas'а шкалы и поверх штатного
+          сброса цены выполнял resetTimeScale() + scrollToRealTime():
+          масштаб времени прыгал («приближает/отдаляет»), история
+          уезжала к последним барам, а только что выставленный drag'ом
+          вертикальный масштаб уничтожался (setAutoScale(true) по всем
+          панелям). Полный сброс — только кнопка «Сбросить масштаб».
+        */
         <div
+          ref={wrapRef}
           className="chartWrap"
-          onDoubleClick={resetChartScale}
         >
           <div
             ref={containerRef}
@@ -2187,49 +2905,40 @@ export default function CandleChart({
 
           {dataMeta && (
             <div className="chartDataStatus muted">
-              <span className="chartStatusMarket">
-                {exchange && selectedMarket
-                  ? `${exchange} · ${dataMeta.exchangeSymbol} · ${timeframeLabel(timeframe)}`
-                  : timeframeLabel(timeframe)}
+              {/* Compact UI block per task: BTCUSDT, BINANCE, 5 минут, LIVE PRICE, status, updated, candles */}
+              <span className="chartStatusMarket" style={{ fontWeight: 600 }}>
+                {dataMeta.exchangeSymbol}
               </span>
+              <span>{exchange}</span>
+              <span>{timeframeLabel(timeframe)}</span>
+              <span>Свечей: {dataMeta.count}</span>
 
-              <span>
-                Загружено свечей:{" "}
-                {dataMeta.count}
+              {livePrice !== null && (
+                <span style={{ fontWeight: 700, color: liveStatus === "LIVE" ? "#16a34a" : liveStatus === "RECONNECTING" ? "#eab308" : liveStatus === "STALE" ? "#ef4444" : "#6b7280" }}>
+                  LIVE PRICE {fmtPrice(livePrice)}
+                </span>
+              )}
+              <span style={{ fontWeight: 600, color: liveStatus === "LIVE" ? "#16a34a" : liveStatus === "RECONNECTING" ? "#eab308" : liveStatus === "STALE" ? "#ef4444" : liveStatus === "ERROR" ? "#ef4444" : "#6b7280" }}>
+                {liveStatus === "LIVE" ? "● LIVE" : liveStatus === "RECONNECTING" ? "● RECONNECTING" : liveStatus === "STALE" ? "● STALE" : liveStatus === "CONNECTING" ? "○ CONNECTING" : liveStatus === "NO_MARKET" ? "○ NO_MARKET" : liveStatus === "ERROR" ? "● ERROR" : "○ CLOSED"}
               </span>
-
-              {lastTimeLabel && (
-                <span>
-                  Последняя: {lastTimeLabel}
+              {isFallback && requestedExchange && liveExchange && (
+                <span style={{ fontSize: "11px", color: "#eab308" }}>
+                  Запрошено: {requestedExchange} → Фактически: {liveExchange} (fallback)
                 </span>
               )}
-
-              {lastFreshness && (
-                <span
-                  className={`freshBadge ${lastFreshness.status}`}
-                >
-                  ● {lastFreshness.label}
+              {!isFallback && liveExchange && liveExchange !== exchange && (
+                <span style={{ fontSize: "11px" }}>
+                  Фактически: {liveExchange} {isFallback ? "(fallback)" : ""}
                 </span>
               )}
-
-              {historyLoading && (
-                <span>Загрузка истории…</span>
-              )}
-
-              {historyEnded &&
-                !historyError && (
-                  <span>
-                    История загружена полностью
-                  </span>
-                )}
-
-              {historyError && (
-                <span className="chartHistoryError">
-                  Ошибка загрузки истории —
-                  график остался на
-                  загруженных данных
+              {lastLiveUpdate && (
+                <span style={{ fontSize: "11px" }}>
+                  обновлено {lastLiveUpdate.toLocaleTimeString("ru-RU")}
                 </span>
               )}
+              {historyLoading && <span>Загрузка истории…</span>}
+              {historyEnded && !historyError && <span>История загружена полностью</span>}
+              {historyError && <span className="chartHistoryError">Ошибка истории</span>}
             </div>
           )}
 
@@ -2267,18 +2976,10 @@ export default function CandleChart({
       />
 
       {status === "ok" && (
-        <div className="chartNote muted">
-          Показаны только закрытые свечи из PostgreSQL
-          {selectedMarket
-            ? ` · рынок ${selectedMarket.exchangeSymbol} на ${selectedMarket.exchange}`
-            : ""}
-          . Масштаб — колесо мыши или щипок,
-          прокрутка влево подгружает более старую
-          историю
-          {historyEnded
-            ? " · история загружена полностью"
-            : ""}
-          .
+        <div className="chartNote muted" style={{ fontSize: "11px", lineHeight: "1.4" }}>
+          {dataMeta?.exchangeSymbol} · {exchange} · {timeframeLabel(timeframe)} · Свечей: {dataMeta?.count}
+          {lastTimeLabel ? ` · Последняя: ${lastTimeLabel}` : ""}
+          {lastFreshness ? ` · ${lastFreshness.label}` : ""}
         </div>
       )}
     </div>

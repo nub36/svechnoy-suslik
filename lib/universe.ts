@@ -1,8 +1,8 @@
 /**
  * Основной universe проекта «Свечной Суслик».
  *
- * С перехода ЭТАПА A основным universe является
- * Top-100: Asset с заполненным rank, rank <= 100.
+ * С перехода к TOP-50 основным universe является
+ * Top-50: Asset с заполненным rank, rank <= 50.
  *
  * Схема НЕ менялась: поля Asset.rank (место в рейтинге)
  * и Asset.top500 (исторический флаг «входил в Top-500
@@ -16,9 +16,9 @@
  * использует эти функции, а не локальные числа.
  */
 
-export const TOP_UNIVERSE_SIZE = 100;
+export const TOP_UNIVERSE_SIZE = 50;
 
-export const TOP_UNIVERSE_LABEL = "Top-100";
+export const TOP_UNIVERSE_LABEL = "TOP-50";
 
 /**
  * Исторический (legacy) размер рейтинга Top-500.

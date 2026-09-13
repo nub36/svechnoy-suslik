@@ -104,7 +104,7 @@ export default async function AdminMonitoringPage() {
           ...topUniverseRankFilter()
         }
       }),
-      // рынки ОСНОВНОГО Top-100 universe (rank 1..100)
+      // рынки ОСНОВНОГО TOP-50 universe (rank 1..50)
       prisma.market.count({
         where: {
           enabled: true,
@@ -260,7 +260,7 @@ export default async function AdminMonitoringPage() {
                   {counts.universe.toLocaleString("ru-RU")}
                 </div>
                 <div className="healthLabel">
-                  Top-100 universe
+                  TOP-50 universe
                 </div>
               </div>
 
@@ -269,7 +269,7 @@ export default async function AdminMonitoringPage() {
                   {counts.universeMarkets.toLocaleString("ru-RU")}
                 </div>
                 <div className="healthLabel">
-                  рынков Top-100 (активных SPOT USDT)
+                  рынков TOP-50 (активных SPOT USDT)
                 </div>
               </div>
 

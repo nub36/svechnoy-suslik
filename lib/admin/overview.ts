@@ -5,7 +5,7 @@
  * 8a1ae16: при добавлении запроса в Promise.all
  * деструктурирование не было сдвинуто, и переменные
  * получили чужие значения (assets ← счётчик рынков
- * Top-100 и т.д.). Здесь порядок запросов и порядок
+ * TOP-50 и т.д.). Здесь порядок запросов и порядок
  * имён заданы КОНСТАНТОЙ OVERVIEW_QUERY_ORDER и
  * проверяются тестом на подставной БД
  * (scripts/test-admin-consistency.ts): перестановка
@@ -101,8 +101,8 @@ export type OverviewDb = {
 /** Порядок запросов = порядок позиций promises. */
 export const OVERVIEW_QUERY_ORDER = [
   "strategies",
-  "assetsTop100",
-  "marketsTop100",
+  "assetsTop50",
+  "marketsTop50",
   "marketsActiveTotal",
   "candles",
   "signalsActive",
@@ -136,7 +136,7 @@ export function buildOverviewQueries(db: OverviewDb): {
         ]
       }) as Promise<OverviewStrategyRow[]>,
 
-      // 2 assetsTop100: активы основного universe
+      // 2 assetsTop50: активы основного universe
       db.asset.count({
         where: {
           enabled: true,
@@ -144,7 +144,7 @@ export function buildOverviewQueries(db: OverviewDb): {
         }
       }),
 
-      // 3 marketsTop100: рынки активов universe
+      // 3 marketsTop50: рынки активов universe
       db.market.count({
         where: {
           enabled: true,
@@ -156,7 +156,7 @@ export function buildOverviewQueries(db: OverviewDb): {
       }),
 
       // 4 marketsActiveTotal: ВСЕ активные
-      // SPOT USDT-рынки БД (без ограничения Top-100)
+      // SPOT USDT-рынки БД (без ограничения TOP-50)
       db.market.count({
         where: {
           enabled: true,

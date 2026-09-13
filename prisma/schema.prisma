@@ -77,6 +77,7 @@ model Strategy {
   version      Int      @default(1)
   enabled      Boolean  @default(false)
   status       String   @default("DRAFT")
+  mode         String   @default("DISABLED")
   config       Json
   timeframes   String[] @default(["1h", "4h"])
   minExchanges Int      @default(3)
@@ -84,10 +85,19 @@ model Strategy {
   updatedAt    DateTime @updatedAt
 
   signals Signal[]
+  researchResults StrategyResearchResult[]
 
   @@unique([slug, version])
   @@index([slug])
   @@index([enabled])
+  @@index([mode])
+}
+
+enum SignalSource {
+  LIVE_FORWARD
+  SEEDED
+  BACKTEST
+  LEGACY
 }
 
 model Signal {
@@ -96,7 +106,8 @@ model Signal {
   timeframe   String
   direction   String
   score       Float
-  entry       Float
+  // PHASE 2C: entry nullable for WAITING_ENTRY (no optimistic fallback)
+  entry       Float?
   stopLoss    Float?
   takeProfit1 Float?
   takeProfit2 Float?
@@ -107,12 +118,110 @@ model Signal {
   createdAt   DateTime  @default(now())
   closedAt    DateTime?
 
+  // PHASE 2B/2C — Signal identity + execution semantics
+  signalCandleTime   DateTime?
+  referenceExchange  String?
+  referencePrice     Float?
+  aggregatePrice     Float?
+  executionPolicy    String?
+  // PHASE 2C fix: default LEGACY, not LIVE_FORWARD, to avoid auto-classifying old rows as live
+  signalSource       SignalSource @default(LEGACY)
+  metadata           Json?
+  atrAtSignal        Float?
+  nextBarOpenPrice   Float?
+  nextBarOpenTime    DateTime?
+
+  // PHASE 2C — structured confirmation (avoid parsing reason)
+  participantCount     Int?
+  evaluatedCount       Int?
+  longVotes            Int?
+  shortVotes           Int?
+  neutralVotes         Int?
+  confirmationCount    Int?
+  confirmationTotal    Int?
+  commonHorizonPolicy  String?
+  referenceFallback    Boolean? @default(false)
+
+  // PHASE: SMC EVENT SEMANTICS — setup vs candle
+  // One persistent bearish regime 08:15..10:45 should be ONE setup, not 11
+  // setupKey causal from BOS key, OB key, FVG key, sweep key, direction, phase — no score, no future outcome
+  // Future unique: [strategyId, symbol, timeframe, setupKey] but not applied yet, keep signalCandleTime unique for now
+  setupKey             String?
+  // EDGE/RE-ARM V1: triggerType EDGE or REVERSAL, for dedup analysis
+  triggerType          String?
+
   strategy Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  outcome  SignalOutcome?
 
   @@index([symbol, timeframe])
+  @@index([symbol, timeframe, signalCandleTime])
   @@index([status])
   @@index([strategyId])
+  @@index([strategyId, signalCandleTime])
   @@index([createdAt])
+  @@index([signalSource])
+  @@index([setupKey])
+  @@index([triggerType])
+  // Unique identity: one strategy + symbol + timeframe + candle can have max ONE signal
+  // Direction NOT included to prevent LONG and SHORT on same candle
+  // PostgreSQL treats NULL as distinct, so legacy rows with NULL signalCandleTime are not constrained
+  // New SMC signals will have NOT NULL signalCandleTime and will be constrained
+  // Future: @@unique([strategyId, symbol, timeframe, setupKey]) for persistent setup dedup
+  @@unique([strategyId, symbol, timeframe, signalCandleTime])
+}
+
+model SignalOutcome {
+  id               Int       @id @default(autoincrement())
+  signalId         Int       @unique
+  // WAITING_ENTRY, OPEN, TP1_HIT, TP2_HIT, TP3_HIT, STOPPED, EXPIRED, ENTRY_DATA_MISSING
+  status           String    @default("WAITING_ENTRY")
+  entryTime        DateTime?
+  entryPrice       Float?
+  stopLoss         Float?
+  takeProfit1      Float?
+  takeProfit2      Float?
+  takeProfit3      Float?
+  exitTime         DateTime?
+  exitPrice        Float?
+  realizedR        Float?
+  maxFavorableR    Float?
+  maxAdverseR      Float?
+  barsHeld         Int?
+  tp1HitAt         DateTime?
+  tp2HitAt         DateTime?
+  tp3HitAt         DateTime?
+  executionPolicy  String?
+  executionParams  Json?
+  atrAtSignal      Float?
+  timeoutCandles   Int?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  signal Signal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([entryTime])
+}
+
+// EDGE/RE-ARM V1: persistent state survives PM2 restart
+model StrategySignalState {
+  id                      Int       @id @default(autoincrement())
+  strategyId              Int
+  symbol                  String
+  timeframe               String
+  lastEvaluatedCandleTime DateTime?
+  aggregateState          String    @default("NEUTRAL") // NEUTRAL, LONG, SHORT, CANNOT_EVALUATE, DATA_UNAVAILABLE
+  lastSignalCandleTime    DateTime?
+  lastSignalDirection     String?
+  lastEvaluationStatus    String?
+  metadata                Json?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  @@unique([strategyId, symbol, timeframe])
+  @@index([symbol, timeframe])
+  @@index([strategyId])
+  @@index([aggregateState])
 }
 
 model Asset {
@@ -122,6 +231,7 @@ model Asset {
   rank           Int?
   imageUrl       String?
   enabled        Boolean  @default(true)
+  archivedAt     DateTime?
   exchangeCount  Int      @default(0)
   totalVolume24h Float?
   maxVolume24h   Float?
@@ -136,6 +246,7 @@ model Asset {
   @@index([top500])
   @@index([enabled])
   @@index([liquidityScore])
+  @@index([archivedAt])
 }
 
 model Market {
@@ -226,4 +337,42 @@ model Instrument {
   enabled   Boolean  @default(true)
   rank      Int?
   createdAt DateTime @default(now())
+}
+
+model ExchangeConfig {
+  id            Int      @id @default(autoincrement())
+  exchange      String   @unique
+  publicEnabled Boolean  @default(true)
+  ohlcvEnabled  Boolean  @default(true)
+  liveEnabled   Boolean  @default(true)
+  isDefault     Boolean  @default(false)
+  priority      Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([publicEnabled])
+  @@index([priority])
+  @@index([isDefault])
+}
+
+model StrategyResearchResult {
+  id          Int      @id @default(autoincrement())
+  strategyId  Int
+  model       String
+  timeframe   String
+  trainFrom   DateTime?
+  trainTo     DateTime?
+  validFrom   DateTime?
+  validTo     DateTime?
+  oosFrom     DateTime?
+  oosTo       DateTime?
+  metrics     Json
+  createdAt   DateTime @default(now())
+
+  strategy Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+
+  @@index([strategyId])
+  @@index([model])
+  @@index([timeframe])
+  @@index([createdAt])
 }

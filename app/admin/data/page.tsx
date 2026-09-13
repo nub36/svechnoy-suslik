@@ -115,7 +115,7 @@ async function loadHealthData() {
     prisma.asset.count({
       where: { enabled: true }
     }),
-    // основной universe Top-100 (lib/universe.ts)
+    // основной universe TOP-50 (lib/universe.ts)
     prisma.asset.count({
       where: {
         enabled: true,
@@ -341,7 +341,7 @@ export default async function AdminDataPage() {
               {fmtInt(data.assets.universe)}
             </div>
             <div className="healthLabel">
-              Top-100 (основной universe)
+              TOP-50 (основной universe)
             </div>
           </div>
 
