@@ -26,10 +26,13 @@ ok(!prePnlSrc.includes("profitFactor") && !prePnlSrc.includes("netPnl") && !preP
 ok(prePnlSrc.includes("PRE_REGISTRATION_REQUIRED"), "contains PRE_REGISTRATION_REQUIRED");
 ok(prePnlSrc.includes("READ ONLY"), "mentions READ ONLY");
 
-// 2. Structural order: executionPolicy validation before wrapping observations
-const validateCallIdx = prePnlSrc.indexOf("validateExecutionPolicyDefinition(req.executionPolicy)");
+// 2. Structural order: executionPolicy validation before wrapping observations — Phase G supports both direct policy and registry id, validation must still be before wrap
+const validateCallIdxDirect = prePnlSrc.indexOf("validateExecutionPolicyDefinition(req.executionPolicy)");
+const validateCallIdxResolved = prePnlSrc.indexOf("validateExecutionPolicyDefinition(resolvedPolicy)");
+const validateCallIdxGeneric = prePnlSrc.indexOf("validateExecutionPolicyDefinition(");
 const wrapCallIdx = prePnlSrc.indexOf("wrapWithExecutability(obs,");
-ok(validateCallIdx >= 0 && wrapCallIdx >= 0 && validateCallIdx < wrapCallIdx, "executionPolicy validation before wrapWithExecutability call");
+const validateCallIdx = validateCallIdxDirect >= 0 ? validateCallIdxDirect : validateCallIdxResolved >= 0 ? validateCallIdxResolved : validateCallIdxGeneric;
+ok(validateCallIdx >= 0 && wrapCallIdx >= 0 && validateCallIdx < wrapCallIdx, "executionPolicy validation before wrapWithExecutability call (direct or resolved via registry)");
 
 // 3. Raw LONG/SHORT preservation test via actual functions
 import { wrapWithExecutability, type RawSmcObservation } from "../lib/backtest/smc-observation";
