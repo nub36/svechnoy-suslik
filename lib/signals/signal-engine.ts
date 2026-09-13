@@ -633,8 +633,9 @@ async function runSmartMoneyEngine(opts: {
     return;
   }
 
-  // Transactional write: Signal + Outcome + State update in ONE transaction
-  console.log(`\nLIVE WRITE ALLOWED — transactional emit: Signal+Outcome+State update in ONE transaction`);
+  // Transactional write: Signal + Outcome + State update in ONE transaction — STRICT ATOMICITY
+  // Either all commit or all rollback. No "backfillable" Signal if Outcome fails.
+  console.log(`\nLIVE WRITE ALLOWED — STRICT ATOMIC transactional emit: Signal+Outcome+State in ONE transaction`);
   try {
     await prisma.$transaction(async (tx: any) => {
       // Re-check state inside transaction for concurrency
@@ -642,20 +643,20 @@ async function runSmartMoneyEngine(opts: {
       if (existingState) {
         if (existingState.lastEvaluatedCandleTime && existingState.lastEvaluatedCandleTime.getTime() === transition.currentCandleTime.getTime()) {
           console.log(`  Concurrent same horizon already processed — idempotent no-op inside tx`);
+          // Throw P2002-like to be classified as duplicate outside? Instead return to cause no-op but still need to avoid partial.
+          // We return early — no Signal created, so no partial, safe.
           return;
         }
         if (existingState.lastEvaluatedCandleTime && transition.currentCandleTime.getTime() < existingState.lastEvaluatedCandleTime.getTime()) {
           throw new Error(`Refuse older horizon inside tx`);
         }
-        // Also check if state already moved to same direction — prevent duplicate emit from concurrent workers
-        // If existingState.aggregateState === currentAggregate and existingState.lastSignalCandleTime close, skip
         if (existingState.aggregateState === currentAggregate && existingState.lastSignalCandleTime && existingState.lastSignalCandleTime.getTime() === candidate.signalCandleTime.getTime()) {
           console.log(`  Duplicate signal already exists for same candle — skip inside tx`);
           return;
         }
       }
 
-      // Create Signal
+      // Create Signal — if this throws, nothing committed
       const created = await tx.signal.create({
         data: {
           symbol: candidate.symbol,
@@ -695,30 +696,26 @@ async function runSmartMoneyEngine(opts: {
       });
       console.log(`  CREATED signal id=${created.id} ${created.direction} ${created.symbol} ${created.timeframe} candle=${created.signalCandleTime?.toISOString()} trigger=${created.triggerType}`);
 
-      // Create Outcome
-      try {
-        const outcome = await tx.signalOutcome.create({
-          data: {
-            signalId: created.id,
-            status: candidate.executionStatus === "READY" ? "OPEN" : candidate.executionStatus,
-            entryTime: candidate.entryTime,
-            entryPrice: candidate.entry,
-            stopLoss: candidate.stopLoss,
-            takeProfit1: candidate.takeProfit1,
-            takeProfit2: candidate.takeProfit2,
-            takeProfit3: candidate.takeProfit3,
-            executionPolicy: candidate.executionPolicy,
-            executionParams: candidate.executionParams as any,
-            atrAtSignal: candidate.atrAtSignal,
-            timeoutCandles: (candidate.executionParams as any).timeoutCandles ?? null,
-          },
-        });
-        console.log(`  CREATED outcome id=${outcome.id} signalId=${outcome.signalId} status=${outcome.status}`);
-      } catch (e: any) {
-        console.error(`  Failed outcome for signal ${created.id}: ${e.message} — will be backfilled`);
-      }
+      // Create Outcome — STRICT: if throws, whole transaction rolls back Signal + State
+      const outcome = await tx.signalOutcome.create({
+        data: {
+          signalId: created.id,
+          status: candidate.executionStatus === "READY" ? "OPEN" : candidate.executionStatus,
+          entryTime: candidate.entryTime,
+          entryPrice: candidate.entry,
+          stopLoss: candidate.stopLoss,
+          takeProfit1: candidate.takeProfit1,
+          takeProfit2: candidate.takeProfit2,
+          takeProfit3: candidate.takeProfit3,
+          executionPolicy: candidate.executionPolicy,
+          executionParams: candidate.executionParams as any,
+          atrAtSignal: candidate.atrAtSignal,
+          timeoutCandles: (candidate.executionParams as any).timeoutCandles ?? null,
+        },
+      });
+      console.log(`  CREATED outcome id=${outcome.id} signalId=${outcome.signalId} status=${outcome.status}`);
 
-      // Update State
+      // Update State — STRICT: if throws after Signal+Outcome, all rollback
       if (existingState) {
         await tx.strategySignalState.update({
           where: { id: existingState.id },
@@ -753,12 +750,13 @@ async function runSmartMoneyEngine(opts: {
     if (transition.emitDirection === "LONG") result.longSignals++;
     else result.shortSignals++;
   } catch (e: any) {
-    if (e.code === "P2002" || e.message?.includes("Unique constraint") || e.message?.includes("unique")) {
-      console.log(`  Duplicate unique [strategyId,symbol,timeframe,signalCandleTime] — concurrent same-horizon max one Signal`);
+    // P2002 handling only outside transaction — idempotent duplicate
+    if (e.code === "P2002" || e.message?.includes("Unique constraint") || e.message?.includes("unique") || e.message?.includes("Unique constraint failed")) {
+      console.log(`  Duplicate unique [strategyId,symbol,timeframe,signalCandleTime] — concurrent same-horizon max one Signal, idempotent`);
       result.signalsSkippedDuplicate++;
     } else {
-      console.error(`  Transaction failed — no partial Signal/Outcome/state: ${e.message}`);
-      result.errors.push(`Transaction error: ${e.message}`);
+      console.error(`  Transaction failed — STRICT ATOMIC rollback, no partial Signal/Outcome/State: ${e.message}`);
+      result.errors.push(`Transaction error (rolled back): ${e.message}`);
     }
   }
 }

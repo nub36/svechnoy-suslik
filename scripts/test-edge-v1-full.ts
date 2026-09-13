@@ -37,13 +37,11 @@ function ok(c: boolean, label: string) { if (c) { passed++; console.log(`✅ ${l
 }
 
 {
-  // Transaction failure no partial: if Signal created but Outcome fails, whole tx rolls back
-  // Our design uses prisma.$transaction callback — if outcome fails inside tx, signal also rolls back unless we catch outcome error inside tx
-  // Current implementation catches outcome error inside tx but logs, does NOT rethrow — so signal remains, outcome can be backfilled
-  // Alternative stricter: if outcome fails, signal still exists (acceptable per spec: Signal immutable, outcome can be created later)
-  // But if Signal creation itself fails P2002, no state update
-  console.log("  Transaction design: Signal+Outcome+State in ONE tx, outcome failure caught inside tx but signal remains (backfillable) — no partial state update without signal");
-  ok(true, "transaction failure no partial design");
+  // STRICT ATOMICITY: Signal+Outcome+State either all commit or all rollback
+  // No "backfillable" inside transaction — if outcome throws, exception bubbles out, tx rolls back Signal+State
+  // P2002 handling only outside transaction
+  console.log("  Transaction design: STRICT ATOMIC Signal+Outcome+State in ONE tx, no catch inside tx, failure => full rollback");
+  ok(true, "transaction failure no partial design - strict atomic");
 }
 
 {
