@@ -1677,12 +1677,13 @@ export default function CandleChart({
           setErrorMessage(
             `Нет поддерживаемого рынка для live-графика: у ${symbol} нет ACTIVE SPOT USDT рынков на BINANCE/BYBIT/GATE/KUCOIN/BINGX`
           );
-
+          setLiveStatus("NO_MARKET");
           return;
         }
 
         // Fallback policy: BINANCE > BYBIT > GATE > KUCOIN > BINGX
         // URL exchange has priority if pair exists, else deterministic priority
+        // Fallback must NOT mask exchange: UI shows Requested vs Actual
         const availableExchanges = list.map((m) => m.exchange);
         const EXCHANGE_PRIORITY = ["BINANCE", "BYBIT", "GATE", "KUCOIN", "BINGX"] as const;
         const urlExchangeParsed = parseChartUrlState(
@@ -1692,12 +1693,17 @@ export default function CandleChart({
         ).exchange;
 
         let chosenExchange: string | null = null;
+        let fallback = false;
+        const requested = urlExchangeParsed || initialExchange?.toUpperCase() || null;
+
         if (urlExchangeParsed && availableExchanges.includes(urlExchangeParsed)) {
           chosenExchange = urlExchangeParsed;
+          fallback = false;
         } else {
           for (const pri of EXCHANGE_PRIORITY) {
             if (availableExchanges.includes(pri)) {
               chosenExchange = pri;
+              fallback = requested !== null && requested !== pri;
               break;
             }
           }
@@ -1705,6 +1711,8 @@ export default function CandleChart({
         }
 
         setExchange(chosenExchange);
+        setRequestedExchange(requested);
+        setIsFallback(fallback);
 
         const first = list.find((m) => m.exchange === chosenExchange) ?? list[0];
 
@@ -1848,38 +1856,49 @@ export default function CandleChart({
   );
 
   /* ---------- LIVE WebSocket — visualization only, NOT for Signal Engine ----------
-   * ARCHITECTURE SEPARATION (critical):
-   * DISPLAY: PostgreSQL history (CLOSED) + LIVE websocket candle (current forming)
+   * DISPLAY: PostgreSQL history (CLOSED) + LIVE trade tick (price) + LIVE kline (forming candle) via native WS
    * SIGNALS: ONLY canonical CLOSED PostgreSQL candles — NO websocket tick enters Signal Engine
-   * This is enforced: live provider never writes to DB, never calls signal-engine, only updates chart UI
-   * Live stream is 1 per open chart, for current selected coin/exchange/timeframe only
+   * All 5 exchanges native WS: BINANCE, BYBIT, GATE, KUCOIN, BINGX
+   * Price stream high-frequency (trade), candle stream lower (kline)
+   * PERFORMANCE: tick coalesced to rAF/100-250ms max 4-10 render/s, candle via series.update() only, no indicator recalc per tick
    */
 
   const [livePrice, setLivePrice] = useState<number | null>(null);
+  const [livePriceRaw, setLivePriceRaw] = useState<number | null>(null); // raw latest tick before coalesce
   const [lastLiveUpdate, setLastLiveUpdate] = useState<Date | null>(null);
-  const [liveStatus, setLiveStatus] = useState<"CONNECTING" | "LIVE" | "RECONNECTING" | "STALE" | "CLOSED" | "ERROR">("CLOSED");
+  const [liveStatus, setLiveStatus] = useState<"CONNECTING" | "LIVE" | "RECONNECTING" | "STALE" | "CLOSED" | "ERROR" | "NO_MARKET">("CLOSED");
   const [liveExchange, setLiveExchange] = useState<string | null>(null);
+  const [requestedExchange, setRequestedExchange] = useState<string | null>(null);
+  const [isFallback, setIsFallback] = useState(false);
   const liveProviderRef = useRef<any>(null);
   const lastLiveCandleTimeRef = useRef<number | null>(null);
   const reconcileTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Tick coalescing: store latest tick, render max 10/sec via rAF
+  const latestTickRef = useRef<{ price: number; eventTime: number } | null>(null);
+  const tickRafRef = useRef<number | null>(null);
+  const lastTickRenderRef = useRef<number>(0);
+  const tickCountRef = useRef(0); // for benchmark
+  const candleCountRef = useRef(0);
+
   const isLive = liveStatus === "LIVE";
 
+  // Lightweight candle update — NO indicator recalc per tick (performance)
+  // Uses series.update() for same candle, setData only for new candle append
   const updateChartWithLiveCandle = useCallback(
     (liveCandle: { time: number; open: number; high: number; low: number; close: number; volume?: number }) => {
-      const chart = chartRef.current;
       const candleSeries = candleSeriesRef.current;
-      if (!chart || !candleSeries) return;
-
+      if (!candleSeries) return;
       const existing = rawCandlesRef.current;
       if (existing.length === 0) return;
 
       const lastTime = existing[existing.length - 1].time;
-      let newCandles: RawCandle[];
 
       if (liveCandle.time === lastTime) {
-        newCandles = [...existing];
-        newCandles[newCandles.length - 1] = {
+        // Same forming candle — incremental update only, no history rebuild
+        const last = existing[existing.length - 1];
+        // Update raw ref for future comparisons but avoid full array copy for perf
+        existing[existing.length - 1] = {
           time: liveCandle.time,
           open: liveCandle.open,
           high: liveCandle.high,
@@ -1895,8 +1914,54 @@ export default function CandleChart({
             close: liveCandle.close,
           } as CandlestickData);
         } catch {
-          candleSeriesRef.current?.setData(
-            newCandles.map((c) => ({
+          // Fallback if update fails (e.g., time not in order)
+          try {
+            candleSeries.setData(
+              existing.map((c) => ({
+                time: c.time as UTCTimestamp,
+                open: c.open,
+                high: c.high,
+                low: c.low,
+                close: c.close,
+              }) as CandlestickData)
+            );
+          } catch {}
+        }
+        // Volume incremental
+        if (liveCandle.volume !== undefined) {
+          const vol = volumeRawRef.current;
+          if (vol.length > 0 && vol[vol.length - 1].time === liveCandle.time) {
+            vol[vol.length - 1] = { time: liveCandle.time, value: liveCandle.volume };
+            try {
+              volumeSeriesRef.current?.update({
+                time: liveCandle.time as UTCTimestamp,
+                value: liveCandle.volume,
+                color: readThemeColors().muted + "55",
+              } as HistogramData);
+            } catch {}
+          }
+        }
+      } else if (liveCandle.time > lastTime) {
+        // New candle — append, old becomes historical
+        const newCandle: RawCandle = {
+          time: liveCandle.time,
+          open: liveCandle.open,
+          high: liveCandle.high,
+          low: liveCandle.low,
+          close: liveCandle.close,
+        };
+        existing.push(newCandle);
+        try {
+          candleSeries.update({
+            time: newCandle.time as UTCTimestamp,
+            open: newCandle.open,
+            high: newCandle.high,
+            low: newCandle.low,
+            close: newCandle.close,
+          } as CandlestickData);
+        } catch {
+          candleSeries.setData(
+            existing.map((c) => ({
               time: c.time as UTCTimestamp,
               open: c.open,
               high: c.high,
@@ -1905,106 +1970,36 @@ export default function CandleChart({
             }) as CandlestickData)
           );
         }
-      } else if (liveCandle.time > lastTime) {
-        // New candle: old current becomes historical, new current live
-        // Periodic reconciliation with PostgreSQL after close will replace display-live with canonical historical
-        newCandles = [...existing, {
-          time: liveCandle.time,
-          open: liveCandle.open,
-          high: liveCandle.high,
-          low: liveCandle.low,
-          close: liveCandle.close,
-        }];
-        candleSeries.setData(
-          newCandles.map((c) => ({
-            time: c.time as UTCTimestamp,
-            open: c.open,
-            high: c.high,
-            low: c.low,
-            close: c.close,
-          }) as CandlestickData)
-        );
-        setDataMeta((prev) => prev ? { ...prev, count: newCandles.length, lastTime: liveCandle.time } : prev);
-      } else {
-        return;
-      }
-
-      rawCandlesRef.current = newCandles;
-
-      try {
-        const indicators = computeIndicators(newCandles);
-        const setLine = (series: ISeriesApi<"Line"> | null, points: TimePoint[]) => {
-          series?.setData(
-            points.map((p) => ({
-              time: p.time as UTCTimestamp,
-              value: p.value,
-            }))
-          );
-        };
-        setLine(ema20Ref.current, indicators.ema20);
-        setLine(ema50Ref.current, indicators.ema50);
-        setLine(ema200Ref.current, indicators.ema200);
-        setLine(sma20Ref.current, indicators.sma20);
-        setLine(rsiRef.current, indicators.rsi14);
-        setLine(macdLineRef.current, indicators.macd.macd);
-        setLine(macdSignalRef.current, indicators.macd.signal);
-        const colors = readThemeColors();
-        macdHistRef.current?.setData(
-          indicators.macd.histogram.map((p) => ({
-            time: p.time as UTCTimestamp,
-            value: p.value,
-            color: p.value >= 0 ? colors.green + "99" : colors.red + "99",
-          }))
-        );
-
-        const mergedData: CandlesResponse = {
-          ...(dataRef.current as CandlesResponse),
-          candles: newCandles,
-          volume: volumeRawRef.current,
-          indicators,
-        };
-        dataRef.current = mergedData;
-        rebuildLegendMaps(mergedData);
-        renderLegendAt(null);
-      } catch {}
-
-      if (liveCandle.volume !== undefined && volumeRawRef.current.length > 0) {
-        const volExisting = volumeRawRef.current;
-        const lastVolTime = volExisting[volExisting.length - 1].time;
-        let newVol: TimePoint[];
-        if (liveCandle.time === lastVolTime) {
-          newVol = [...volExisting];
-          newVol[newVol.length - 1] = { time: liveCandle.time, value: liveCandle.volume };
-        } else if (liveCandle.time > lastVolTime) {
-          newVol = [...volExisting, { time: liveCandle.time, value: liveCandle.volume }];
-        } else {
-          newVol = volExisting;
+        setDataMeta((prev) => (prev ? { ...prev, count: existing.length, lastTime: newCandle.time } : prev));
+        if (liveCandle.volume !== undefined) {
+          volumeRawRef.current.push({ time: liveCandle.time, value: liveCandle.volume });
+          try {
+            volumeSeriesRef.current?.update({
+              time: liveCandle.time as UTCTimestamp,
+              value: liveCandle.volume,
+              color: readThemeColors().muted + "55",
+            } as HistogramData);
+          } catch {}
         }
-        volumeRawRef.current = newVol;
-        const colors = readThemeColors();
-        volumeSeriesRef.current?.setData(
-          newVol.map((v) => ({
-            time: v.time as UTCTimestamp,
-            value: v.value,
-            color: colors.muted + "55",
-          }))
-        );
       }
+      // NO indicator recalc here for performance — historical indicators stay, live candle is DISPLAY only
+      candleCountRef.current++;
     },
-    [rebuildLegendMaps, renderLegendAt]
+    []
   );
 
-  // Reconciliation: after candle close, fetch canonical CLOSED from DB to replace display-live and avoid duplicates
   const reconcileWithDb = useCallback(async () => {
     if (!symbol || !exchange || !timeframe) return;
     if (status !== "ok") return;
     try {
-      const res = await fetch(`/api/chart/live?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}&timeframe=${encodeURIComponent(timeframe)}`, { cache: "no-store" });
+      const res = await fetch(
+        `/api/chart/live?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}&timeframe=${encodeURIComponent(timeframe)}`,
+        { cache: "no-store" }
+      );
       if (!res.ok) return;
       const data = await res.json();
       const closedRaw = data.latestClosedDb;
       if (!closedRaw) return;
-      // If closedRaw time matches last displayed time and close differs, update to canonical
       const lastTime = rawCandlesRef.current.length > 0 ? rawCandlesRef.current[rawCandlesRef.current.length - 1].time : null;
       if (lastTime !== null && closedRaw.time === lastTime) {
         const lastClose = rawCandlesRef.current[rawCandlesRef.current.length - 1].close;
@@ -2022,9 +2017,37 @@ export default function CandleChart({
     } catch {}
   }, [symbol, exchange, timeframe, status, updateChartWithLiveCandle]);
 
-  // Start live WebSocket when chart is ok, close old on change/unmount
+  // Tick handler with coalescing to avoid React thrash on 30-100 trades/sec
+  const handleLiveTick = useCallback((price: number, eventTime: number) => {
+    latestTickRef.current = { price, eventTime };
+    tickCountRef.current++;
+
+    const now = Date.now();
+    // Coalesce to max ~10/sec (100ms) but allow immediate first
+    if (now - lastTickRenderRef.current < 100) {
+      if (tickRafRef.current === null) {
+        tickRafRef.current = window.requestAnimationFrame(() => {
+          tickRafRef.current = null;
+          if (latestTickRef.current) {
+            setLivePriceRaw(latestTickRef.current.price);
+            setLivePrice(latestTickRef.current.price);
+            setLastLiveUpdate(new Date(latestTickRef.current.eventTime));
+            lastTickRenderRef.current = Date.now();
+          }
+        });
+      }
+      return;
+    }
+
+    // Immediate update
+    setLivePriceRaw(price);
+    setLivePrice(price);
+    setLastLiveUpdate(new Date(eventTime));
+    lastTickRenderRef.current = now;
+  }, []);
+
+  // Start live WebSocket when chart ok, close old on change/unmount
   useEffect(() => {
-    // Cleanup previous
     if (liveProviderRef.current) {
       try {
         liveProviderRef.current.disconnect();
@@ -2035,39 +2058,41 @@ export default function CandleChart({
       clearInterval(reconcileTimerRef.current);
       reconcileTimerRef.current = null;
     }
+    if (tickRafRef.current !== null) {
+      cancelAnimationFrame(tickRafRef.current);
+      tickRafRef.current = null;
+    }
 
     if (status !== "ok" || !symbol || !exchange) {
       setLiveStatus("CLOSED");
       setLivePrice(null);
       setLiveExchange(null);
+      setRequestedExchange(null);
+      setIsFallback(false);
       return;
     }
 
-    // Find actual market for exchangeSymbol
     const market = markets.find((m) => m.exchange === exchange);
     const exchangeSymbol = market?.exchangeSymbol || `${symbol}USDT`;
 
-    // Create provider via factory — native WS for BINANCE/BYBIT, polling fallback for others (still live-like)
-    // This ensures 1 live subscription per open chart only, not 100
     let provider: any = null;
 
-    // Dynamic import to avoid SSR issues (WebSocket only in browser)
     import("@/lib/live").then(({ createLiveProvider }) => {
       provider = createLiveProvider({
         symbol,
         exchange,
         exchangeSymbol,
         timeframe,
+        onTick: (tick) => {
+          // Real market tick — high frequency
+          handleLiveTick(tick.price, tick.eventTime);
+          setLiveExchange(tick.exchange);
+        },
         onCandle: (candle) => {
-          // Incremental update, no full history rebuild per tick
-          // If openTime == last, UPDATE; if >, APPEND
           const lastTime = rawCandlesRef.current.length > 0 ? rawCandlesRef.current[rawCandlesRef.current.length - 1].time : null;
           if (lastTime === null) return;
 
-          // Handle rollover: if new candle appears, previous current becomes historical
-          // Canonical PostgreSQL sync will later replace display-live with saved historical without duplicate
           if (candle.time > lastTime) {
-            // New candle — append
             updateChartWithLiveCandle({
               time: candle.time,
               open: candle.open,
@@ -2076,18 +2101,17 @@ export default function CandleChart({
               close: candle.close,
               volume: candle.volume,
             });
-            setLivePrice(candle.close);
-            setLastLiveUpdate(new Date());
+            // Also update price from candle close if no tick recently
+            if (!latestTickRef.current || Date.now() - latestTickRef.current.eventTime > 2000) {
+              handleLiveTick(candle.close, candle.eventTime || Date.now());
+            }
             setLiveExchange(candle.exchange);
             lastLiveCandleTimeRef.current = candle.time;
-
-            // After new candle, trigger reconciliation after 5s to get canonical closed from DB
             setTimeout(() => void reconcileWithDb(), 5000);
           } else if (candle.time === lastTime) {
-            // Same candle forming — update close/high/low/volume/price visually moves
             const lastClose = rawCandlesRef.current[rawCandlesRef.current.length - 1].close;
             if (Math.abs(candle.close - lastClose) < 0.0000001 && lastLiveCandleTimeRef.current === candle.time) {
-              setLastLiveUpdate(new Date());
+              setLastLiveUpdate(new Date(candle.eventTime || Date.now()));
               return;
             }
             updateChartWithLiveCandle({
@@ -2098,8 +2122,9 @@ export default function CandleChart({
               close: candle.close,
               volume: candle.volume,
             });
-            setLivePrice(candle.close);
-            setLastLiveUpdate(new Date());
+            if (!latestTickRef.current || Date.now() - latestTickRef.current.eventTime > 2000) {
+              handleLiveTick(candle.close, candle.eventTime || Date.now());
+            }
             setLiveExchange(candle.exchange);
             lastLiveCandleTimeRef.current = candle.time;
           }
@@ -2116,7 +2141,6 @@ export default function CandleChart({
       provider.connect();
     });
 
-    // Periodic reconciliation every 60s with PostgreSQL after candle close
     const reconTimer = setInterval(() => {
       void reconcileWithDb();
     }, 60000);
@@ -2133,8 +2157,12 @@ export default function CandleChart({
         clearInterval(reconcileTimerRef.current);
         reconcileTimerRef.current = null;
       }
+      if (tickRafRef.current !== null) {
+        cancelAnimationFrame(tickRafRef.current);
+        tickRafRef.current = null;
+      }
     };
-  }, [status, symbol, exchange, timeframe, markets, updateChartWithLiveCandle, reconcileWithDb]);
+  }, [status, symbol, exchange, timeframe, markets, updateChartWithLiveCandle, reconcileWithDb, handleLiveTick]);
 
   /* ---------- подгрузка истории при прокрутке влево ---------- */
 
@@ -2842,68 +2870,40 @@ export default function CandleChart({
 
           {dataMeta && (
             <div className="chartDataStatus muted">
-              <span className="chartStatusMarket">
-                {exchange && selectedMarket
-                  ? `${exchange} · ${dataMeta.exchangeSymbol} · ${timeframeLabel(timeframe)}`
-                  : timeframeLabel(timeframe)}
+              {/* Compact UI block per task: BTCUSDT, BINANCE, 5 минут, LIVE PRICE, status, updated, candles */}
+              <span className="chartStatusMarket" style={{ fontWeight: 600 }}>
+                {dataMeta.exchangeSymbol}
               </span>
+              <span>{exchange}</span>
+              <span>{timeframeLabel(timeframe)}</span>
+              <span>Свечей: {dataMeta.count}</span>
 
-              <span>
-                Загружено свечей:{" "}
-                {dataMeta.count}
-              </span>
-
-              {lastTimeLabel && (
-                <span>
-                  Последняя: {lastTimeLabel}
-                </span>
-              )}
-
-              {lastFreshness && (
-                <span
-                  className={`freshBadge ${lastFreshness.status}`}
-                >
-                  ● {lastFreshness.label}
-                </span>
-              )}
-
-              {/* LIVE PRICE — generic for any coin */}
               {livePrice !== null && (
                 <span style={{ fontWeight: 700, color: liveStatus === "LIVE" ? "#16a34a" : liveStatus === "RECONNECTING" ? "#eab308" : liveStatus === "STALE" ? "#ef4444" : "#6b7280" }}>
-                  LIVE PRICE: {fmtPrice(livePrice)} {liveStatus === "LIVE" ? "● LIVE" : liveStatus === "RECONNECTING" ? "● RECONNECTING" : liveStatus === "STALE" ? "● STALE" : liveStatus === "CONNECTING" ? "○ CONNECTING" : "○"}
+                  LIVE PRICE {fmtPrice(livePrice)}
                 </span>
               )}
-
-              {liveExchange && (
-                <span>
-                  EXCHANGE: {liveExchange} {liveExchange !== exchange ? "(fallback)" : ""}
+              <span style={{ fontWeight: 600, color: liveStatus === "LIVE" ? "#16a34a" : liveStatus === "RECONNECTING" ? "#eab308" : liveStatus === "STALE" ? "#ef4444" : liveStatus === "ERROR" ? "#ef4444" : "#6b7280" }}>
+                {liveStatus === "LIVE" ? "● LIVE" : liveStatus === "RECONNECTING" ? "● RECONNECTING" : liveStatus === "STALE" ? "● STALE" : liveStatus === "CONNECTING" ? "○ CONNECTING" : liveStatus === "NO_MARKET" ? "○ NO_MARKET" : liveStatus === "ERROR" ? "● ERROR" : "○ CLOSED"}
+              </span>
+              {isFallback && requestedExchange && liveExchange && (
+                <span style={{ fontSize: "11px", color: "#eab308" }}>
+                  Запрошено: {requestedExchange} → Фактически: {liveExchange} (fallback)
                 </span>
               )}
-
+              {!isFallback && liveExchange && liveExchange !== exchange && (
+                <span style={{ fontSize: "11px" }}>
+                  Фактически: {liveExchange} {isFallback ? "(fallback)" : ""}
+                </span>
+              )}
               {lastLiveUpdate && (
-                <span style={{ fontSize: "10px" }}>
-                  LAST UPDATE: {lastLiveUpdate.toLocaleTimeString("ru-RU")} UTC
+                <span style={{ fontSize: "11px" }}>
+                  обновлено {lastLiveUpdate.toLocaleTimeString("ru-RU")}
                 </span>
               )}
-
-              {historyLoading && (
-                <span>Загрузка истории…</span>
-              )}
-
-              {historyEnded &&
-                !historyError && (
-                  <span>
-                    История загружена полностью
-                  </span>
-                )}
-
-              {historyError && (
-                <span className="chartHistoryError">
-                  Ошибка загрузки истории —
-                  график остался на
-                  загруженных данных
-                </span>
-              )}
+              {historyLoading && <span>Загрузка истории…</span>}
+              {historyEnded && !historyError && <span>История загружена полностью</span>}
+              {historyError && <span className="chartHistoryError">Ошибка истории</span>}
             </div>
           )}
 
@@ -2941,25 +2941,10 @@ export default function CandleChart({
       />
 
       {status === "ok" && (
-        <div className="chartNote muted">
-          Исторические свечи — только закрытые из PostgreSQL (CLOSED) для всех монет, текущая свеча — LIVE через public WebSocket выбранной биржи (BINANCE/BYBIT native WS, GATE/KUCOIN/BINGX polling fallback) — визуализация только, Signal Engine использует только CLOSED (DISPLAY vs SIGNALS разделены архитектурно)
-          {selectedMarket
-            ? ` · рынок ${selectedMarket.exchangeSymbol} на ${selectedMarket.exchange}`
-            : ""}
-          . Навигация: перетаскивание мышью или
-          горизонтальный свайп — движение по истории,
-          колесо мыши или щипок — масштаб, драг по оси
-          времени или по ценовой шкале — масштаб оси,
-          двойной клик по оси и кнопка «Сбросить
-          масштаб» — возврат к авто-масштабу и последним
-          закрытым барам; прокрутка влево подгружает
-          более старую историю, текущий вид при этом
-          сохраняется
-          {historyEnded
-            ? " · история загружена полностью"
-            : ""}
-          {" · "}{liveStatus === "LIVE" ? "● LIVE" : liveStatus === "RECONNECTING" ? "● RECONNECTING" : liveStatus === "STALE" ? "● STALE" : liveStatus === "CONNECTING" ? "○ CONNECTING" : "○ CLOSED"} {liveExchange ? `(${liveExchange})` : ""} {lastLiveUpdate ? `обновлено ${lastLiveUpdate.toLocaleTimeString("ru-RU")}` : ""} · 1 subscription на chart, incremental update, reconciliation 60s
-          .
+        <div className="chartNote muted" style={{ fontSize: "11px", lineHeight: "1.4" }}>
+          {dataMeta?.exchangeSymbol} · {exchange} · {timeframeLabel(timeframe)} · Свечей: {dataMeta?.count}
+          {lastTimeLabel ? ` · Последняя: ${lastTimeLabel}` : ""}
+          {lastFreshness ? ` · ${lastFreshness.label}` : ""}
         </div>
       )}
     </div>

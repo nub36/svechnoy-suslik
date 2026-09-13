@@ -1,14 +1,13 @@
 /**
- * Generic fallback provider for exchanges without easy public WS kline
- * Uses polling of /api/chart/live every 3s as fallback — still DISPLAY ONLY
- * This ensures coverage for GATE, KUCOIN, BINGX where WS is more complex
- * But we still have interface same as WS providers
+ * Generic fallback provider for exchanges without WS or as ultimate fallback
+ * Uses polling of /api/chart/live every 2s — still DISPLAY ONLY
+ * Now also provides tick from close price
  */
 
-import type { LiveCandle, LiveStatusCallback, LiveUpdateCallback } from "./types";
+import type { LiveCandle, LiveTick, LiveStatusCallback, LiveUpdateCallback, LiveTickCallback } from "./types";
 
 export class PollingLiveProvider {
-  private timer: NodeJS.Timeout | null = null;
+  private timer: ReturnType<typeof setInterval> | null = null;
   private abort: AbortController | null = null;
   private shouldRun = true;
   private lastUpdate = 0;
@@ -19,6 +18,7 @@ export class PollingLiveProvider {
       exchange: string;
       exchangeSymbol: string;
       timeframe: string;
+      onTick?: LiveTickCallback;
       onCandle: LiveUpdateCallback;
       onStatus: LiveStatusCallback;
     }
@@ -62,13 +62,25 @@ export class PollingLiveProvider {
           volume: raw.volume,
           closed: raw.closed,
           time: raw.time,
+          eventTime: Date.now(),
         };
         this.lastUpdate = Date.now();
         this.opts.onStatus("LIVE", `${this.opts.exchange} polling live`);
         this.opts.onCandle(candle);
+        if (this.opts.onTick) {
+          const tick: LiveTick = {
+            exchange: this.opts.exchange,
+            symbol: this.opts.symbol,
+            exchangeSymbol: this.opts.exchangeSymbol,
+            price: raw.close,
+            volume: raw.volume,
+            eventTime: Date.now(),
+          };
+          this.opts.onTick(tick);
+        }
       } catch (e: any) {
         if (e.name === "AbortError") return;
-        if (Date.now() - this.lastUpdate > 30000) {
+        if (Date.now() - this.lastUpdate > 10000) {
           this.opts.onStatus("STALE", e.message);
         } else {
           this.opts.onStatus("RECONNECTING", e.message);
@@ -76,10 +88,8 @@ export class PollingLiveProvider {
       }
     };
 
-    // Immediate poll
     void poll();
-    // Every 3s
-    this.timer = setInterval(poll, 3000);
+    this.timer = setInterval(poll, 2000);
   }
 
   private stopPolling() {

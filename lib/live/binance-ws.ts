@@ -1,26 +1,28 @@
 /**
- * Binance public kline WebSocket provider — client-side only
- * DISPLAY ONLY, NOT for Signal Engine
- * Endpoint: wss://stream.binance.com:9443/ws/{symbol}@kline_{interval}
- * Docs: https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams#kline-candlestick-streams
+ * Binance public WebSocket provider — client-side only, DISPLAY ONLY
+ * Provides both trade (price tick) and kline (candle) streams
+ * Endpoint: wss://stream.binance.com:9443/stream?streams=...
+ * Docs: https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams
  */
 
-import type { LiveCandle, LiveStatusCallback, LiveUpdateCallback } from "./types";
+import type { LiveCandle, LiveTick, LiveStatusCallback, LiveUpdateCallback, LiveTickCallback } from "./types";
 import { timeframeToBinanceInterval } from "./types";
 
 export class BinanceLiveProvider {
   private ws: WebSocket | null = null;
   private shouldReconnect = true;
   private reconnectAttempts = 0;
-  private reconnectTimer: NodeJS.Timeout | null = null;
-  private staleTimer: NodeJS.Timeout | null = null;
-  private lastUpdateTime = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private staleTimer: ReturnType<typeof setInterval> | null = null;
+  private lastMessageTime = 0;
+  private lastTradeTime = 0;
 
   constructor(
     private opts: {
-      symbol: string; // BTC
-      exchangeSymbol: string; // BTCUSDT
-      timeframe: string; // 5m
+      symbol: string;
+      exchangeSymbol: string;
+      timeframe: string;
+      onTick?: LiveTickCallback;
       onCandle: LiveUpdateCallback;
       onStatus: LiveStatusCallback;
     }
@@ -45,10 +47,12 @@ export class BinanceLiveProvider {
     }
 
     const interval = timeframeToBinanceInterval(this.opts.timeframe);
-    const streamName = `${this.opts.exchangeSymbol.toLowerCase()}@kline_${interval}`;
-    const url = `wss://stream.binance.com:9443/ws/${streamName}`;
+    const lower = this.opts.exchangeSymbol.toLowerCase();
+    // Combined stream: trade for LIVE PRICE (high freq) + kline for forming candle
+    const streams = `${lower}@trade/${lower}@kline_${interval}`;
+    const url = `wss://stream.binance.com:9443/stream?streams=${streams}`;
 
-    this.opts.onStatus("CONNECTING", `Binance ${streamName}`);
+    this.opts.onStatus("CONNECTING", `Binance ${streams}`);
 
     try {
       this.ws = new WebSocket(url);
@@ -60,7 +64,7 @@ export class BinanceLiveProvider {
 
     this.ws.onopen = () => {
       this.reconnectAttempts = 0;
-      this.lastUpdateTime = Date.now();
+      this.lastMessageTime = Date.now();
       this.opts.onStatus("LIVE", "Binance connected");
       this.startStaleCheck();
     };
@@ -68,41 +72,69 @@ export class BinanceLiveProvider {
     this.ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        // Binance kline stream: { e: "kline", k: { t, T, o, h, l, c, v, x, ... } }
-        const k = msg.k;
-        if (!k) return;
+        // Combined stream format: {stream: "btcusdt@trade", data: {...}}
+        const stream: string = msg.stream || "";
+        const data = msg.data || msg; // fallback if not combined
 
-        const openTime = k.t; // ms
-        const closeTime = k.T;
-        const open = parseFloat(k.o);
-        const high = parseFloat(k.h);
-        const low = parseFloat(k.l);
-        const close = parseFloat(k.c);
-        const volume = parseFloat(k.v);
-        const closed = k.x === true; // true if this kline closed
+        this.lastMessageTime = Date.now();
 
-        if (!Number.isFinite(open) || !Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(close)) return;
+        if (stream.includes("@trade") || data.e === "trade") {
+          // Trade event: {e:trade, E:eventTime, s:symbol, p:price, q:qty, T:tradeTime}
+          const price = parseFloat(data.p);
+          if (!Number.isFinite(price)) return;
+          const eventTime = data.E || data.T || Date.now();
+          this.lastTradeTime = Date.now();
 
-        const candle: LiveCandle = {
-          symbol: this.opts.symbol,
-          exchange: "BINANCE",
-          exchangeSymbol: this.opts.exchangeSymbol,
-          timeframe: this.opts.timeframe,
-          openTime,
-          closeTime,
-          open,
-          high,
-          low,
-          close,
-          volume,
-          closed,
-          time: Math.floor(openTime / 1000),
-        };
+          if (this.opts.onTick) {
+            const tick: LiveTick = {
+              exchange: "BINANCE",
+              symbol: this.opts.symbol,
+              exchangeSymbol: this.opts.exchangeSymbol,
+              price,
+              volume: parseFloat(data.q) || undefined,
+              eventTime,
+              rawTime: data.T,
+            };
+            this.opts.onTick(tick);
+          }
 
-        this.lastUpdateTime = Date.now();
-        this.opts.onStatus("LIVE");
-        this.opts.onCandle(candle);
-      } catch (e) {
+          // Also update LIVE status to show real messages
+          this.opts.onStatus("LIVE");
+        } else if (stream.includes("@kline") || data.e === "kline") {
+          const k = data.k;
+          if (!k) return;
+          const openTime = k.t;
+          const closeTime = k.T;
+          const open = parseFloat(k.o);
+          const high = parseFloat(k.h);
+          const low = parseFloat(k.l);
+          const close = parseFloat(k.c);
+          const volume = parseFloat(k.v);
+          const closed = k.x === true;
+
+          if (!Number.isFinite(open) || !Number.isFinite(close)) return;
+
+          const candle: LiveCandle = {
+            symbol: this.opts.symbol,
+            exchange: "BINANCE",
+            exchangeSymbol: this.opts.exchangeSymbol,
+            timeframe: this.opts.timeframe,
+            openTime,
+            closeTime,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            closed,
+            time: Math.floor(openTime / 1000),
+            eventTime: data.E || Date.now(),
+          };
+
+          this.opts.onStatus("LIVE");
+          this.opts.onCandle(candle);
+        }
+      } catch {
         // ignore parse errors
       }
     };
@@ -114,7 +146,7 @@ export class BinanceLiveProvider {
     this.ws.onclose = () => {
       this.stopStaleCheck();
       if (this.shouldReconnect) {
-        this.opts.onStatus("RECONNECTING", `reconnect attempt ${this.reconnectAttempts + 1}`);
+        this.opts.onStatus("RECONNECTING", `reconnect ${this.reconnectAttempts + 1}`);
         this.scheduleReconnect();
       } else {
         this.opts.onStatus("CLOSED");
@@ -124,12 +156,12 @@ export class BinanceLiveProvider {
 
   private startStaleCheck() {
     this.stopStaleCheck();
-    // If no update for 30s, mark STALE
     this.staleTimer = setInterval(() => {
-      if (Date.now() - this.lastUpdateTime > 30000) {
-        this.opts.onStatus("STALE", "no data 30s");
+      const now = Date.now();
+      if (now - this.lastMessageTime > 10000) {
+        this.opts.onStatus("STALE", `no data ${Math.round((now - this.lastMessageTime) / 1000)}s`);
       }
-    }, 10000);
+    }, 3000);
   }
 
   private stopStaleCheck() {
@@ -140,20 +172,12 @@ export class BinanceLiveProvider {
   }
 
   private scheduleReconnect() {
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-    }
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (!this.shouldReconnect) return;
-
-    // Exponential backoff + jitter: 1s,2s,4s,8s,16s,32s max 60s
-    const base = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 60000);
+    const base = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
     const jitter = Math.random() * 1000;
-    const delay = base + jitter;
     this.reconnectAttempts++;
-
-    this.reconnectTimer = setTimeout(() => {
-      this.doConnect();
-    }, delay);
+    this.reconnectTimer = setTimeout(() => this.doConnect(), base + jitter);
   }
 
   disconnect() {
