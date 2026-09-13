@@ -452,21 +452,19 @@ async function main() {
     }
   }
 
-  // Safety: prisma.signal.create not called for smart-money
-  console.log("\nSafety: prisma.signal.create forbidden for smart-money");
+  // Safety: PHASE 2B — smart-money create guarded, not forbidden entirely, but dry-run default
+  console.log("\nSafety: prisma.signal.create guarded for smart-money (PHASE 2B)");
   {
     const src = readFileSync("lib/signals/signal-engine.ts", "utf-8");
-    // Must contain guard comment and must not have unconditional create in smart-money path
-    ok(src.includes("PHASE 2A GUARD") && src.includes("prisma.signal.create is FORBIDDEN for smart-money"), "Safety: guard comment present");
-    // Count actual DB writes: prisma.signal.create({
+    ok(src.includes("PHASE 2B GUARD") && src.includes("write DISABLED"), "Safety: PHASE 2B guard present");
     const createMatches = src.match(/prisma\.signal\.create\(\{/g) || [];
-    ok(createMatches.length === 1, `Safety: only 1 prisma.signal.create({ in file (trend only), found ${createMatches.length}`);
-    // Ensure smart-money engine does not call create
+    ok(createMatches.length === 2, `Safety: 2 prisma.signal.create({ in file (trend + smart-money guarded), found ${createMatches.length}`);
     const smStart = src.indexOf("async function runSmartMoneyEngine");
-    const smEnd = src.indexOf("}\n\n// ---------------------------------------------------------------------------\n// Main entry", smStart);
-    const smartMoneyCode = smStart >= 0 ? src.substring(smStart, smEnd >= 0 ? smEnd : smStart + 20000) : "";
-    const smCreates = (smartMoneyCode.match(/prisma\.signal\.create\(\{/g) || []).length;
-    ok(smCreates === 0, `Safety: smart-money engine has 0 prisma.signal.create({ calls, found ${smCreates}`);
+    const smEnd = src.indexOf("// ---------------------------------------------------------------------------\n// Main entry", smStart);
+    const smartMoneyCode = smStart >= 0 ? src.substring(smStart, smEnd >= 0 ? smEnd : smStart + 30000) : "";
+    ok(smartMoneyCode.includes("enableSmartMoneyWrite") && smartMoneyCode.includes("SMART_MONEY_WRITE_ENABLED"), "Safety: smart-money engine checks enable flag and ENV");
+    ok(smartMoneyCode.includes("Duplicate") && smartMoneyCode.includes("P2002"), "Safety: handles unique violation as duplicate");
+    ok(src.includes("buildSmartMoneySignalCandidate"), "Safety: uses single candidate builder");
   }
 
   // Additional: common horizon behavior explicit

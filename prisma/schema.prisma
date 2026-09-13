@@ -90,6 +90,12 @@ model Strategy {
   @@index([enabled])
 }
 
+enum SignalSource {
+  LIVE_FORWARD
+  SEEDED
+  BACKTEST
+}
+
 model Signal {
   id          Int       @id @default(autoincrement())
   symbol      String
@@ -107,12 +113,32 @@ model Signal {
   createdAt   DateTime  @default(now())
   closedAt    DateTime?
 
+  // PHASE 2B — Signal identity + execution semantics
+  signalCandleTime   DateTime?
+  referenceExchange  String?
+  referencePrice     Float?
+  aggregatePrice     Float?
+  executionPolicy    String?
+  signalSource       SignalSource @default(LIVE_FORWARD)
+  metadata           Json?
+  atrAtSignal        Float?
+  nextBarOpenPrice   Float?
+  nextBarOpenTime    DateTime?
+
   strategy Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
 
   @@index([symbol, timeframe])
+  @@index([symbol, timeframe, signalCandleTime])
   @@index([status])
   @@index([strategyId])
+  @@index([strategyId, signalCandleTime])
   @@index([createdAt])
+  @@index([signalSource])
+  // Unique identity: one strategy + symbol + timeframe + candle can have max ONE signal
+  // Direction NOT included to prevent LONG and SHORT on same candle
+  // PostgreSQL treats NULL as distinct, so legacy rows with NULL signalCandleTime are not constrained
+  // New SMC signals will have NOT NULL signalCandleTime and will be constrained
+  @@unique([strategyId, symbol, timeframe, signalCandleTime])
 }
 
 model Asset {

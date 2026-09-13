@@ -2,10 +2,8 @@
  * Signal Engine — BTC ONLY pilot, production-ready, NO forbidden copy.
  * Создает реальные сигналы LONG/SHORT в PostgreSQL из подтвержденных агрегаций Strategy Runtime.
  * 
- * Только enabled=true + status=PUBLISHED стратегии.
- * Каждый сигнал хранит: символ, таймфрейм, направление, score, entry, SL/TP1-3 через ATR, reason, strategyId.
- * Защита от дубликатов: один сигнал на Strategy version + symbol + timeframe + candleTime + direction.
- * Учитывает execution.closedCandleOnly и cooldownCandles.
+ * Только enabled=true + status=PUBLISHED стратегии для trend.
+ * Smart Money — dry-run по умолчанию, write требует explicit flag.
  * 
  * BTC ONLY для пилота 3001→3000, BINGX excluded 1d через eligibility.
  *
@@ -13,7 +11,14 @@
  * - использует ТОЛЬКО production functions evaluateSmc(), selectCommonClosedHorizon(),
  *   truncateCandlesToHorizon(), aggregateAssetGroup(), isSmartMoneyExchangeEligible()
  * - raw CLOSED candles, common horizon, no IndicatorSnapshot for SMC
- * - NEVER prisma.signal.create for smart-money (guarded)
+ *
+ * PHASE 2B — Persistence + identity + execution semantics:
+ * - candidate builder buildSmartMoneySignalCandidate() — immutable, single path dry-run == live
+ * - reference exchange deterministic priority BINANCE>BYBIT>GATE>KUCOIN>BINGX, independent of score
+ * - ATR from reference exchange, not average
+ * - unique identity [strategyId, symbol, timeframe, signalCandleTime] without direction
+ * - write guard: --enable-smart-money-write + ENV SMART_MONEY_WRITE_ENABLED
+ * - QUORUM vs STRICT policy documented, QUORUM preferred for production
  */
 
 import { prisma } from "../prisma";
@@ -32,6 +37,8 @@ import {
   decideAggregationAtCommonHorizon,
   truncateCandlesToHorizon,
 } from "../strategies/common-horizon";
+import { selectQuorumClosedHorizon } from "../strategies/common-horizon-quorum";
+import { buildSmartMoneySignalCandidate } from "./smart-money-candidate";
 
 export type SignalEngineResult = {
   evaluatedMarkets: number;
@@ -277,7 +284,7 @@ async function runTrendSuslikEngine(opts: {
 }
 
 // ---------------------------------------------------------------------------
-// SMART MONEY DRY-RUN path — uses production SMC functions only
+// SMART MONEY path — PHASE 2B with candidate builder + write guard + quorum
 // ---------------------------------------------------------------------------
 
 async function runSmartMoneyEngine(opts: {
@@ -288,19 +295,21 @@ async function runSmartMoneyEngine(opts: {
   eligibleMarkets: any[];
   asset: { id: number; symbol: string; rank: number | null };
   result: SignalEngineResult;
+  enableSmartMoneyWrite?: boolean;
+  commonHorizonPolicy?: "STRICT" | "QUORUM";
 }): Promise<void> {
-  const { timeframe, dryRun, symbol, strategies, eligibleMarkets, asset, result } = opts;
+  const { timeframe, dryRun, symbol, strategies, eligibleMarkets, asset, result, enableSmartMoneyWrite, commonHorizonPolicy } = opts;
 
   if (!isSmcTimeframe(timeframe)) {
     result.errors.push(`Timeframe ${timeframe} not in SMC whitelist`);
     return;
   }
   const tf = timeframe as SmcTimeframe;
+  const policy = commonHorizonPolicy ?? "QUORUM"; // PHASE 2B prefers QUORUM
 
-  // Find smart-money strategy (enabled preferred, fallback any for dry-run)
+  // Find smart-money strategy
   let strategy = strategies.find((s: any) => s.slug === "smart-money-suslik");
   if (!strategy) {
-    // Fallback: load any smart-money from DB (even disabled) for dry-run
     const anySm = await prisma.strategy.findFirst({
       where: { slug: "smart-money-suslik" },
       orderBy: { version: "desc" },
@@ -313,7 +322,7 @@ async function runSmartMoneyEngine(opts: {
     console.log(`  Using fallback strategy id=${strategy.id} slug=${strategy.slug} enabled=${strategy.enabled} status=${strategy.status} (dry-run allowed)`);
   }
 
-  console.log(`\nStrategy ${strategy.slug} v${strategy.version} id=${strategy.id} minExchanges=${strategy.minExchanges} timeframes=${strategy.timeframes.join(",")}`);
+  console.log(`\nStrategy ${strategy.slug} v${strategy.version} id=${strategy.id} minExchanges=${strategy.minExchanges} timeframes=${strategy.timeframes.join(",")} policy=${policy}`);
 
   if (!strategy.timeframes.includes(timeframe)) {
     console.log(`  Skipped timeframe ${timeframe} not in strategy timeframes ${strategy.timeframes.join(",")}`);
@@ -333,16 +342,9 @@ async function runSmartMoneyEngine(opts: {
   console.log(`  Config validated: minimumSignalScore=${smcConfig.minimumScore} swing ${smcConfig.swingLeft}/${smcConfig.swingRight} internal ${smcConfig.internalLeft}/${smcConfig.internalRight} atrPeriod=${smcConfig.atrPeriod}`);
   console.log(`  Filters: top500Only=${filters.top500Only} minimumQuoteVolume24h=${filters.minimumQuoteVolume24h}`);
 
-  // Load CLOSED raw candles for each eligible market (500 latest)
+  // Load CLOSED raw candles
   type LoadedMarket = { meta: SmartMoneyMarketMeta; candles: SmcRawCandle[] };
   const loaded: LoadedMarket[] = [];
-  const allMarketCount = eligibleMarkets.length;
-  const exchangeEligibleCount = eligibleMarkets.length;
-  const exchangeExcluded: string[] = [];
-
-  // For report: we need total markets before eligibility (passed in opts already filtered, so we need original count from caller)
-  // Caller already filtered by eligibility, but we still compute excluded list from asset markets if needed.
-  // For simplicity, we report eligible = loaded.length initial.
 
   for (const market of eligibleMarkets) {
     const rows = await prisma.candle.findMany({
@@ -375,193 +377,194 @@ async function runSmartMoneyEngine(opts: {
 
   const now = new Date();
 
-  // Evaluate at common horizon using production function
-  const outcome = evaluateMarketsAtCommonHorizon(loaded, tf, smcConfig, filters, now);
-
-  // Detailed horizon report
-  console.log(`\n=== COMMON HORIZON ===`);
-  console.log(`now=${now.toISOString()} timeframe=${tf}`);
-  if (outcome.selection.commonHorizon) {
-    console.log(`COMMON HORIZON: ${outcome.selection.commonHorizon.toISOString()}`);
-  } else {
-    console.log(`COMMON HORIZON: null (status=${outcome.status})`);
-  }
-  console.log(`status=${outcome.selection.status} usable=${outcome.usable} participantCount=${outcome.selection.participantCount} filteredCount=${outcome.filteredCount}`);
-  console.log(`expectedLatestClosed=${outcome.selection.expectedLatestClosed.toISOString()} lagBars=${outcome.selection.lagBars} absoluteLagBars=${outcome.selection.absoluteLagBars}`);
-
-  // Per-exchange horizon inclusion
-  for (const p of outcome.selection.perMarketLatest) {
-    const included = p.hasCommon && outcome.selection.status === "ok";
-    const horizonStr = outcome.selection.commonHorizon ? outcome.selection.commonHorizon.toISOString() : "null";
-    const latestStr = p.latest ? p.latest.toISOString() : "no data";
-    console.log(`${p.exchange} horizon=${included ? horizonStr : latestStr} ${included ? "INCLUDED" : "EXCLUDED"} latest=${latestStr} hasCommon=${p.hasCommon}`);
-  }
-  if (outcome.selection.marketsWithoutData.length > 0) {
-    for (const m of outcome.selection.marketsWithoutData) {
-      console.log(`${m.exchange} horizon=null EXCLUDED (no CLOSED data) marketId=${m.marketId}`);
-    }
+  // For QUORUM policy, also compute quorum selection for reporting
+  if (policy === "QUORUM") {
+    const quorumSel = selectQuorumClosedHorizon(
+      loaded.map((m) => ({ exchange: m.meta.exchange, marketId: m.meta.marketId, candles: m.candles })),
+      tf,
+      { now, minExchanges: strategy.minExchanges }
+    );
+    console.log(`\n=== QUORUM POLICY ===`);
+    console.log(`now=${now.toISOString()} expectedLatestClosed=${quorumSel.expectedLatestClosed.toISOString()} status=${quorumSel.status} fresh=${quorumSel.freshCount} stale=${quorumSel.staleCount}`);
+    console.log(`fresh: ${quorumSel.freshMarkets.map((f) => f.exchange).join(", ") || "none"}`);
+    console.log(`stale: ${quorumSel.staleMarkets.map((s) => `${s.exchange}(${s.reason})`).join("; ") || "none"}`);
+    console.log(`reason: ${quorumSel.reason}`);
   }
 
-  // Format common horizon report (production function)
-  const reportLines = formatCommonHorizonReport({
-    selection: outcome.selection,
+  // Build candidate via single builder (dry-run == live)
+  const builderResult = buildSmartMoneySignalCandidate({
+    markets: loaded,
     timeframe: tf,
-    marketCount: allMarketCount + exchangeExcluded.length, // best effort
-    exchangeEligibleCount,
-    exchangeExcluded,
-    filteredCount: outcome.filteredCount,
-  });
-  for (const line of reportLines) console.log(`  ${line}`);
-
-  if (!outcome.usable || outcome.selection.status !== "ok" || !outcome.selection.commonHorizon) {
-    console.log(`\nNO SIGNAL — common horizon unusable: ${outcome.selection.reason}`);
-    result.neutralGroups++;
-    result.evaluatedMarkets = loaded.length;
-    result.evaluatedAssets = 1;
-    return;
-  }
-
-  const commonHorizon = outcome.selection.commonHorizon;
-  const tfMs = SMCTIMEFRAME_MS[tf];
-  const asOf = new Date(commonHorizon.getTime() + tfMs);
-
-  // Aggregation gate check (production)
-  const gate = decideAggregationAtCommonHorizon({
-    selection: outcome.selection,
-    results: outcome.results,
-    timeframe: tf,
-  });
-
-  console.log(`\n=== GATE CHECK ===`);
-  console.log(`allowed=${gate.allowed} alignment.safe=${gate.alignment.safe} anchor.ok=${gate.anchor.ok}`);
-  if (gate.refusalReasons.length > 0) {
-    console.log(`refusalReasons: ${gate.refusalReasons.join("; ")}`);
-  }
-  if (!gate.allowed) {
-    console.log(`NO SIGNAL — gate refused`);
-    result.neutralGroups++;
-    result.evaluatedMarkets = loaded.length;
-    result.evaluatedAssets = 1;
-    return;
-  }
-
-  // Per-exchange detailed evaluation using production evaluateSmc
-  console.log(`\n=== PER-EXCHANGE SMC EVALUATION (raw CLOSED candles, same asOf) ===`);
-  console.log(`asOf=${asOf.toISOString()} (effectiveCloseTime of common horizon + tf)`);
-
-  for (const lm of loaded) {
-    const truncated = truncateCandlesToHorizon(lm.candles, commonHorizon);
-    const resultForMarket = outcome.results.find((r) => r.marketId === lm.meta.marketId);
-
-    if (truncated.length === 0) {
-      console.log(`\n${lm.meta.exchange} marketId=${lm.meta.marketId} horizon=${commonHorizon.toISOString()} NO CANDLES after truncation -> CANNOT_EVALUATE`);
-      continue;
-    }
-
-    // Production evaluateSmc for detailed facts
-    let fullEval: ReturnType<typeof evaluateSmc> | null = null;
-    try {
-      fullEval = evaluateSmc(truncated, smcConfig, asOf);
-    } catch (e: any) {
-      console.log(`\n${lm.meta.exchange} marketId=${lm.meta.marketId} horizon=${commonHorizon.toISOString()} evaluateSmc threw: ${e.message}`);
-      continue;
-    }
-
-    const marketResult = resultForMarket;
-    const direction = fullEval.direction;
-    const longScore = fullEval.longScore;
-    const shortScore = fullEval.shortScore;
-    const evaluable = fullEval.availability.evaluable;
-    const hardFailures = fullEval.availability.hardFailures.map((f) => `${f.code}:${f.label}`).join("; ") || "none";
-    const softUnavailable = fullEval.availability.softUnavailable.map((f) => f.code).join(", ") || "none";
-
-    console.log(`\n--- ${lm.meta.exchange} ---`);
-    console.log(`exchange=${lm.meta.exchange} horizon=${commonHorizon.toISOString()} direction=${direction} longScore=${longScore} shortScore=${shortScore} evaluable=${evaluable}`);
-    console.log(`hardFailures=${hardFailures}`);
-    console.log(`softUnavailable=${softUnavailable}`);
-    console.log(`A-I contributions:`);
-    for (const r of fullEval.reasons) {
-      console.log(`  ${r.code} long=${r.longPoints} short=${r.shortPoints} max=${r.maxPoints} label="${r.label}" value=${r.value ?? "null"}`);
-    }
-    if (marketResult) {
-      console.log(`MarketStrategyResult: status=${marketResult.status} ${marketResult.status === "evaluated" ? `direction=${marketResult.direction} longScore=${marketResult.longScore} shortScore=${marketResult.shortScore} candleTime=${marketResult.candleTime.toISOString()} price=${marketResult.price}` : `reason=${(marketResult as any).reason}`}`);
-    }
-
-    // Dealing range, OB, FVG summary
-    if (fullEval.dealingRange?.current) {
-      const dr = fullEval.dealingRange.current;
-      const pc = fullEval.dealingRange.priceContext;
-      console.log(`DealingRange: dir=${dr.direction} low=${dr.low} high=${dr.high} eq=${dr.equilibrium} zone=${pc?.zone ?? "null"} pos=${pc?.position?.toFixed(4) ?? "null"}`);
-    }
-    if (fullEval.swingStructure) {
-      console.log(`Swing phase=${fullEval.swingStructure.phase} pivots=${fullEval.swingStructure.pivots.length} events=${fullEval.swingStructure.events.length}`);
-    }
-    if (fullEval.internalStructure) {
-      console.log(`Internal phase=${fullEval.internalStructure.phase}`);
-    }
-  }
-
-  // Aggregation
-  const aggregation = aggregateAssetGroup(
+    smcConfig,
+    filters,
+    now,
+    strategyId: strategy.id,
+    strategyVersion: strategy.version,
+    strategySlug: strategy.slug,
     symbol,
-    timeframe,
-    strategy.slug,
-    strategy.version,
-    outcome.results as any,
-    strategy.minExchanges
-  );
+    minExchanges: strategy.minExchanges,
+    policy,
+  });
+
+  // Detailed horizon report (for STRICT, use existing report; for QUORUM, we already logged)
+  if (builderResult.selection) {
+    console.log(`\n=== COMMON HORIZON (${policy}) ===`);
+    console.log(`now=${now.toISOString()} timeframe=${tf}`);
+    if (builderResult.selection.commonHorizon) {
+      console.log(`COMMON HORIZON: ${builderResult.selection.commonHorizon.toISOString()}`);
+    } else {
+      console.log(`COMMON HORIZON: null (status=${(builderResult.selection as any).status})`);
+    }
+    console.log(`status=${(builderResult.selection as any).status} participantCount=${(builderResult.selection as any).participantCount}`);
+    if ((builderResult.selection as any).expectedLatestClosed) {
+      console.log(`expectedLatestClosed=${(builderResult.selection as any).expectedLatestClosed.toISOString()}`);
+    }
+
+    // Per-exchange inclusion
+    const perMarket = (builderResult.selection as any).perMarketLatest ?? [];
+    for (const p of perMarket) {
+      const horizonStr = builderResult.selection.commonHorizon ? builderResult.selection.commonHorizon.toISOString() : "null";
+      const latestStr = p.latest ? p.latest.toISOString() : "no data";
+      const included = p.hasCommon && (builderResult.selection as any).status === "ok";
+      console.log(`${p.exchange} horizon=${included ? horizonStr : latestStr} ${included ? "INCLUDED" : "EXCLUDED"} latest=${latestStr} hasCommon=${p.hasCommon}`);
+    }
+
+    if (policy === "STRICT") {
+      const reportLines = formatCommonHorizonReport({
+        selection: builderResult.selection as any,
+        timeframe: tf,
+        marketCount: eligibleMarkets.length,
+        exchangeEligibleCount: eligibleMarkets.length,
+        exchangeExcluded: [],
+        filteredCount: (builderResult as any).filteredCount ?? 0,
+      });
+      for (const line of reportLines) console.log(`  ${line}`);
+    }
+
+    const gate = decideAggregationAtCommonHorizon({
+      selection: builderResult.selection as any,
+      results: builderResult.results as any,
+      timeframe: tf,
+    });
+    console.log(`\n=== GATE CHECK === allowed=${gate.allowed} alignment.safe=${gate.alignment.safe} anchor.ok=${gate.anchor.ok}`);
+    if (gate.refusalReasons.length > 0) console.log(`refusalReasons: ${gate.refusalReasons.join("; ")}`);
+  }
+
+  if (builderResult.status === "no_signal") {
+    console.log(`\nNO SIGNAL — ${builderResult.reason}`);
+    if (builderResult.insufficientReason) console.log(`Insufficient reason: ${builderResult.insufficientReason}`);
+    result.neutralGroups++;
+    result.evaluatedMarkets = loaded.length;
+    result.evaluatedAssets = 1;
+    return;
+  }
+
+  const { candidate, aggregation } = builderResult;
+
+  console.log(`\n=== PER-EXCHANGE SMC EVALUATION (raw CLOSED, same asOf) ===`);
+  console.log(`asOf=${candidate.asOf.toISOString()} signalCandleTime=${candidate.signalCandleTime.toISOString()}`);
+  for (const per of candidate.metadata.perExchange) {
+    console.log(`\n--- ${per.exchange} ---`);
+    console.log(`exchange=${per.exchange} direction=${per.direction} longScore=${per.longScore} shortScore=${per.shortScore} evaluable=${per.evaluable} price=${per.price}`);
+    console.log(`hardFailures=${per.hardFailures.join("; ") || "none"}`);
+    console.log(`softUnavailable=${per.softUnavailable.join(", ") || "none"}`);
+    console.log(`A-I:`);
+    for (const r of per.reasons) {
+      console.log(`  ${r.code} long=${r.longPoints} short=${r.shortPoints} max=${r.maxPoints} label=${r.label}`);
+    }
+  }
 
   console.log(`\n=== AGGREGATION ===`);
-  console.log(`eligible=${eligibleMarkets.length} evaluated=${aggregation.evaluated} skipped=${aggregation.skipped} minExchanges=${aggregation.minExchanges}`);
+  console.log(`eligible=${eligibleMarkets.length} evaluated=${aggregation.evaluated} skipped=${aggregation.skipped} minExchanges=${candidate.metadata.minExchanges}`);
   console.log(`longVotes=${aggregation.longVotes} shortVotes=${aggregation.shortVotes} neutralVotes=${aggregation.neutralVotes}`);
   console.log(`direction=${aggregation.direction} confirmation=${aggregation.confirmation} conflict=${aggregation.conflict}`);
   console.log(`explanation: ${aggregation.explanation}`);
 
+  console.log(`\n=== CANDIDATE (immutable) ===`);
+  console.log(`signalCandleTime=${candidate.signalCandleTime.toISOString()} direction=${candidate.direction} score=${candidate.score}`);
+  console.log(`referenceExchange=${candidate.referenceExchange} referencePrice=${candidate.referencePrice} aggregatePrice=${candidate.aggregatePrice}`);
+  console.log(`entry=${candidate.entry} (policy: ${candidate.executionPolicy} — ${candidate.metadata.nextBarOpenPrice ? "NEXT_BAR_OPEN" : "REFERENCE_CLOSE"} )`);
+  console.log(`ATR from ${candidate.referenceExchange}: ${candidate.atrAtSignal} period=${candidate.metadata.atrPeriod}`);
+  console.log(`SL=${candidate.stopLoss} TP1=${candidate.takeProfit1} TP2=${candidate.takeProfit2} TP3=${candidate.takeProfit3}`);
+  console.log(`reason: ${candidate.reason}`);
+  console.log(`metadata: ${JSON.stringify(candidate.metadata, null, 2).slice(0, 2000)}...`);
+
   result.evaluatedMarkets = loaded.length;
   result.evaluatedAssets = 1;
 
-  if (aggregation.direction === "NEUTRAL") {
+  // WRITE GUARD — PHASE 2B
+  const writeEnabled = enableSmartMoneyWrite ?? false;
+  const envEnabled = process.env.SMART_MONEY_WRITE_ENABLED === "true";
+
+  if (candidate.direction === "NEUTRAL") {
     result.neutralGroups++;
-    console.log(`\nNEUTRAL — no signal. Reason: ${aggregation.explanation}`);
-    if (aggregation.conflict) {
-      console.log(`Conflict detected: LONG and SHORT both reached minExchanges — fail-safe NEUTRAL`);
-    } else if (aggregation.evaluated < strategy.minExchanges) {
-      console.log(`Insufficient evaluated exchanges: ${aggregation.evaluated} < minExchanges ${strategy.minExchanges}`);
-    } else {
-      console.log(`No side reached minExchanges threshold`);
-    }
+    console.log(`\nNEUTRAL — no signal persisted`);
     return;
   }
 
-  // Candidate signal (dry-run only, no DB write for smart-money)
-  const evaluated = aggregation.markets.filter((m: any) => m.status === "evaluated") as any[];
-  const avgPrice = evaluated.length > 0 ? evaluated.reduce((sum: number, m: any) => sum + m.price, 0) / evaluated.length : 0;
-  const maxScore = aggregation.direction === "LONG" ? Math.max(...evaluated.map((m: any) => m.longScore)) : Math.max(...evaluated.map((m: any) => m.shortScore));
-
-  console.log(`\nSignal candidate (DRY-RUN, no DB write): ${aggregation.direction} avgPrice=${avgPrice.toFixed(2)} maxScore=${maxScore} commonHorizon=${commonHorizon.toISOString()} asOf=${asOf.toISOString()} confirmation=${aggregation.confirmation}`);
-
-  // GUARD: NEVER create real Signal for smart-money in PHASE 2A
-  // Even if dryRun=false, we must not write. This is intentional for PHASE 2A.
-  if (strategy.slug === "smart-money-suslik") {
-    console.log(`  PHASE 2A GUARD: prisma.signal.create is FORBIDDEN for smart-money-suslik — dry-run only, no DB write`);
-    result.signalsCreated++;
-    if (aggregation.direction === "LONG") result.longSignals++;
-    else result.shortSignals++;
-    return;
-  }
-
-  // The following would be for future live, but currently blocked above
   if (dryRun) {
-    console.log(`  DRY-RUN — not inserting, would create signal`);
+    console.log(`\nDRY-RUN — candidate NOT persisted (would create signal)`);
     result.signalsCreated++;
-    if (aggregation.direction === "LONG") result.longSignals++;
+    if (candidate.direction === "LONG") result.longSignals++;
     else result.shortSignals++;
     return;
+  }
+
+  if (!writeEnabled && !envEnabled) {
+    console.log(`\nPHASE 2B GUARD: smart-money write DISABLED by default. Need --enable-smart-money-write or SMART_MONEY_WRITE_ENABLED=true`);
+    console.log(`DRY-RUN forced — candidate NOT persisted`);
+    result.signalsCreated++;
+    if (candidate.direction === "LONG") result.longSignals++;
+    else result.shortSignals++;
+    return;
+  }
+
+  // Live persistence — same candidate, no re-evaluation
+  console.log(`\nLIVE WRITE ENABLED — persisting candidate (same payload as dry-run)`);
+  try {
+    const created = await prisma.signal.create({
+      data: {
+        symbol: candidate.symbol,
+        timeframe: candidate.timeframe,
+        direction: candidate.direction,
+        score: candidate.score,
+        entry: candidate.entry ?? candidate.referencePrice ?? candidate.aggregatePrice ?? 0,
+        stopLoss: candidate.stopLoss,
+        takeProfit1: candidate.takeProfit1,
+        takeProfit2: candidate.takeProfit2,
+        takeProfit3: candidate.takeProfit3,
+        status: "ACTIVE",
+        reason: candidate.reason.slice(0, 1000),
+        strategyId: candidate.strategyId,
+        signalCandleTime: candidate.signalCandleTime,
+        referenceExchange: candidate.referenceExchange,
+        referencePrice: candidate.referencePrice,
+        aggregatePrice: candidate.aggregatePrice,
+        executionPolicy: candidate.executionPolicy,
+        signalSource: "LIVE_FORWARD",
+        metadata: candidate.metadata as any,
+        atrAtSignal: candidate.atrAtSignal,
+        nextBarOpenPrice: candidate.metadata.nextBarOpenPrice,
+        nextBarOpenTime: candidate.metadata.nextBarOpenTime ? new Date(candidate.metadata.nextBarOpenTime) : null,
+      },
+    });
+    console.log(`  CREATED signal id=${created.id} ${created.direction} ${created.symbol} ${created.timeframe} candleTime=${created.signalCandleTime?.toISOString()} score=${created.score} ref=${created.referenceExchange}`);
+    result.signalsCreated++;
+    if (candidate.direction === "LONG") result.longSignals++;
+    else result.shortSignals++;
+  } catch (e: any) {
+    if (e.code === "P2002" || e.message?.includes("Unique constraint") || e.message?.includes("unique")) {
+      console.log(`  Duplicate unique constraint [strategyId,symbol,timeframe,signalCandleTime] — same candle already has signal, blocked (LONG then SHORT on same candle not allowed)`);
+      result.signalsSkippedDuplicate++;
+    } else {
+      console.error(`  Error creating signal: ${e.message}`);
+      result.errors.push(`Create signal error: ${e.message}`);
+    }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Main entry — supports both trend-suslik and smart-money-suslik
+// Main entry
 // ---------------------------------------------------------------------------
 
 export async function runSignalEngineForBtc(opts: {
@@ -570,12 +573,16 @@ export async function runSignalEngineForBtc(opts: {
   dryRun?: boolean;
   symbol?: string;
   strategy?: string;
+  enableSmartMoneyWrite?: boolean;
+  commonHorizonPolicy?: "STRICT" | "QUORUM";
 }): Promise<SignalEngineResult> {
   const timeframe = opts.timeframe ?? "1h";
   const top = opts.top ?? 10;
   const dryRun = opts.dryRun ?? true;
   const symbol = opts.symbol ?? "BTC";
   const strategySlug = (opts as any).strategy ?? "trend-suslik";
+  const enableSmartMoneyWrite = (opts as any).enableSmartMoneyWrite ?? false;
+  const commonHorizonPolicy = (opts as any).commonHorizonPolicy ?? "QUORUM";
 
   const result: SignalEngineResult = {
     evaluatedMarkets: 0,
@@ -590,14 +597,12 @@ export async function runSignalEngineForBtc(opts: {
     errors: [],
   };
 
-  // 1. Load enabled PUBLISHED strategies (or any for smart-money dry-run)
   let strategies = await prisma.strategy.findMany({
     where: { enabled: true, status: "PUBLISHED" },
     orderBy: { id: "asc" },
   });
 
   if (strategies.length === 0) {
-    // Fallback: try to find any strategy and enable it for BTC pilot (trend only)
     const anyStrategy = await prisma.strategy.findFirst({
       where: { slug: strategySlug === "smart-money-suslik" ? "smart-money-suslik" : "trend-suslik" },
       orderBy: { version: "desc" },
@@ -614,7 +619,6 @@ export async function runSignalEngineForBtc(opts: {
       strategies.push({ ...anyStrategy, enabled: true, status: "PUBLISHED" } as any);
     } else {
       if (strategySlug === "smart-money-suslik") {
-        // For smart-money dry-run, allow disabled strategy
         strategies.push(anyStrategy as any);
         console.log(`Dry-run: using strategy id=${anyStrategy.id} slug=${anyStrategy.slug} enabled=${anyStrategy.enabled} status=${anyStrategy.status}`);
       } else {
@@ -624,13 +628,11 @@ export async function runSignalEngineForBtc(opts: {
     }
   }
 
-  // Filter strategies by requested slug if provided
   if (strategySlug) {
     const filtered = strategies.filter((s: any) => s.slug === strategySlug);
     if (filtered.length > 0) {
       strategies = filtered;
     } else if (strategySlug === "smart-money-suslik") {
-      // For smart-money, try to load directly even if not in enabled list
       const sm = await prisma.strategy.findFirst({
         where: { slug: "smart-money-suslik" },
         orderBy: { version: "desc" },
@@ -644,7 +646,6 @@ export async function runSignalEngineForBtc(opts: {
 
   console.log(`Signal Engine: found ${strategies.length} strategies for slug=${strategySlug}: ${strategies.map((s: any) => `${s.slug} v${s.version} id=${s.id}`).join(", ")}`);
 
-  // 2. Load BTC asset
   const asset = await prisma.asset.findUnique({
     where: { symbol },
     select: { id: true, symbol: true, rank: true },
@@ -657,7 +658,6 @@ export async function runSignalEngineForBtc(opts: {
 
   console.log(`Asset: ${asset.symbol} id=${asset.id} rank=${asset.rank}`);
 
-  // 3. Load markets for BTC, ACTIVE SPOT USDT, enabled
   const markets = await prisma.market.findMany({
     where: {
       assetId: asset.id,
@@ -680,7 +680,6 @@ export async function runSignalEngineForBtc(opts: {
 
   console.log(`Markets: ${markets.length} ACTIVE SPOT USDT enabled for ${symbol}`);
 
-  // Filter by Smart Money eligibility (BINGX 1d excluded) — same policy for both engines
   const eligibleMarkets = markets.filter((m: any) => {
     try {
       return isSmartMoneyExchangeEligible(m.exchange as any, timeframe as any);
@@ -696,7 +695,6 @@ export async function runSignalEngineForBtc(opts: {
     return result;
   }
 
-  // 4. Dispatch to correct engine
   if (strategySlug === "smart-money-suslik") {
     await runSmartMoneyEngine({
       timeframe,
@@ -706,6 +704,8 @@ export async function runSignalEngineForBtc(opts: {
       eligibleMarkets,
       asset: asset as any,
       result,
+      enableSmartMoneyWrite,
+      commonHorizonPolicy,
     });
   } else {
     await runTrendSuslikEngine({
