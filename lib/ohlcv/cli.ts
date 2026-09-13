@@ -118,6 +118,7 @@ export type OhlcvCliOptions = OhlcvWorkerOptions & {
   once: boolean;
   intervalMs: number;
   confirmLargeRun: boolean;
+  concurrency: number;
 };
 
 /* ---------- безопасный разбор вызова ---------- */
@@ -138,7 +139,8 @@ const KNOWN_OHLCV_FLAGS: ReadonlySet<string> = new Set([
   "plan",
   "confirm-large-run",
   "help",
-  "h"
+  "h",
+  "concurrency"
 ]);
 
 export function wantsHelp(argv: string[]): boolean {
@@ -174,6 +176,18 @@ export function validateKnownFlags(
   }
 
   return null;
+}
+
+export function parseConcurrency(
+  raw: string | undefined,
+  fallback: number
+): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const v = Number(raw);
+  if (!Number.isInteger(v) || v < 1 || v > 10) {
+    throw new Error(`Опция --concurrency: ожидается целое 1..10, получено "${raw}"`);
+  }
+  return v;
 }
 
 export type OhlcvInvocation =
@@ -356,7 +370,8 @@ export function parseOhlcvArgs(
     once,
     confirmLargeRun:
       argv.includes("--confirm-large-run"),
-    intervalMs
+    intervalMs,
+    concurrency: parseConcurrency(get("concurrency") ?? env.OHLCV_CONCURRENCY, 1),
   };
   if (symbol) {
     (result as any).symbol = symbol;

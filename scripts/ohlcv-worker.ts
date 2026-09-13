@@ -15,6 +15,7 @@ import {
 } from "../lib/ohlcv/plan";
 import {
   OHLCV_ADVISORY_LOCK_KEY,
+  OHLCV_ALL_ADVISORY_LOCK_KEY,
   acquireDedicatedLock,
   releaseDedicatedLock,
   type OhlcvDedicatedLockHandle
@@ -178,20 +179,23 @@ async function main() {
     // Single-instance guard for continuous/once run (not for --plan/--help)
     // Uses dedicated pg.Client session-level lock: acquire & release on same physical connection,
     // held for entire worker lifetime, auto-released on disconnect/crash.
+    // BTC pilot uses 727923, generic ALL coins uses 727924 to avoid blocking BTC pilot
     if (invocation.kind === "run") {
+      const useAllLock = !options.symbol && options.top > 1;
+      const lockKey = useAllLock ? OHLCV_ALL_ADVISORY_LOCK_KEY : OHLCV_ADVISORY_LOCK_KEY;
       try {
-        lockHandle = await acquireDedicatedLock(OHLCV_ADVISORY_LOCK_KEY);
+        lockHandle = await acquireDedicatedLock(lockKey);
       } catch (e) {
-        console.error(`Single-instance guard error acquiring advisory lock ${OHLCV_ADVISORY_LOCK_KEY} on dedicated session:`, e instanceof Error ? e.message : String(e));
+        console.error(`Single-instance guard error acquiring advisory lock ${lockKey} on dedicated session:`, e instanceof Error ? e.message : String(e));
         process.exitCode = 1;
         return;
       }
       if (!lockHandle) {
-        console.error(`Single-instance guard: OHLCV worker already running (dedicated session advisory lock ${OHLCV_ADVISORY_LOCK_KEY} held). Another instance is active — refusing to start overlapping.`);
+        console.error(`Single-instance guard: OHLCV worker already running (dedicated session advisory lock ${lockKey} held). Another instance is active — refusing to start overlapping.`);
         process.exitCode = 1;
         return;
       }
-      console.log(`Single-instance lock acquired on dedicated session (advisory lock ${OHLCV_ADVISORY_LOCK_KEY}).`);
+      console.log(`Single-instance lock acquired on dedicated session (advisory lock ${lockKey}).`);
     }
 
     const { PrismaClient } = await import("@prisma/client");
@@ -254,36 +258,60 @@ async function main() {
       console.log(scale.message);
     }
 
-    const { runOhlcvSync } = await import(
-      "../lib/ohlcv/sync"
-    );
+    const useGeneric = (options.concurrency ?? 1) > 1 || (!options.symbol && options.top > 10);
 
     console.log("🐿️ OHLCV Worker");
     if (options.symbol) {
       console.log(
         `symbol=${options.symbol} timeframes=${options.timeframes.join(",")} ` +
-          `limit=${options.limit} delay=${options.requestDelayMs}ms interval=${options.intervalMs}ms once=${options.once}`
+          `limit=${options.limit} delay=${options.requestDelayMs}ms interval=${options.intervalMs}ms once=${options.once} concurrency=${options.concurrency}`
       );
     } else {
       console.log(
         `top=${options.top} timeframes=${options.timeframes.join(",")} ` +
-          `limit=${options.limit} delay=${options.requestDelayMs}ms interval=${options.intervalMs}ms once=${options.once}`
+          `limit=${options.limit} delay=${options.requestDelayMs}ms interval=${options.intervalMs}ms once=${options.once} concurrency=${options.concurrency} generic=${useGeneric}`
       );
     }
 
     do {
       const started = Date.now();
-      const stats = await runOhlcvSync(prisma!, options);
-
-      console.log("\n--- итог прохода ---");
-      console.log(`активов: ${stats.assets}`);
-      console.log(`пар рынок×tf: ${stats.markets}`);
-      console.log(`получено свечей: ${stats.fetched}`);
-      console.log(`записано/обновлено: ${stats.written}`);
-      console.log(`создано новых: ${stats.created}`);
-      console.log(`обновлено существующих: ${stats.updated}`);
-      console.log(`отброшено невалидных: ${stats.skippedInvalid}`);
-      console.log(`ошибок: ${stats.errors}`);
+      let stats: any;
+      if (useGeneric) {
+        const { runGenericOhlcvSync } = await import("../lib/ohlcv/sync-generic");
+        const genericStats = await runGenericOhlcvSync(prisma!, {
+          top: options.top,
+          symbol: options.symbol,
+          timeframes: options.timeframes as any,
+          limit: options.limit,
+          requestDelayMs: options.requestDelayMs,
+          concurrency: options.concurrency ?? 3,
+        });
+        stats = genericStats;
+        console.log("\n--- итог прохода (generic bounded concurrency) ---");
+        console.log(`активов: ${stats.assets}`);
+        console.log(`задач: ${stats.tasks}`);
+        console.log(`получено свечей: ${stats.fetched}`);
+        console.log(`записано/обновлено: ${stats.written}`);
+        console.log(`создано новых: ${stats.created}`);
+        console.log(`обновлено существующих: ${stats.updated}`);
+        console.log(`отброшено невалидных: ${stats.skippedInvalid}`);
+        console.log(`ошибок: ${stats.errors}`);
+        if (stats.failedMarkets?.length) {
+          console.log(`failed markets: ${stats.failedMarkets.length}`);
+        }
+      } else {
+        const { runOhlcvSync } = await import("../lib/ohlcv/sync");
+        stats = await runOhlcvSync(prisma!, options);
+        console.log("\n--- итог прохода ---");
+        console.log(`активов: ${stats.assets}`);
+        console.log(`пар рынок×tf: ${stats.markets}`);
+        console.log(`получено свечей: ${stats.fetched}`);
+        console.log(`записано/обновлено: ${stats.written}`);
+        console.log(`создано новых: ${stats.created}`);
+        console.log(`обновлено существующих: ${stats.updated}`);
+        console.log(`отброшено невалидных: ${stats.skippedInvalid}`);
+        console.log(`ошибок: ${stats.errors}`);
+      }
 
       console.log("\n--- по таймфреймам ---");
       for (const line of formatTimeframeSummary(stats.byTimeframe)) {
@@ -291,9 +319,10 @@ async function main() {
       }
 
       for (const [exchange, row] of Object.entries(stats.byExchange)) {
+        const r = row as any;
         console.log(
-          `  ${exchange.padEnd(8)} рынков=${row.markets} ` +
-            `записано=${row.written} ошибок=${row.errors}`
+          `  ${exchange.padEnd(8)} рынков=${r.markets} ` +
+            `записано=${r.written} ошибок=${r.errors}`
         );
       }
 

@@ -6,7 +6,8 @@ import type { PrismaClient } from "@prisma/client";
 // This helper only reads process.env.DATABASE_URL and fails closed if absent,
 // never logs the value.
 
-export const OHLCV_ADVISORY_LOCK_KEY = 727923; // arbitrary 32-bit key for OHLCV worker single-instance
+export const OHLCV_ADVISORY_LOCK_KEY = 727923; // arbitrary 32-bit key for OHLCV worker single-instance BTC pilot
+export const OHLCV_ALL_ADVISORY_LOCK_KEY = 727924; // generic worker for ALL coins (top 100) — separate lock to avoid blocking BTC pilot, but still prevents overlapping of generic workers
 
 // --- Dedicated pg.Client session-level lock (production singleton) ---
 // Uses a dedicated PostgreSQL connection/client to hold the session-level advisory lock
