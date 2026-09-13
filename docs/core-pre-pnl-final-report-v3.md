@@ -5,7 +5,7 @@
 **Production:** d6c573c20a11e79e26153579575818f1dada2f96 DO NOT DEPLOY/MODIFY — production remains
 **Branch:** arena/01a09726-core-pre-pnl (this session fixed to arena/01a09726-svechnoy-suslik, but report branch name)
 **Parent Chain from 7f58365:** 7f58365 -> 60367af -> 6adc3a1 -> c8a19cc -> 29d6f94 -> 0e94235 -> f16e577 -> 396a1d5 -> b3b49be -> 8739b52 -> 599c845 -> HEAD (this commit will be final)
-**Final SHA:** (to be filled after final commit, currently HEAD is 599c845)
+**Final SHA:** 78bd59e41a1ddca486e37af31cc79dd30ef31d61 (this file's commit, parent chain 7f58365->...->78bd59e)
 **Forbidden Signal Engine:** edf3732da81a8916efc7e63f5608401ee6e2668c exists, git merge-base --is-ancestor exit 1 (not ancestor) verified — NO SIGNAL ENGINE, no lib/signals, no signal-worker, no Signal Prisma
 
 ## Disposition 1-10 (Mandatory from audit)
