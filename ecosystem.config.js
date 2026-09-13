@@ -107,17 +107,41 @@ module.exports = {
     },
     {
       name: "svechnoy-suslik-ohlcv-all",
-      // Generic scalable ingestion for ALL ACTIVE coins (top 100)
-      // Universe from PostgreSQL: ACTIVE assets + ACTIVE SPOT USDT markets
-      // Bounded concurrency 3, rate limiting 250ms per exchange, retry/backoff, no overlapping via advisory lock 727924
-      // Incremental updates (filter >= last openTime), initial backfill 300 candles per market×tf
-      // Exclusions preserved: BINGX 1d excluded
-      // Does NOT break BTC ingestion: separate lock key, idempotent upsert
-      // Start with small concurrency and measure duration/error rate
-      // API estimate: top100 ~ 5 markets avg *5 tf = 2500 tasks, concurrency 3, delay 250ms => ~10-15min per pass, interval 5m ensures continuous but pass may overlap — lock prevents overlapping, next pass waits
-      // For production, recommended to start with --top=50 first, then 100 after measuring
+      // DEPRECATED AGGRESSIVE — DISABLED for production stability (VPS 1.9GiB RAM, 512MiB SWAP, CPU 68%+100% host, ERR_CONNECTION_RESET /signals)
+      // Previous args: --top=100 --limit=300 --delay=250 --concurrency=3 --interval=300000 — too heavy, caused Next.js stall
+      // DO NOT auto-start. Use safe workers below.
       script: "npx",
       args: "tsx scripts/ohlcv-worker.ts --top=100 --timeframes=5m,15m,1h,4h,1d --limit=300 --delay=250 --concurrency=3 --interval=300000 --confirm-large-run",
+      cwd: "/root/svechnoy-suslik",
+      interpreter: "none",
+      instances: 1,
+      exec_mode: "fork",
+      autorestart: false,
+      watch: false,
+      env: {
+        NODE_ENV: "production",
+      },
+      restart_delay: 10000,
+      max_memory_restart: "500M",
+    },
+    {
+      name: "svechnoy-suslik-ohlcv-safe",
+      // SAFE low-priority incremental background worker — PRODUCTION SAFE for VPS 1.9GiB RAM
+      // - batches 2 assets per batch, pause 10s between batches
+      // - concurrency 1 (no parallelism)
+      // - delay 1000ms between exchange/TF tasks
+      // - incremental 20 candles only for existing history, backfill 100 gradually
+      // - backpressure: minFreeMem 200MB, maxLoad 2.0 → pause 30s
+      // - progress via DB coverage (oldest lastSyncAt, least candles)
+      // - advisory lock 727924 preserved, separate from BTC pilot 727923
+      // - small upsert batches (chunk 50), no heavy transaction
+      // - nice low priority via os.setPriority(10) in code + NODE_OPTIONS --max-old-space-size=256
+      // - CPU target 20-30% avg, RAM <250MB, does NOT choke Next.js/PostgreSQL/BTC Signal
+      // - mode safe: first incremental for existing (Top assets priority), then slow backfill for missing
+      // - initial backfill controlled slow background mode, incremental maintenance can auto-start
+      // - previous run filled ASTER, AAVE etc — safe mode checks coverage, does NOT re-download 300 if sufficient history
+      script: "npx",
+      args: "tsx scripts/ohlcv-worker.ts --top=100 --timeframes=5m,15m,1h,4h,1d --batch-size=2 --delay=1000 --pause=10000 --incremental-limit=20 --backfill-limit=100 --concurrency=1 --interval=600000 --mode=safe --min-free-mem=200 --max-load=2.0 --confirm-large-run",
       cwd: "/root/svechnoy-suslik",
       interpreter: "none",
       instances: 1,
@@ -126,9 +150,32 @@ module.exports = {
       watch: false,
       env: {
         NODE_ENV: "production",
+        NODE_OPTIONS: "--max-old-space-size=256",
       },
       restart_delay: 10000,
-      max_memory_restart: "500M",
+      max_memory_restart: "250M",
+    },
+    {
+      name: "svechnoy-suslik-ohlcv-backfill",
+      // SLOW backfill worker — MANUAL ONLY, NOT auto-started after PM2 resurrect
+      // For initial massive backfill in controlled slow background mode
+      // batch 2 assets, delay 2000ms, pause 15000ms, backfillLimit 100, concurrency 1, interval 30m
+      // Use: pm2 start ecosystem.config.js --only svechnoy-suslik-ohlcv-backfill -- --once (or without --once for continuous slow)
+      // Then monitor: pm2 logs svechnoy-suslik-ohlcv-backfill
+      script: "npx",
+      args: "tsx scripts/ohlcv-worker.ts --top=100 --timeframes=5m,15m,1h,4h,1d --batch-size=2 --delay=2000 --pause=15000 --incremental-limit=20 --backfill-limit=100 --concurrency=1 --interval=1800000 --mode=backfill --min-free-mem=200 --max-load=2.0 --confirm-large-run",
+      cwd: "/root/svechnoy-suslik",
+      interpreter: "none",
+      instances: 1,
+      exec_mode: "fork",
+      autorestart: false,
+      watch: false,
+      env: {
+        NODE_ENV: "production",
+        NODE_OPTIONS: "--max-old-space-size=256",
+      },
+      restart_delay: 15000,
+      max_memory_restart: "250M",
     },
     {
       name: "svechnoy-suslik-signal-btc",

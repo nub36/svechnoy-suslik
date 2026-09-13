@@ -21,41 +21,12 @@ import {
   type OhlcvDedicatedLockHandle
 } from "../lib/ohlcv/lock";
 
-/**
- * OHLCV Worker — управляемый вручную запуск с бирж.
- *
- * Безопасные режимы вызова:
- *
- *   npx tsx scripts/ohlcv-worker.ts --help
- *     справка на русском; БД и биржи НЕ затрагиваются,
- *     клиент Prisma и код синхронизации даже не
- *     импортируются, код выхода 0;
- *   npx tsx scripts/ohlcv-worker.ts --plan --top=10 --timeframes=5m,15m,1h,4h,1d
- *     ПЛАН: read-only SELECT по PostgreSQL (Asset/Market),
- *     оценка задач/свечей/запросов; свечи НЕ пишутся,
- *     API бирж НЕ вызываются, loop не запускается;
- *   npx tsx scripts/ohlcv-worker.ts --top=10 --timeframes=1h --once
- *     один проход Top-10 по 1h;
- *   npx tsx scripts/ohlcv-worker.ts --top=10 --timeframes=5m,15m,1h,4h,1d --once
- *
- * Неизвестные/опечатанные флаги (--foobar, --onc, --to=5)
- * дают понятную ошибку и код выхода 1 — воркер с defaults
- * молча НЕ запускается. Клиент Prisma импортируется только
- * в run-режиме, ПОСЛЕ разбора аргументов.
- *
- * Остановка: Ctrl+C (SIGINT/SIGTERM) — воркер завершает
- * текущую операцию, отключается от Prisma и выходит;
- * повторный Ctrl+C — немедленно (код 130).
- */
-
 let interrupted = false;
 
 function onSignal(signal: string) {
   if (interrupted) {
-    // повторный Ctrl+C — останавливаемся немедленно
     process.exit(130);
   }
-
   interrupted = true;
   console.error(
     `\n… получен сигнал ${signal}: завершаем работу корректно ` +
@@ -66,7 +37,6 @@ function onSignal(signal: string) {
 process.on("SIGINT", () => onSignal("SIGINT"));
 process.on("SIGTERM", () => onSignal("SIGTERM"));
 
-/** Ожидание, прерываемое сигналом (без «висящих» часов). */
 async function waitInterruptible(
   ms: number
 ): Promise<void> {
@@ -148,14 +118,12 @@ async function printVerification(
 }
 
 async function main() {
-  // 1. Разбор вызова — ДО импортов Prisma/синхронизации/бирж.
   const invocation = resolveOhlcvInvocation(
     process.argv.slice(2)
   );
 
   if (invocation.kind === "help") {
     console.log(buildOhlcvHelp());
-
     return;
   }
 
@@ -163,23 +131,15 @@ async function main() {
     console.error(
       `Ошибка аргументов: ${invocation.message}`
     );
-
     process.exitCode = 1;
-
     return;
   }
 
-  // 2. plan/run: загружаем клиент (код синка и адаптеры
-  //    бирж — ТОЛЬКО после предохранителя ниже).
   const options = invocation.options;
 
   let lockHandle: OhlcvDedicatedLockHandle | null = null;
   let prisma: PrismaClient | null = null;
   try {
-    // Single-instance guard for continuous/once run (not for --plan/--help)
-    // Uses dedicated pg.Client session-level lock: acquire & release on same physical connection,
-    // held for entire worker lifetime, auto-released on disconnect/crash.
-    // BTC pilot uses 727923, generic ALL coins uses 727924 to avoid blocking BTC pilot
     if (invocation.kind === "run") {
       const useAllLock = !options.symbol && options.top > 1;
       const lockKey = useAllLock ? OHLCV_ALL_ADVISORY_LOCK_KEY : OHLCV_ADVISORY_LOCK_KEY;
@@ -201,23 +161,17 @@ async function main() {
     const { PrismaClient } = await import("@prisma/client");
     prisma = new PrismaClient();
 
-    // Читаем масштаб прогона (read-only SELECT).
     const stats = await collectPlanStats(
       prisma!,
       options
     );
 
-    // Symbol fail-closed: если запрошен --symbol, но актив не найден/disabled — ошибка
     if (options.symbol && stats.assets === 0) {
       console.error(`Ошибка: актив с символом "${options.symbol}" не найден или disabled (enabled=true требуется). Проверьте Asset.symbol в БД.`);
       process.exitCode = 1;
       return;
     }
 
-    // семантика заголовка: «Режим PLAN» — только при
-    // явном --plan; обычный запуск — «Предварительная
-    // оценка запуска» (регрессия UX: PLAN-баннер писался
-    // и обычному запуску, заблокированному guard-ом)
     console.log(
       preflightTitle(invocation.kind === "plan")
     );
@@ -226,7 +180,6 @@ async function main() {
       console.log(line);
     }
 
-    // Предохранитель от случайного большого запуска.
     const scale = evaluateRunScale(
       stats.tasks,
       options.confirmLargeRun
@@ -238,7 +191,6 @@ async function main() {
         `Предохранитель: порог ${scale.allowed ? "не превышен" : "будет превышен"} ` +
           `(задач: ${stats.tasks}).`
       );
-
       return;
     }
 
@@ -248,9 +200,7 @@ async function main() {
       console.error(
         `Команда повтора: ${buildConfirmCommand(options)}`
       );
-
       process.exitCode = 1;
-
       return;
     }
 
@@ -258,67 +208,67 @@ async function main() {
       console.log(scale.message);
     }
 
-    const useGeneric = (options.concurrency ?? 1) > 1 || (!options.symbol && options.top > 10);
+    // Determine sync mode
+    const isSafeMode = (options as any).mode === "safe" || (options as any).mode === "incremental" || (options as any).mode === "backfill";
+    const useSafeForTop = !options.symbol && options.top >= 5;
 
     console.log("🐿️ OHLCV Worker");
     if (options.symbol) {
       console.log(
         `symbol=${options.symbol} timeframes=${options.timeframes.join(",")} ` +
-          `limit=${options.limit} delay=${options.requestDelayMs}ms interval=${options.intervalMs}ms once=${options.once} concurrency=${options.concurrency}`
+          `limit=${options.limit} delay=${options.requestDelayMs}ms interval=${options.intervalMs}ms once=${options.once} concurrency=${options.concurrency} mode=${(options as any).mode} batchSize=${(options as any).batchSize}`
       );
     } else {
       console.log(
         `top=${options.top} timeframes=${options.timeframes.join(",")} ` +
-          `limit=${options.limit} delay=${options.requestDelayMs}ms interval=${options.intervalMs}ms once=${options.once} concurrency=${options.concurrency} generic=${useGeneric}`
+          `limit=${options.limit} delay=${options.requestDelayMs}ms interval=${options.intervalMs}ms once=${options.once} concurrency=${options.concurrency} mode=${(options as any).mode} batchSize=${(options as any).batchSize} incrementalLimit=${(options as any).incrementalLimit} backfillLimit=${(options as any).backfillLimit} pause=${(options as any).pauseBetweenBatchesMs} minFreeMem=${(options as any).minFreeMemMb} maxLoad=${(options as any).maxLoadAvg}`
       );
     }
 
     do {
       const started = Date.now();
-      let stats: any;
-      if (useGeneric) {
-        const { runGenericOhlcvSync } = await import("../lib/ohlcv/sync-generic");
-        const genericStats = await runGenericOhlcvSync(prisma!, {
-          top: options.top,
-          symbol: options.symbol,
-          timeframes: options.timeframes as any,
-          limit: options.limit,
-          requestDelayMs: options.requestDelayMs,
-          concurrency: options.concurrency ?? 3,
-        });
-        stats = genericStats;
-        console.log("\n--- итог прохода (generic bounded concurrency) ---");
-        console.log(`активов: ${stats.assets}`);
-        console.log(`задач: ${stats.tasks}`);
-        console.log(`получено свечей: ${stats.fetched}`);
-        console.log(`записано/обновлено: ${stats.written}`);
-        console.log(`создано новых: ${stats.created}`);
-        console.log(`обновлено существующих: ${stats.updated}`);
-        console.log(`отброшено невалидных: ${stats.skippedInvalid}`);
-        console.log(`ошибок: ${stats.errors}`);
-        if (stats.failedMarkets?.length) {
-          console.log(`failed markets: ${stats.failedMarkets.length}`);
+      let runStats: any;
+
+      if (isSafeMode || useSafeForTop) {
+        const { runSafeOhlcvSync } = await import("../lib/ohlcv/sync-safe");
+        const safeStats = await runSafeOhlcvSync(prisma!, options as any);
+        runStats = safeStats;
+        console.log("\n--- итог прохода (SAFE low-priority incremental) ---");
+        console.log(`активов: ${runStats.assets}`);
+        console.log(`рынков: ${runStats.markets}`);
+        console.log(`задач: ${runStats.tasks}`);
+        console.log(`батчей: ${runStats.batches}`);
+        console.log(`получено свечей: ${runStats.fetched}`);
+        console.log(`записано/обновлено: ${runStats.written}`);
+        console.log(`создано новых: ${runStats.created}`);
+        console.log(`обновлено существующих: ${runStats.updated}`);
+        console.log(`отброшено невалидных: ${runStats.skippedInvalid}`);
+        console.log(`ошибок: ${runStats.errors}`);
+        console.log(`пауз из-за backpressure: ${runStats.pausedDueToBackpressure}`);
+        if (runStats.failedMarkets?.length) {
+          console.log(`failed markets: ${runStats.failedMarkets.length}`);
         }
       } else {
+        // BTC pilot single asset uses legacy sequential sync (small, safe)
         const { runOhlcvSync } = await import("../lib/ohlcv/sync");
-        stats = await runOhlcvSync(prisma!, options);
-        console.log("\n--- итог прохода ---");
-        console.log(`активов: ${stats.assets}`);
-        console.log(`пар рынок×tf: ${stats.markets}`);
-        console.log(`получено свечей: ${stats.fetched}`);
-        console.log(`записано/обновлено: ${stats.written}`);
-        console.log(`создано новых: ${stats.created}`);
-        console.log(`обновлено существующих: ${stats.updated}`);
-        console.log(`отброшено невалидных: ${stats.skippedInvalid}`);
-        console.log(`ошибок: ${stats.errors}`);
+        runStats = await runOhlcvSync(prisma!, options);
+        console.log("\n--- итог прохода (BTC pilot sequential) ---");
+        console.log(`активов: ${runStats.assets}`);
+        console.log(`пар рынок×tf: ${runStats.markets}`);
+        console.log(`получено свечей: ${runStats.fetched}`);
+        console.log(`записано/обновлено: ${runStats.written}`);
+        console.log(`создано новых: ${runStats.created}`);
+        console.log(`обновлено существующих: ${runStats.updated}`);
+        console.log(`отброшено невалидных: ${runStats.skippedInvalid}`);
+        console.log(`ошибок: ${runStats.errors}`);
       }
 
       console.log("\n--- по таймфреймам ---");
-      for (const line of formatTimeframeSummary(stats.byTimeframe)) {
+      for (const line of formatTimeframeSummary(runStats.byTimeframe)) {
         console.log(line);
       }
 
-      for (const [exchange, row] of Object.entries(stats.byExchange)) {
+      for (const [exchange, row] of Object.entries(runStats.byExchange)) {
         const r = row as any;
         console.log(
           `  ${exchange.padEnd(8)} рынков=${r.markets} ` +
@@ -345,7 +295,7 @@ async function main() {
     if (lockHandle) {
       try {
         await releaseDedicatedLock(lockHandle);
-        console.log(`Single-instance lock released from dedicated session (advisory lock ${OHLCV_ADVISORY_LOCK_KEY}).`);
+        console.log(`Single-instance lock released from dedicated session (advisory lock ${OHLCV_ALL_ADVISORY_LOCK_KEY} / ${OHLCV_ADVISORY_LOCK_KEY}).`);
       } catch {}
     }
     if (prisma) {
