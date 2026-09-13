@@ -20,6 +20,11 @@ import {
   buildTopUniverseCoins,
   type MarketCoinRow
 } from "../lib/market-universe";
+import {
+  readinessReasonText,
+  summarizeTopUniverseReadiness,
+  type UniverseReadinessRow
+} from "../lib/admin/readiness";
 import { LEGACY_TOP500_SIZE, TOP_UNIVERSE_SIZE } from "../lib/universe";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -27,6 +32,12 @@ const root = resolve(here, "..");
 
 const read = (p: string): string =>
   readFileSync(resolve(root, p), "utf8");
+
+/** Срез для grep-гардов: без блочных комментариев (в них легально
+ *  цитируются запрещённые слова в пояснениях). */
+function stripPrismaComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
 
 let passed = 0;
 let total = 0;
@@ -238,7 +249,59 @@ console.log("\n=== 2. Гарды исходников: главная стран
   check(chart.includes("нет в списке"), "chart: неизвестный актив показан в селекторе явно");
 }
 
-console.log("\n=== 3. Защищённые «500» не тронуты ===");
+console.log("\n=== 3. Readiness Top-100 (чистая свёртка admin/data) ===");
+
+{
+  const r = (
+    symbol: string,
+    rank: number,
+    markets: number,
+    candleMarkets: number
+  ): UniverseReadinessRow => ({ symbol, rank, markets, candleMarkets });
+
+  check(
+    summarizeTopUniverseReadiness([]).universe === 0 &&
+      summarizeTopUniverseReadiness([]).missing.length === 0,
+    "readiness: пустая база → 0 без выдуманных строк (страница покажет факт честно)"
+  );
+
+  const sum = summarizeTopUniverseReadiness([
+    r("BTC", 1, 3, 3),
+    r("ETH", 2, 2, 0),
+    r("PEPE", 97, 0, 0),
+    r("SOL", 5, 1, 1)
+  ]);
+
+  check(sum.universe === 4, "readiness: universe = число реально найденных активов");
+  check(sum.universeTarget === TOP_UNIVERSE_SIZE, "readiness: цель вселенной берётся из единой константы (100)");
+  check(sum.withMarket === 3, "readiness: withMarket считает активы с ≥1 рынком");
+  check(sum.withChartData === 2, "readiness: withChartData — только активы с закрытыми свечами");
+  check(
+    sum.missing.map((m) => m.symbol).join(",") === "ETH,PEPE,SOL".replace(",SOL", "") &&
+      sum.missing.length === 2,
+    "readiness: missing = ровно проблемные активы (no-candles, no-market)"
+  );
+  check(
+    sum.missing.every((m, i, arr) => i === 0 || arr[i - 1].rank <= m.rank),
+    "readiness: missing отсортирован по rank (детерминированный UI-список)"
+  );
+  check(
+    sum.missing[1].reason === "no-market" && sum.missing[0].reason === "no-candles",
+    "readiness: причина различает «нет рынка» и «нет свечей»"
+  );
+  check(
+    summarizeTopUniverseReadiness([r("X", 1, 5, 0)]).withChartData === 0 &&
+      summarizeTopUniverseReadiness([r("X", 1, 0, 9)]).withChartData === 0,
+    "readiness: candleMarkets без рынка не может дать «данные есть» (защита от мусора агрегата)"
+  );
+  check(
+    readinessReasonText("no-market").includes("рынков") &&
+      readinessReasonText("no-candles").includes("свеч"),
+    "readiness: тексты причин — осмысленные русские формулировки"
+  );
+}
+
+console.log("\n=== 4. Защищённые «500» не тронуты ===");
 
 {
   const smc = read("lib/smc/config.ts");
@@ -247,7 +310,19 @@ console.log("\n=== 3. Защищённые «500» не тронуты ===");
   check(read("app/admin/journal/page.tsx").includes("500 записей"), "журнал: буфер-лимит 500 не изменён");
   check(read("app/api/register/route.ts").includes("{ status: 500 }"), "HTTP 500 регистрации — не «универсальная» пятисотка");
   check(read("app/api/chart/candles/route.ts").includes("никогда не 500"), "candles API: контракт «никогда не 500» сохранён");
-  check(read("components/admin/SmartMoneyStrategyEditor.tsx").includes("top500Only"), "наследованный флаг filters.top500Only не тронут (семантика документирована)")
+  check(read("components/admin/SmartMoneyStrategyEditor.tsx").includes("top500Only"), "наследованный флаг filters.top500Only не тронут (семантика документирована)");
+
+  /* Readiness — read-only: страница не имеет права писать в БД. */
+  const adminData = read("app/admin/data/page.tsx");
+
+  check(
+    !/prisma\.[a-zA-Z]+\.(create|update|delete|upsert|createMany|updateMany|deleteMany|updateBy|deleteBy|createManyAndReturn)\(/.test(
+      stripPrismaComments(adminData)
+    ),
+    "admin/data: ни одного вызова записи Prisma — readiness только читает"
+  );
+  check(adminData.includes("summarizeTopUniverseReadiness(readinessRows)"), "admin/data: свёртка вызывается на сервере, без своего кэша");
+  check(adminData.includes("BETWEEN 1 AND ${TOP_UNIVERSE_SIZE}"), "admin/data: окно вселенной из константы, не литерал");
 }
 
 console.log(`\nItog: ${String(passed)}/${String(total)}`);

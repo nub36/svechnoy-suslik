@@ -1,7 +1,12 @@
 import AdminNav from "@/components/admin/AdminNav";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { topUniverseRankFilter } from "@/lib/universe";
+import {
+  readinessReasonText,
+  summarizeTopUniverseReadiness,
+  type UniverseReadinessRow
+} from "@/lib/admin/readiness";
+import { TOP_UNIVERSE_SIZE, topUniverseRankFilter } from "@/lib/universe";
 import { redirect } from "next/navigation";
 import {
   ALLOWED_TIMEFRAMES
@@ -107,7 +112,8 @@ async function loadHealthData() {
     marketRows,
     candleRows,
     snapshotRows,
-    top10DenominatorRow
+    top10DenominatorRow,
+    readinessRows
   ] = await Promise.all([
     // Явные аннотации: файл остаётся типобезопасным
     // и на stub-клиенте песочницы.
@@ -191,7 +197,32 @@ async function loadHealthData() {
         AND m.status = 'ACTIVE'
         AND m.quote = 'USDT'
         AND m."marketType" = 'SPOT'
-    ` as unknown as { markets: number }[]
+    ` as unknown as { markets: number }[],
+    // Готовность Top-100: ОДИН read-only агрегат (assets universe ->
+    // активные SPOT USDT рынки -> рынки с закрытыми свечами).
+    // Ничего не persists; это диагностика, не источник истины.
+    prisma.$queryRaw<UniverseReadinessRow[]>`
+      SELECT
+        a.symbol AS "symbol",
+        a."rank" AS "rank",
+        COUNT(DISTINCT m.id)::int AS "markets",
+        COUNT(DISTINCT c."marketId")::int AS "candleMarkets"
+      FROM "Asset" a
+      LEFT JOIN "Market" m
+        ON m."assetId" = a.id
+        AND m.enabled = true
+        AND m.status = 'ACTIVE'
+        AND m.quote = 'USDT'
+        AND m."marketType" = 'SPOT'
+      LEFT JOIN "Candle" c
+        ON c."marketId" = m.id
+        AND c.closed = true
+      WHERE a.enabled = true
+        AND a."rank" IS NOT NULL
+        AND a."rank" BETWEEN 1 AND ${TOP_UNIVERSE_SIZE}
+      GROUP BY a.symbol, a."rank"
+      ORDER BY a."rank"
+    ` as unknown as UniverseReadinessRow[]
   ]);
 
   // coverage Top-10: рынки топ-10 активов, у которых есть свечи
@@ -250,8 +281,11 @@ async function loadHealthData() {
     (tf) => !candleByTf.has(tf)
   );
 
+  const readiness = summarizeTopUniverseReadiness(readinessRows);
+
   return {
     now,
+    readiness,
     assets: {
       total: assetsTotal,
       enabled: assetsEnabled,
@@ -675,6 +709,111 @@ export default async function AdminDataPage() {
           по которым есть свечи), а не активов: один актив
           торгуется на нескольких биржах. Top-10 — то же
           отношение среди рынков десяти топ-активов.
+        </p>
+
+        {/* ---------- ГОТОВНОСТЬ TOP-100 (read-only) ---------- */}
+
+        <h2 className="healthSectionTitle">
+          Готовность Top-100 (read-only)
+        </h2>
+
+        <div className="healthGrid">
+          <div className="healthCard">
+            <div className="healthValue">
+              {fmtInt(data.readiness.universe)}
+            </div>
+            <div className="healthLabel">
+              активов Top-{String(data.readiness.universeTarget)} в базе
+            </div>
+          </div>
+
+          <div className="healthCard">
+            <div className="healthValue">
+              {fmtInt(data.readiness.withMarket)}
+            </div>
+            <div className="healthLabel">
+              имеют активный SPOT USDT-рынок
+            </div>
+          </div>
+
+          <div className="healthCard">
+            <div className="healthValue">
+              {fmtInt(data.readiness.withChartData)}
+            </div>
+            <div className="healthLabel">
+              имеют закрытые свечи (график доступен)
+            </div>
+          </div>
+
+          <div className="healthCard">
+            <div className="healthValue">
+              {fmtInt(data.readiness.missing.length)}
+            </div>
+            <div className="healthLabel">
+              без графиков/рынков (честный список ниже)
+            </div>
+          </div>
+        </div>
+
+        {data.readiness.missing.length === 0 ? (
+          <p className="muted healthNote">
+            Все активы вселенной с рангом в базе имеют реальные
+            рынки и закрытые свечи. Счётчики — срез на момент
+            открытия страницы; страница ничего не сохраняет
+            и не запускает.
+          </p>
+        ) : (
+          <>
+            <div className="tableBox">
+              <table className="healthTable">
+                <thead>
+                  <tr>
+                    <th>Rank</th>
+                    <th>Актив</th>
+                    <th>Рынков</th>
+                    <th>Рынков со свечами</th>
+                    <th>Чего не хватает</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {data.readiness.missing.slice(0, 40).map((asset) => (
+                    <tr key={asset.symbol}>
+                      <td className="muted">
+                        #{String(asset.rank)}
+                      </td>
+                      <td>{asset.symbol}</td>
+                      <td>{fmtInt(asset.markets)}</td>
+                      <td>{fmtInt(asset.candleMarkets)}</td>
+                      <td>
+                        {asset.reason !== null
+                          ? readinessReasonText(asset.reason)
+                          : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <p className="muted healthNote">
+              Показаны первые {String(Math.min(40, data.readiness.missing.length))}{" "}
+              из {fmtInt(data.readiness.missing.length)} проблемных
+              активов. Причина «нет закрытых свечей» НЕ
+              означает ошибку — данные появятся, когда их
+              соберёт внешний OHLCV-прогон; страница только
+              читает и ничего не запускает.
+            </p>
+          </>
+        )}
+
+        <p className="muted healthNote">
+          Вселенная: {fmtInt(data.readiness.universe)} из{" "}
+          {fmtInt(data.readiness.universeTarget)} активов Top-
+          {String(data.readiness.universeTarget)} с рангом в базе.
+          Если число меньше целевого — часть рангов ещё не
+          заполнена прогоном rank-assets; это факт БД, а не
+          ошибка страницы.
         </p>
 
         {/* ---------- КОМАНДЫ ---------- */}
