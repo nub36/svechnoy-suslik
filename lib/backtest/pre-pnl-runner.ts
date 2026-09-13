@@ -1,6 +1,7 @@
 /**
  * Pre-PnL Runner — Phase E + F — deterministic orchestration:
- * historical read-only bars → historical raw SMC observations → eligibility policy → execution-policy boundary → P2-A → P2-C.
+ * historical read-only bars → historical raw SMC observations → eligibility policy → execution-policy boundary → STOP (intentionally stops before economics).
+ * Current runner intentionally stops before P2-A/P2-C economics — returns PRE_REGISTRATION_REQUIRED until APPROVED policy.
  * But until concrete approved execution policy is supplied: REFUSE real trade/PnL execution.
  * Returns deterministic status PRE_REGISTRATION_REQUIRED.
  *

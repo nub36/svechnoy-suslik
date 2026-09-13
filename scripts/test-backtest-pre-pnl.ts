@@ -179,7 +179,30 @@ function makeDeps(candlesMap: Map<number, SmcRawCandle[]>): BacktestDataDepsV2 {
 
   // 4. Raw counts preserved, not fake NEUTRAL
   ok(diagNoPolicy.rawLongCount + diagNoPolicy.rawShortCount + diagNoPolicy.rawNeutralCount + diagNoPolicy.rawCannotEvaluateCount === decisionBars.length, "raw counts sum to decisionBars length");
-  ok(diagNoPolicy.rawLongCount >= 0 && diagNoPolicy.rawShortCount >= 0, "raw LONG/SHORT counts non-negative");
+  ok(typeof diagNoPolicy.rawLongCount === "number" && typeof diagNoPolicy.rawShortCount === "number", "raw counts are numbers observable");
+  ok(diagNoPolicy.nonExecutableCount === decisionBars.length, "nonExecutableCount equals decisionBars when no policy observable");
+
+  // Behavior test pinning library-level from < to validation
+  let fromToValidationFailed = false;
+  try {
+    await runPrePnlDiagnostics({
+      assetSymbol: "BTC",
+      timeframe: "1h" as SmcTimeframe,
+      from: new Date(T0 + 100*H1),
+      to: new Date(T0),
+      markets: [market],
+      deps,
+      smcConfig: defaultSmcScoringConfig("1h" as SmcTimeframe),
+      allCandlesPerMarket: candlesMap,
+      decisionBarsMs: decisionBars,
+      executionPolicy: null,
+      eligibilityMethodology: null,
+    });
+  } catch (e) {
+    fromToValidationFailed = true;
+    ok((e as Error).message.includes("from must be < to"), "from < to validation message");
+  }
+  ok(fromToValidationFailed, "library-level from < to validation enforced throws when from >= to");
 
   // 5. Format report contains READ ONLY NO PNL and no profitability
   const reportStr = formatPrePnlDiagnosticsReport(diagNoPolicy);

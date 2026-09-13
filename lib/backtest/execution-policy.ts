@@ -40,8 +40,10 @@ export const FORBIDDEN_ECONOMIC_KEYS = Object.freeze([
 export type ForbiddenEconomicKey = typeof FORBIDDEN_ECONOMIC_KEYS[number];
 
 /**
- * Check if object contains forbidden economic keys without explicit owner-approved declaration.
- * When policy unresolved / PRE_REGISTRATION, any economic config must fail closed — no hidden defaults adopted.
+ * HONEST SCOPE: top-level/current contract scope only, NOT arbitrary source-code semantic analysis.
+ * Checks top-level keys of config object for forbidden economic keys (atrSlMultiplier/k/rrMin/timeoutBars/stopLoss/takeProfit/structuralAnchor etc).
+ * Does NOT attempt impossible semantic scanning of arbitrary source code or nested closures.
+ * When policy unresolved / PRE_REGISTRATION, any economic config at top-level must fail closed — no hidden defaults adopted.
  * Mutation {atrSlMultiplier:1.5,k:1,rrMin:2,timeoutBars:24} must fail.
  */
 export function findUndeclaredEconomicFields(

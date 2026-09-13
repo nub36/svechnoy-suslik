@@ -4249,17 +4249,18 @@ lib/backtest/core-api.ts exports OwnerInspectionResult, CoreReadOnlyService, Bac
 - hidden default k/SL/TP → killed by execution-policy forbiddenDefaults includes k and ATR/SL
 All 21 mutation controls killed.
 
-**Tests after hardening:**
-- P2-A engine 442/442 (was 439, added isolation checks), hardening 567/567, metrics 123/123, splits 108/108
+**Tests after hardening — ACTUAL COUNTS recomputed after final cleanup:**
+- P2-A engine 442/442, hardening 567/567, metrics 123/123, splits 108/108
 - P2-B 427/427
 - P2-C contract 213/213 report 225/225 leakage 174/174 hardening 165/165
 - eligibility 96/96
-- data-plane 46/46 smc-observation 78/78 execution-policy 16/16 pre-pnl 28/28 full-pipeline 40/40 hardening-pre-pnl 47/47
-- new hardening: readonly-sql 89/89 clock 46/46 eligibility 32/32 structural-proof 19/19 mutation 21/21 owner-inspection 25/25
-- total >6700 checks
-- tsc --noEmit 0 errors (normal, not only --skipLibCheck)
+- data-plane 46/46 smc-observation 78/78 execution-policy 16/16 pre-pnl 32/32 full-pipeline 40/40 hardening-pre-pnl 47/47
+- new hardening: readonly-sql 89/89 clock 46/46 eligibility 32/32 structural-proof 22/22 mutation 21/21 owner-inspection 25/25
+- real-long-short 17/17 BEHAVIOR, canonical-coverage-real 38/38 BEHAVIOR, historical-data-plane-behavior-real 22/22 BEHAVIOR REAL plane via fetchHistoricalDataPlane, no-pnl-output 11/11 CONTRACT REAL plane, economic-default-detection 12/12 CONTRACT top-level scope, core-api-immutability 14/14 CONTRACT, survivorship-fixtures 11/11 CONTRACT strict, mutations-m1-m11 20/20 classified BEHAVIOR/CONTRACT/SOURCE PIN
+- Changed files from base 51eb129: 35 files (git diff --name-only 51eb129..HEAD)
+- tsc --noEmit 0 errors (normal)
 - build compiled successfully then fails at page data collection @prisma/client not initialized — identical to base 51eb129, not introduced
-- git diff --check clean
+- git diff --check clean including trailing blank line fix
 - No DB writes, no PnL, no Signal Engine, no workers, no production deployment
 
 **Owner VPS command (no secrets):**
@@ -4274,4 +4275,3 @@ Uses server's existing configured environment, fails closed if env missing, neve
 - OHLCV PIT whether to store historical revisions or accept sync.ts upsert limitation
 
 **Status:** IMPLEMENTED / PENDING INDEPENDENT ADVERSARIAL REVIEW — NO REAL DB ACCESS / NO DB WRITES / NO REAL PNL / NO WORKERS / NO SIGNAL ENGINE / NO PRODUCTION DEPLOYMENT.
-

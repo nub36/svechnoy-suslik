@@ -1,5 +1,9 @@
 /**
  * Mutation requirements M1-M11 self-test — all must be killed, report survivors.
+ * Honest classification:
+ * - BEHAVIOR MUTATION: real production path, observable output changes if mutated
+ * - MODULE CONTRACT MUTATION: output contract violation (no-PnL, immutability, economic defaults, survivorship)
+ * - STATIC SOURCE PIN: source-code import/pattern that must not exist, pinned by static check
  */
 
 import { evaluateHistoricalRawObservation } from "../lib/backtest/smc-observation";
@@ -61,44 +65,44 @@ const shortCandles = canonical().map(neg).filter(c=>c.openTime.getTime() <= deci
 const longObs = evaluateHistoricalRawObservation({ market, assetSymbol: "BTC", timeframe: "1h" as SmcTimeframe, decisionBarOpenTimeMs: decisionH, allCandlesAsc: longCandles, smcConfig: cfg, commonHorizon: null, participantCount: 1 });
 const shortObs = evaluateHistoricalRawObservation({ market, assetSymbol: "BTC", timeframe: "1h" as SmcTimeframe, decisionBarOpenTimeMs: decisionH, allCandlesAsc: shortCandles, smcConfig: cfg, commonHorizon: null, participantCount: 1 });
 
-// M1 real LONG->NEUTRAL must fail
-ok(longObs.direction === "LONG", "M1 setup: real LONG is LONG");
-ok(longObs.direction !== "NEUTRAL", "M1 killed: LONG->NEUTRAL mutation must fail — real LONG not NEUTRAL");
+// M1 BEHAVIOR: real LONG->NEUTRAL must fail
+ok(longObs.direction === "LONG", "M1 BEHAVIOR setup: real LONG is LONG");
+ok(longObs.direction !== "NEUTRAL", "M1 BEHAVIOR killed: LONG->NEUTRAL mutation must fail — real LONG not NEUTRAL");
 
-// M2 SHORT->CANNOT_EVALUATE must fail
-ok(shortObs.direction === "SHORT", "M2 setup: real SHORT is SHORT");
-ok(shortObs.direction !== "CANNOT_EVALUATE", "M2 killed: SHORT->CANNOT_EVALUATE mutation must fail");
+// M2 BEHAVIOR: SHORT->CANNOT_EVALUATE must fail
+ok(shortObs.direction === "SHORT", "M2 BEHAVIOR setup: real SHORT is SHORT");
+ok(shortObs.direction !== "CANNOT_EVALUATE", "M2 BEHAVIOR killed: SHORT->CANNOT_EVALUATE mutation must fail");
 
-// M3 overallCoverageRatio forced 1 must fail
+// M3 BEHAVIOR: overallCoverageRatio forced 1 must fail
 {
   const from = Date.parse("2024-01-01T00:00:00Z");
   const to = Date.parse("2024-01-01T03:00:00Z");
   const bars = [bar(Date.parse("2024-01-01T00:00:00Z"))];
   const cov = computeMarketCoverage(1, "1h", bars, H1, { from, to });
   const agg = aggregateCoverage([cov]);
-  ok(agg.overallCoverageRatio !== 1, "M3 killed: overallCoverageRatio forced 1 must fail — real partial ratio not 1");
+  ok(agg.overallCoverageRatio !== 1, "M3 BEHAVIOR killed: overallCoverageRatio forced 1 must fail — real partial ratio not 1");
 }
 
-// M4 canonical effectiveFrom broken must fail
+// M4 BEHAVIOR: canonical effectiveFrom broken must fail
 {
   const from = Date.parse("2024-01-01T00:30:00Z");
   const to = Date.parse("2024-01-01T03:30:00Z");
   const bars = [bar(Date.parse("2024-01-01T01:00:00Z"))];
   const cov = computeMarketCoverage(1, "1h", bars, H1, { from, to });
-  ok(cov.requestedAlignment?.effectiveFrom === Date.parse("2024-01-01T01:00:00Z"), "M4 setup: effectiveFrom correct");
-  ok(cov.requestedAlignment?.effectiveFrom !== from, "M4 killed: effectiveFrom broken must fail — effectiveFrom != from when not aligned");
+  ok(cov.requestedAlignment?.effectiveFrom === Date.parse("2024-01-01T01:00:00Z"), "M4 BEHAVIOR setup: effectiveFrom correct");
+  ok(cov.requestedAlignment?.effectiveFrom !== from, "M4 BEHAVIOR killed: effectiveFrom broken must fail — effectiveFrom != from when not aligned");
 }
 
-// M5 alignment flags falsified must fail
+// M5 BEHAVIOR: alignment flags falsified must fail
 {
   const from = Date.parse("2024-01-01T00:30:00Z");
   const to = Date.parse("2024-01-01T03:30:00Z");
   const cov = computeMarketCoverage(1, "1h", [], H1, { from, to });
-  ok(cov.requestedAlignment?.isAligned === false && cov.requestedAlignment?.canonicalized === true, "M5 setup: non-aligned has isAligned false canonicalized true");
-  ok(!(cov.requestedAlignment?.isAligned === true && cov.requestedAlignment?.canonicalized === false), "M5 killed: alignment flags falsified must fail");
+  ok(cov.requestedAlignment?.isAligned === false && cov.requestedAlignment?.canonicalized === true, "M5 BEHAVIOR setup: non-aligned has isAligned false canonicalized true");
+  ok(!(cov.requestedAlignment?.isAligned === true && cov.requestedAlignment?.canonicalized === false), "M5 BEHAVIOR killed: alignment flags falsified must fail");
 }
 
-// M6 netPnl in historical report must fail
+// M6 MODULE CONTRACT: netPnl in historical report must fail
 {
   function hasForbiddenRecursive(obj:any): boolean {
     if (!obj || typeof obj !== "object") return false;
@@ -111,11 +115,11 @@ ok(shortObs.direction !== "CANNOT_EVALUATE", "M2 killed: SHORT->CANNOT_EVALUATE 
   }
   const fakePlane = { markets: [], overallCoverageRatio: 0.5 };
   const mutated = { ...fakePlane, nested: { netPnl: 42 } };
-  ok(hasForbiddenRecursive(mutated) === true, "M6 setup: checker detects netPnl");
-  ok(hasForbiddenRecursive(fakePlane) === false, "M6 killed: netPnl in historical report must be detected — clean plane has no forbidden");
+  ok(hasForbiddenRecursive(mutated) === true, "M6 CONTRACT setup: checker detects netPnl");
+  ok(hasForbiddenRecursive(fakePlane) === false, "M6 CONTRACT killed: netPnl in historical report must be detected — clean plane has no forbidden");
 }
 
-// M7 netPnl in core-api nested must fail
+// M7 MODULE CONTRACT: netPnl in core-api nested must fail
 {
   const resp = buildBacktestsReadinessResponse();
   const mutated = JSON.parse(JSON.stringify(resp));
@@ -128,26 +132,26 @@ ok(shortObs.direction !== "CANNOT_EVALUATE", "M2 killed: SHORT->CANNOT_EVALUATE 
     }
     return false;
   }
-  ok(hasForbidden(mutated) === true, "M7 setup: nested netPnl detected");
-  ok(hasForbidden(resp) === false, "M7 killed: netPnl in core-api nested must be detected — clean resp has no forbidden");
+  ok(hasForbidden(mutated) === true, "M7 CONTRACT setup: nested netPnl detected");
+  ok(hasForbidden(resp) === false, "M7 CONTRACT killed: netPnl in core-api nested must be detected — clean resp has no forbidden");
 }
 
-// M8 unresolved policy receives k/ATR/RR/timeout must fail
+// M8 MODULE CONTRACT: unresolved policy receives k/ATR/RR/timeout must fail
 {
   const mutation = { atrSlMultiplier: 1.5, k: 1, rrMin: 2, timeoutBars: 24 };
   const res = validateNoHiddenEconomicDefaults(mutation as any, null);
-  ok(res.ok === false, "M8 killed: unresolved policy receives k/ATR/RR/timeout must fail");
+  ok(res.ok === false, "M8 CONTRACT killed: unresolved policy receives k/ATR/RR/timeout must fail");
 }
 
-// M9 PRE_REGISTRATION bypass must fail
+// M9 STATIC SOURCE PIN: PRE_REGISTRATION bypass must fail
 {
   const prePnlSrc = readFileSync(resolve(__dirname, "../lib/backtest/pre-pnl-runner.ts"), "utf8");
   const noComments = prePnlSrc.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-  ok(!noComments.includes("runBacktest") && !noComments.includes("computeMetrics"), "M9 killed: PRE_REGISTRATION bypass must fail — no P2-A economics in runner");
-  ok(prePnlSrc.includes("PRE_REGISTRATION_REQUIRED"), "M9 setup: runner contains PRE_REGISTRATION_REQUIRED");
+  ok(!noComments.includes("runBacktest") && !noComments.includes("computeMetrics"), "M9 SOURCE PIN killed: PRE_REGISTRATION bypass must fail — no P2-A economics in runner");
+  ok(prePnlSrc.includes("PRE_REGISTRATION_REQUIRED"), "M9 SOURCE PIN setup: runner contains PRE_REGISTRATION_REQUIRED");
 }
 
-// M10 nested core-api mutation allowed must fail (deep-freeze)
+// M10 MODULE CONTRACT: nested core-api mutation allowed must fail (deep-freeze)
 {
   const resp = buildBacktestsReadinessResponse();
   let mutFailed = false;
@@ -155,17 +159,18 @@ ok(shortObs.direction !== "CANNOT_EVALUATE", "M2 killed: SHORT->CANNOT_EVALUATE 
     (resp.prePnl as any).status = "HACKED";
     if ((resp.prePnl.status as string) !== "HACKED") mutFailed = true;
   } catch { mutFailed = true; }
-  ok(mutFailed, "M10 killed: nested core-api mutation allowed must fail — deep-freeze prevents");
+  ok(mutFailed, "M10 CONTRACT killed: nested core-api mutation allowed must fail — deep-freeze prevents");
 }
 
-// M11 current enabled/status filtering restored silently must fail
+// M11 MODULE CONTRACT: current enabled/status filtering restored silently must fail
 {
   const cliSrc = readFileSync(resolve(__dirname, "backtest-historical-readonly.ts"), "utf8");
-  ok(cliSrc.includes("where: { assetId: assetRow.id }"), "M11 setup: CLI queries all markets");
-  ok(!cliSrc.includes("enabled: true, status: \"ACTIVE\"") || !cliSrc.includes("where: { assetId: assetRow.id, enabled: true"), "M11 killed: current enabled/status filtering restored silently must fail — no silent filter");
-  ok(cliSrc.includes("CURRENT_STATE_SURVIVORSHIP_LIMITATION"), "M11: reports survivorship limitation");
+  ok(cliSrc.includes("where: { assetId: assetRow.id }"), "M11 CONTRACT setup: CLI queries all markets");
+  // Strict check, no OR escape-hatch: ensure no enabled/status filter in market query
+  ok(!cliSrc.includes("where: { assetId: assetRow.id, enabled: true"), "M11 CONTRACT killed: current enabled/status filtering restored silently must fail — no silent filter");
+  ok(cliSrc.includes("CURRENT_STATE_SURVIVORSHIP_LIMITATION"), "M11 CONTRACT: reports survivorship limitation");
 }
 
 console.log(`\nPassed ${passed}/${passed+failed}`);
 if (failed>0){ console.error(`Failed ${failed} — survivors exist!`); process.exit(1); }
-console.log("All M1-M11 mutations killed — no survivors");
+console.log("All M1-M11 mutations killed — BEHAVIOR: M1-M5, CONTRACT: M6-M8,M10-M11, SOURCE PIN: M9 — no survivors");

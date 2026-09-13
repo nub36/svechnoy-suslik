@@ -1,10 +1,10 @@
 # Pre-PnL Backtest Runbook — BTC only, 5m/15m/1h/4h/1d, BINGX excluded 1d
 
 **Base:** 51eb129dea6a36ac077770d57859837769ece705 VPS-verified ACCEPTED (P2-A p2a-1.2.0, P2-B HARDENED, P2-C p2c-1.2.0) — base only, new work NOT accepted/VPS-verified
-**Current Branch:** arena/01a09726-core-pre-pnl — sequential commits from 7f58365, PENDING INDEPENDENT RE-AUDIT
-**Status:** IMPLEMENTED / PENDING INDEPENDENT ADVERSARIAL REVIEW — no PnL, no profitability claims
+**Current Branch:** this branch HEAD — sequential commits from 7f58365, PENDING TARGETED RE-AUDIT
+**Status:** IMPLEMENTED / PENDING TARGETED INDEPENDENT RE-AUDIT — no PnL, no profitability claims
 **Production:** d6c573c20a11e79e26153579575818f1dada2f96 — DO NOT deploy, DO NOT restart workers
-**Changed Files from base 51eb129:** 27 files (see git diff --name-only 51eb129..HEAD), not >6700 checks as chain evidence
+**Changed Files from base 51eb129:** 35 files (see git diff --name-only 51eb129..HEAD)
 
 ## 1. Scope — What is pre-PnL
 
@@ -12,7 +12,7 @@
 - Historical raw SMC observation preserving LONG/SHORT/NEUTRAL/CANNOT_EVALUATE + facts/reasons/provenance (reuses production evaluateSmc, no second algorithm)
 - Differential / property tests: production vs historical same prefix identical, same prefix + different suffix = same observation, no-lookahead invariants, context-channel-only documented
 - Generic execution-policy infrastructure: ExecutionPolicyDefinition, fingerprint, Executability EXECUTABLE/NON_EXECUTABLE (NO_EXECUTION_POLICY/NO_VALID_LEVELS/POLICY_NOT_APPROVED/PRE_REGISTRATION_REQUIRED etc) WITHOUT economic defaults (no SL anchor, no ATR, no k, no RR, no timeout, no buffer, no TP rule)
-- Deterministic pre-PnL runner refusing real PnL until policy approved: status PRE_REGISTRATION_REQUIRED, only coverage/raw counts diagnostics
+- Deterministic pre-PnL runner refusing real PnL until policy approved: status PRE_REGISTRATION_REQUIRED, only coverage/raw counts diagnostics — intentionally stops before economics, does NOT go to P2-A/P2-C
 - TRAIN/VALIDATION/OOS plumbing using P2-C semantics OOS-blind (selection TRAIN/VALIDATION only, OOS final witness only)
 - Admin/backtests UI truthful readiness state (no fake profitability)
 - Docs/runbooks
@@ -34,6 +34,7 @@ HistoricalDataPlane (read-only, DI executor)
   -> eligibility via isSmartMoneyExchangeEligible (BINGX 1d excluded)
   -> provenance (createdAt/updatedAt diff, write path audit lib/ohlcv/sync.ts only)
   -> common timestamps / contiguous intervals / participant feasibility
+  -> effectiveCanonicalRange with isAligned/canonicalized, overallCoverageRatio
 
 RawSmcObservation (reuses production evaluateSmc)
   -> windowPolicy: hardMinimumBars ~84 vs productionWindowBars 500 vs fetchCap 500 vs fidelity 500 vs ROLLING_500
@@ -45,17 +46,18 @@ ExecutionPolicyDefinition
   -> id, label, createdAt ISO, status DRAFT/IN_REVIEW/APPROVED/REJECTED, requiredEconomicFields non-empty when APPROVED, config with forbiddenDefaults list (k=1/k=2/any k-grid/RR/ATR/buffer/TP/timeout etc)
   -> fingerprint includes id/label/status/requiredFields/config
   -> validation: explicit required fields, no hidden defaults, NaN/Infinity rejected, Date.parse validation (no new Date token)
+  -> HONEST SCOPE: top-level/current contract scope only, NOT arbitrary source-code semantic analysis
 
 Executability
   -> EXECUTABLE only if APPROVED policy + valid SL/TP levels at decision bar
   -> NON_EXECUTABLE reasons: NO_EXECUTION_POLICY, INVALID_POLICY, NO_VALID_STOP, NO_VALID_TARGET, LEVELS_INVALID_AT_DECISION, POLICY_NOT_APPROVED, PRE_REGISTRATION_REQUIRED, etc.
 
-PrePnlRunner (FACTUAL CORRECTION: stops before economics, does NOT go →P2-A→P2-C)
+PrePnlRunner — intentionally stops before economics, does NOT go to P2-A/P2-C
   -> runPrePnlDiagnostics: bars per market -> coverage -> eligibility -> raw SMC observations -> execution policy boundary -> STOP, returns PRE_REGISTRATION_REQUIRED, no P2-A economics entered
   -> status: PRE_REGISTRATION_REQUIRED until APPROVED policy, READY_FOR_EXECUTION after approval but still no PnL until full execution pipeline separately approved
   -> diagnostics only: coverage per market, raw counts, NON_EXECUTABLE counts, data limitations, eligibility limitations, fingerprints, common horizon
   -> truthful baseline naming: SMC-Direction Baseline / EP-1 until execution/eligibility production-derived
-  -> No P2-A engine import, no computeMetrics, no profitFactor/netPnl — import-closure asserted
+  -> No P2-A engine import, no computeMetrics, no profitFactor/netPnl — import-closure asserted via static source pin
 
 SplitsReadiness
   -> uses P2-C semantics: selection stages TRAIN/VALIDATION only, OOS final witness only, tie-break selectionKey -> inputOrder, OOS-blind
@@ -129,18 +131,18 @@ npx tsx scripts/backtest-historical-readonly.ts \
 CLI truthfulness (independent audit confirmed):
 - Does NOT execute SET TRANSACTION READ ONLY — no raw SQL transaction enforcement added to avoid DB writes.
 - Read-only by capability-restricted Prisma surface: asset.findUnique, market.findMany (all markets for BTC, reporting current enabled/status as diagnostics), candle.findMany (CLOSED-only), $disconnect. No create/update/upsert/delete, no $executeRaw.
-- read-only-sql.ts remains as static/test defense (SELECT/WITH allowlist, forbidden write tokens), not as runtime CLI guard unless actually wired.
+- read-only-sql.ts remains as static/test defense (SELECT/WITH allowlist, forbidden write tokens), NOT as runtime CLI guard unless actually wired — scope is static defensive SQL inspection only, NOT PostgreSQL semantic proof/DB enforcement/runtime guard unless actually wired.
 - Current enabled/status survivorship: CLI queries ALL markets for BTC asset (no enabled:true/status:ACTIVE filter) and reports current enabled/status as diagnostic fields. Timeless exchange eligibility (BINGX-1d) applied separately. Universe narrowing reported as CURRENT_STATE_SURVIVORSHIP_LIMITATION if disabled markets exist.
 - SELECT-only, CLOSED-only, ASC ordering, duplicates fail-closed, canonical grid check
-- Coverage: requested-range basis, leading/internal/trailing missing, ratio canonical-grid based, earliest/latest, canonical slots, common intersection/horizon feasibility
+- Coverage: requested-range basis, leading/internal/trailing missing, ratio canonical-grid based, earliest/latest, canonical slots, common intersection/horizon feasibility, effectiveCanonicalRange with isAligned/canonicalized, overallCoverageRatio
 - No PnL, no trades, no metrics, no writes
 - Output: coverage per market, common timestamps, contiguous intervals, feasibility, eligibility diagnostics CANNOT_RECONSTRUCT, provenance revision diagnostics, limitations, TRAIN/VALIDATION/OOS readiness
 
-## 8. Tests — How to Run (no DB) — exact suite counts reported separately, not as >6700 chain evidence
+## 8. Tests — How to Run (no DB) — exact suite counts reported separately
 
 ```bash
-# P2-A/B/C accepted (base) — exact counts, separate from chain evidence
-npx tsx scripts/test-backtest-engine.ts      # 442/442 (includes isolation for new files) — was 439/439 in base, now 442 after new checks
+# P2-A/B/C accepted (base) — exact counts
+npx tsx scripts/test-backtest-engine.ts      # 442/442
 npx tsx scripts/test-backtest-p2b.ts         # 427/427
 npx tsx scripts/test-backtest-metrics.ts     # 123/123
 npx tsx scripts/test-backtest-splits.ts      # 108/108
@@ -150,23 +152,25 @@ npx tsx scripts/test-experiment-leakage.ts   # 174/174
 npx tsx scripts/test-experiment-hardening.ts # 165/165
 npx tsx scripts/test-smart-money-eligibility.ts # 96/96
 
-# Pre-PnL new suites — exact counts, not aggregated as chain evidence
-npx tsx scripts/test-backtest-data-plane.ts  # 46/46 (Phase A)
-npx tsx scripts/test-backtest-execution-policy.ts # 16/16 (Phase D)
-npx tsx scripts/test-backtest-smc-observation.ts # 78/78 (Phase C)
-npx tsx scripts/test-backtest-pre-pnl.ts     # 28/28 (Phase E/F) — fixed vacuous || raw
-npx tsx scripts/test-real-long-short.ts      # 16/16 — real LONG/SHORT via production evaluateSmc path
-npx tsx scripts/test-canonical-coverage-real.ts # 38/38 — behavior-level coverage, no source.includes
-npx tsx scripts/test-no-pnl-output.ts        # 8/8 — recursive forbidden economics checks
-npx tsx scripts/test-economic-default-detection.ts # 12/12 — mutation {atrSlMultiplier,k,rrMin,timeoutBars} must fail
-npx tsx scripts/test-core-api-immutability.ts # 14/14 — deep-freeze
-npx tsx scripts/test-survivorship-fixtures.ts # 10/10 — active/disabled/inactive/delisted
-npx tsx scripts/test-eligibility-hardening.ts # 30+/30+ — fixed || true
-npx tsx scripts/test-historical-clock-hardening.ts # 40+/40+ — fixed || true
+# Pre-PnL new suites — exact counts
+npx tsx scripts/test-backtest-data-plane.ts  # 46/46
+npx tsx scripts/test-backtest-execution-policy.ts # 16/16
+npx tsx scripts/test-backtest-smc-observation.ts # 78/78
+npx tsx scripts/test-backtest-pre-pnl.ts     # 29/29 — fixed vacuous, added from<to validation
+npx tsx scripts/test-real-long-short.ts      # 17/17 — real LONG/SHORT via production evaluateSmc path, BEHAVIOR
+npx tsx scripts/test-canonical-coverage-real.ts # 38/38 — behavior-level coverage, BEHAVIOR
+npx tsx scripts/test-historical-data-plane-behavior-real.ts # 22/22 — REAL plane object, non-aligned partial, ratio !=1, effectiveCanonicalRange, isAligned/canonicalized, projection mutations killed, BEHAVIOR
+npx tsx scripts/test-no-pnl-output.ts        # 11/11 — REAL plane object + formatted report recursive, CONTRACT
+npx tsx scripts/test-economic-default-detection.ts # 12/12 — mutation must fail, CONTRACT, top-level scope
+npx tsx scripts/test-core-api-immutability.ts # 14/14 — deep-freeze, CONTRACT
+npx tsx scripts/test-survivorship-fixtures.ts # 11/11 — active/disabled/inactive/delisted, CONTRACT, strict no OR
+npx tsx scripts/test-eligibility-hardening.ts
+npx tsx scripts/test-historical-clock-hardening.ts
 npx tsx scripts/test-readonly-sql-hardening.ts
-npx tsx scripts/test-pre-pnl-structural-proof.ts # fixed p2aEntered spy
+npx tsx scripts/test-pre-pnl-structural-proof.ts # 22/22 — fixed spy, SOURCE PIN
 npx tsx scripts/test-mutation-controls.ts
-npx tsx scripts/test-owner-inspection-readiness.ts # fixed DATABASE_URL escape hatch
+npx tsx scripts/test-owner-inspection-readiness.ts
+npx tsx scripts/test-mutations-m1-m11.ts     # 21/21 — classified BEHAVIOR/CONTRACT/SOURCE PIN, all killed
 
 npx tsc --noEmit
 npm run build
@@ -178,8 +182,8 @@ Isolation contract (lib/backtest/*.ts):
 - No Date.now(), no Math.random(), no process.env
 - No dynamic import, no require, no eval
 - Strip comments before FORBIDDEN_TOKENS check
-- Report titles must match actual file names, final SHA must be actual HEAD, not stale 15 commits/2178 checks titles
-- Do NOT use >6700 checks as chain evidence — report exact suite counts separately per suite
+- Report titles must match actual file names, final SHA must be actual HEAD or described as this branch HEAD, not stale titles
+- Suite counts must be actual, not stale
 
 ## 9. Admin UI — Truthful Readiness
 
@@ -188,37 +192,30 @@ Isolation contract (lib/backtest/*.ts):
 - Phase A historical data plane READ ONLY NO DB WRITES NO PNL
 - Phase B raw SMC observation reuses production evaluateSmc, window policy distinction, causal clock H+D
 - Phase C differential equivalence same prefix different suffix same observation, context-channel-only no-lookahead
-- Phase D execution policy generic NO defaults, EXECUTABLE vs NON_EXECUTABLE
-- Phase E pre-PnL runner PRE_REGISTRATION_REQUIRED, diagnostics only, truthful baseline SMC-Direction Baseline / EP-1
+- Phase D execution policy generic NO defaults, EXECUTABLE vs NON_EXECUTABLE, top-level scope only
+- Phase E pre-PnL runner PRE_REGISTRATION_REQUIRED, diagnostics only, truthful baseline SMC-Direction Baseline / EP-1, intentionally stops before economics
 - Phase F TRAIN/VALIDATION/OOS readiness OOS isolation
 - Historical eligibility CANNOT_RECONSTRUCT E1/E2/E3 unresolved
 - OHLCV PIT fidelity limitation
 - No fake profitability numbers, no fake completed experiments
 
-## 10. Self-Adversarial Mutations — Required
+## 10. Self-Adversarial Mutations — Required and Classified Honestly
 
-Before final push, run mutation controls (outside tree, revert after):
-- Return fail-open in classifySignalSource -> must fail 37+ checks
-- Re-read decision field from original object instead of snapshot -> must fail TOCTOU checks
-- Restore depth slice >8 in findNonFiniteNumbers -> must fail NaN depth 15 check
-- Return full configurationId in tie-break instead of selectionKey -> must fail OOS-dependence checks (selectionKey OOS-blind)
-- Remove experimentInvariantErrors call from runExperiment -> must fail M4b pin 163/165
-- Remove segment-local eligibility check (use variant.status) -> must fail 144/146
-- Remove FORBIDDEN_TOKENS check (allow new Date) -> must fail isolation 439/439
+- BEHAVIOR MUTATION: real production path, observable output changes if mutated — M1 LONG->NEUTRAL, M2 SHORT->CANNOT_EVALUATE, M3 overallCoverageRatio forced 1, M4 effectiveFrom broken, M5 alignment flags falsified, plane-level non-aligned partial, ratio !=1, effectiveCanonicalRange
+- MODULE CONTRACT MUTATION: output contract violation — M6 netPnl historical report, M7 netPnl core-api nested, M8 unresolved policy k/ATR/RR/timeout, M10 immutability, M11 enabled/status filtering restored
+- STATIC SOURCE PIN: source-code pattern that must not exist — M9 PRE_REGISTRATION bypass (no P2-A import)
 
-All mutations must be killed, then restored to green.
+All must be killed, then restored to green. Report classification honestly, do not call M1-M11 all behavioral mutations.
 
 ## 11. Final Delivery Checklist
 
 - [ ] Branch from exact 51eb129, no accepted branches altered, no squash/amend/force-push
 - [ ] lib/backtest/*.ts no new Date, no Date.now, no Math.random, no process.env, no dynamic import
-- [ ] All P2-A/B/C contracts green (engine 439/439, p2b 427/427, metrics 123/123, splits 108/108, contract 213/213, report 225/225, leakage 174/174, hardening 165/165, eligibility 96/96)
-- [ ] New phase tests green (data-plane 46/46, smc-observation 78/78, execution-policy 16/16, pre-pnl 28/28)
-- [ ] tsc --noEmit 0 errors, build 0 errors, git diff --check clean
-- [ ] No DB writes: grep -R INSERT/UPDATE/DELETE/UPSERT/CREATE/ALTER/DROP/TRUNCATE/LOCK/COPY/VACUUM in lib/backtest must be only in allowlist comments
-- [ ] No PnL fields: grep -R profitFactor/sharpe/winRate/expectancy/netPnl in lib/backtest/pre-pnl-runner must be absent
-- [ ] No Signal Engine ancestry: git merge-base --is-ancestor edf3732 HEAD must exit 1
+- [ ] All P2-A/B/C contracts green (engine 442/442, p2b 427/427, metrics 123/123, splits 108/108, contract 213/213, report 225/225, leakage 174/174, hardening 165/165, eligibility 96/96)
+- [ ] New phase tests green with actual counts (see §8)
+- [ ] tsc --noEmit 0 errors, build 0 errors, git diff --check clean including PROJECT_CONTEXT trailing blank line
+- [ ] No DB writes, no PnL fields, no Signal Engine ancestry exit 1
 - [ ] Admin UI truthful, no fake profitability
-- [ ] Owner-run CLI read-only, no DB writes, fail-closed
-- [ ] Docs: this runbook + PROJECT_CONTEXT.md update + CHANGELOG.md update
-- [ ] Push branch arena/01a09726-svechnoy-suslik, full commit chain report, self-adversarial mutations report, audit for leakage
+- [ ] Owner-run CLI read-only, no DB writes, fail-closed, NO DATABASE_URL
+- [ ] Docs: this runbook factual, 35 changed files, no >6700 claim, no false engine 442 was 439 explanation, actual suite counts
+- [ ] Push branch, full commit chain report, mutation report classified honestly, status PENDING TARGETED RE-AUDIT

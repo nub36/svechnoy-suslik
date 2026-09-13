@@ -15,7 +15,8 @@ function ok(c:boolean,m:string){ if(c)passed++; else{failed++; console.error(`FA
 // Check CLI source queries all markets, not just enabled ACTIVE — strict
 const cliSrc = readFileSync(resolve(__dirname, "backtest-historical-readonly.ts"), "utf8");
 ok(cliSrc.includes("where: { assetId: assetRow.id }"), "CLI queries all markets for BTC (no enabled/status filter)");
-ok(!cliSrc.includes("enabled: true") || cliSrc.includes("where: { assetId") && !cliSrc.includes("enabled: true, status"), "CLI does not silently filter enabled ACTIVE as historical truth");
+ok(!cliSrc.includes("where: { assetId: assetRow.id, enabled: true"), "CLI does not silently filter enabled ACTIVE as historical truth — strict no enabled/status in where");
+ok(!cliSrc.includes("enabled: true, status:"), "CLI no enabled true status ACTIVE filter anywhere in market query");
 ok(cliSrc.includes("CURRENT_STATE_SURVIVORSHIP_LIMITATION"), "CLI reports CURRENT_STATE_SURVIVORSHIP_LIMITATION");
 ok(cliSrc.includes("enabled") && cliSrc.includes("status") && cliSrc.includes("diagnostic"), "CLI reports current enabled/status as diagnostic fields");
 
