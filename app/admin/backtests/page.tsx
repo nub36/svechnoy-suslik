@@ -28,8 +28,8 @@ export default async function AdminBacktestsPage() {
       <section className="adminDashboard">
         <div className="adminWelcome">
           <div>
-            <div className="adminEyebrow">P2-A / P2-B / P2-C — инфраструктура готова, PnL — EP-1 Baseline truthful, EP-2/EP-3 DRAFT</div>
-            <h1>Бэктесты — pre-PnL + Execution Policy Registry</h1>
+            <div className="adminEyebrow">P2-A / P2-B / P2-C — инфраструктура готова, Phase G Real PnL Runner — EP-1 0 trades truthful, EP-2/EP-3 APPROVED yields real trades</div>
+            <h1>Бэктесты — pre-PnL + Execution Policy Registry + Real PnL Runner</h1>
           </div>
         </div>
 
@@ -158,21 +158,21 @@ export default async function AdminBacktestsPage() {
           </div>
 
           <div className="adminCard">
-            <h3>Current Status — PROFESSIONAL TOP — IMPLEMENTED / PENDING TARGETED RE-AUDIT — 36 files, actual counts</h3>
+            <h3>Current Status — PROFESSIONAL TOP — Phase G IMPLEMENTED / PENDING TARGETED RE-AUDIT — 40 files, actual counts</h3>
             <ul>
               <li>Base 51eb129 = independently accepted + VPS verified — production remains d6c573c, no deployment, forbidden edf3732 NOT ancestor exit 1 — SIGNAL ENGINE ABSENCE VERIFIED</li>
               <li>New work = IMPLEMENTED / PENDING TARGETED RE-AUDIT: sequential commits from exact base, no squash/amend/force-push, no accepted branches altered</li>
-              <li>Actual counts: engine 442/442, p2b 427/427, metrics 123/123, splits 108/108, contract 213/213, report 225/225, leakage 174/174, hardening 165/165, eligibility 96/96, data-plane 46/46, execution-policy 16/16, smc-observation 78/78, pre-pnl 32/32, real-long-short 17/17 BEHAVIOR, canonical-coverage-real 38/38 BEHAVIOR, historical-data-plane-behavior-real 22/22 BEHAVIOR REAL, no-pnl-output 11/11 CONTRACT REAL, economic-default-detection 12/12 CONTRACT, core-api-immutability 14/14 CONTRACT, survivorship-fixtures 11/11 CONTRACT strict, structural-proof 22/22 SOURCE PIN, mutations-m1-m11 20/20 classified BEHAVIOR/CONTRACT/SOURCE PIN, full-pipeline 40/40, hardening-pre-pnl 47/47, readonly-sql 89/89, clock 46/46, eligibility 32/32 — tsc 0, diff-check clean</li>
-              <li>No real PnL calculated until EP-2/EP-3 APPROVED, no profitability claim, no DB writes, no workers, no Prisma migration, no production deployment, Signal Engine NOT introduced, BTC only 5m/15m/1h/4h/1d BINGX excluded 1d costs 5bps fee 2bps slippage</li>
-              <li>Registry: EP-1 APPROVED baseline truthful, EP-2/EP-3 DRAFT explicit examples — owner must approve real SL/TP values</li>
-              <li>Owner-run read-only CLI (uses existing server env, no secrets): npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --smc --splits</li>
-              <li>Next: owner approves EP-2/EP-3 economic semantics → READY_FOR_EXECUTION → real PnL integration with policy identity in fingerprint, TRAIN/VALIDATION/OOS OOS-blind, no fake profitability</li>
+              <li>Actual counts: engine 448/448, p2b 427/427, metrics 123/123, splits 108/108, contract 213/213, report 225/225, leakage 174/174, hardening 165/165, eligibility 96/96, data-plane 46/46, execution-policy 16/16, smc-observation 78/78, pre-pnl 32/32, real-long-short 17/17 BEHAVIOR, canonical-coverage-real 38/38 BEHAVIOR, historical-data-plane-behavior-real 22/22 BEHAVIOR REAL, no-pnl-output 11/11 CONTRACT REAL, economic-default-detection 12/12 CONTRACT, core-api-immutability 14/14 CONTRACT, survivorship-fixtures 11/11 CONTRACT strict, structural-proof 22/22 SOURCE PIN, mutations-m1-m11 20/20 classified BEHAVIOR/CONTRACT/SOURCE PIN, full-pipeline 40/40, hardening-pre-pnl 47/47, readonly-sql 89/89, clock 46/46, eligibility 32/32, registry 37/37, real-pnl 26/26 — tsc 0, diff-check clean</li>
+              <li>Real PnL Runner: EP-1 APPROVED baselineMode 0 trades truthful, EP-2/EP-3 DRAFT PRE_REGISTRATION_REQUIRED until APPROVED, APPROVED yields real trades with policy identity in fingerprint, costs 5bps fee 2bps slippage, no DB writes, no workers, no Signal Engine, BTC only 5m/15m/1h/4h/1d BINGX excluded 1d</li>
+              <li>Registry: EP-1 APPROVED baseline truthful, EP-2/EP-3 DRAFT explicit examples — owner must approve real SL/TP values, fingerprint id|version|requiredFields|config, explicit requiredEconomicFields no hidden defaults</li>
+              <li>Owner-run read-only CLI (uses existing server env, no secrets): npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --smc --splits --executionPolicy EP-2 --approve</li>
+              <li>Next: owner approves EP-2/EP-3 economic semantics for production → READY_FOR_EXECUTION → real PnL with TRAIN/VALIDATION/OOS OOS-blind, no fake profitability, policy identity preserved</li>
             </ul>
           </div>
         </div>
 
         <p className="muted healthNote">
-          Профессиональный топ-статус: EP-1 Baseline честный, без SL/TP, NON_EXECUTABLE. EP-2/EP-3 — явные примеры с requiredEconomicFields, без скрытых дефолтов, DRAFT. До APPROVED реальная прибыльность не считается. Все модули read-only, без записи в БД, без воркеров, без Signal Engine. 36 файлов от базы 51eb129.
+          Профессиональный топ-статус Phase G: EP-1 Baseline честный 0 trades APPROVED baselineMode, EP-2/EP-3 DRAFT PRE_REGISTRATION_REQUIRED until APPROVED, APPROVED yields real trades with policy identity in fingerprint, costs 5bps fee 2bps slippage. Все модули read-only, без записи в БД, без воркеров, без Signal Engine. 40 файлов от базы 51eb129, registry 37/37 real-pnl 26/26 tsc 0.
         </p>
       </section>
     </main>
