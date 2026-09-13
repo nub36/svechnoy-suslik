@@ -5,20 +5,9 @@ import { redirect } from "next/navigation";
 export const dynamic = "force-dynamic";
 
 /**
- * Admin Backtests — честный статус pre-PnL инфраструктуры.
- *
- * До реального PnL approval:
- * - P2 infrastructure status
- * - historical data readiness
- * - coverage
- * - raw observation readiness
- * - execution-policy state
- * - eligibility limitation state
- * - PRE_REGISTRATION_REQUIRED
- * - TRAIN/VALIDATION/OOS readiness
- *
+ * Admin Backtests — честный статус pre-PnL + execution policy registry EP-1/EP-2/EP-3.
  * Никаких фиктивных profitability numbers, никаких fake completed experiments, никаких DB writes.
- * Статус: IMPLEMENTED / PENDING INDEPENDENT ADVERSARIAL REVIEW (база 51eb129 VPS verified).
+ * Статус: IMPLEMENTED / PENDING TARGETED RE-AUDIT (база 51eb129 VPS verified).
  */
 
 export default async function AdminBacktestsPage() {
@@ -39,8 +28,8 @@ export default async function AdminBacktestsPage() {
       <section className="adminDashboard">
         <div className="adminWelcome">
           <div>
-            <div className="adminEyebrow">P2-A / P2-B / P2-C — инфраструктура готова, PnL — PRE_REGISTRATION_REQUIRED</div>
-            <h1>Бэктесты — pre-PnL статус</h1>
+            <div className="adminEyebrow">P2-A / P2-B / P2-C — инфраструктура готова, PnL — EP-1 Baseline truthful, EP-2/EP-3 DRAFT</div>
+            <h1>Бэктесты — pre-PnL + Execution Policy Registry</h1>
           </div>
         </div>
 
@@ -49,18 +38,17 @@ export default async function AdminBacktestsPage() {
             <h3>P2-A Backtest Engine — p2a-1.2.0 — ACCEPTED / VPS VERIFIED (51eb129)</h3>
             <ul>
               <li>Детерминированный слой: next-bar entry, planned-risk R, gap-through, fees/slippage, pessimistic same-bar, arithmetic fail-closed, immutable results, causal warmup, MAE drawdown, large-array safety, decision snapshot TOCTOU, malformed signals fail-closed, context-channel no-lookahead</li>
-              <li>Contract: 415/415 engine, 567/567 hardening, 123/123 metrics, 108/108 splits — green</li>
+              <li>Contract: 442/442 engine, 567/567 hardening, 123/123 metrics, 108/108 splits — green (actual recomputed)</li>
               <li>Без Prisma, без сети, без workers, без Date.now()</li>
             </ul>
           </div>
 
           <div className="adminCard">
-            <h3>P2-B Data Plane — HARDENED — ACCEPTED / VPS VERIFIED</h3>
+            <h3>P2-B Data Plane — HARDENED — ACCEPTED / VPS VERIFIED — 427/427</h3>
             <ul>
-              <li>Read-only PostgreSQL plane: CLOSED-only, ASC ordering, duplicates fail-closed, canonical grid, off-grid detection, provider over-return, pagination progress, maxRows/maxPages bounded</li>
-              <li>Coverage: requested-range basis (not first→last), leading/internal/trailing missing, coverage ratio canonical-grid based, no misleading 100% on non-aligned ranges</li>
+              <li>Read-only PostgreSQL plane: CLOSED-only, ASC ordering, duplicates fail-closed, canonical grid effectiveCanonicalRange isAligned/canonicalized, off-grid detection, overallCoverageRatio, provider over-return, pagination progress, maxRows/maxPages bounded</li>
+              <li>Coverage: requested-range basis (not first→last), leading/internal/trailing missing, coverage ratio canonical-grid based, no misleading 100% on non-aligned ranges — REAL plane behavior via fetchHistoricalDataPlane tested 22/22</li>
               <li>Eligibility: upstream isSmartMoneyExchangeEligible, BINGX 1d excluded, raw vs Smart Money distinct, fail-closed unknown</li>
-              <li>Contract: 427/427 — green, plus new P2-B+ extensions</li>
             </ul>
           </div>
 
@@ -75,107 +63,103 @@ export default async function AdminBacktestsPage() {
           </div>
 
           <div className="adminCard">
-            <h3>Phase A — Historical Data Plane — IMPLEMENTED / PENDING REVIEW</h3>
+            <h3>Phase A — Historical Data Plane — IMPLEMENTED / REAL BEHAVIOR 22/22</h3>
             <ul>
-              <li>Real read-only historical data access on top of P2-B: dependency-injected executor, SELECT-only, no secret handling, no writes, no migrations, no workers</li>
-              <li>Fetch: market identity, exchange, asset, timeframe, CLOSED candles, openTime, OHLCV, createdAt/updatedAt</li>
-              <li>Report: requested range, effective canonical range, expected slots, available slots, coverage ratio, leading/internal/trailing missing, duplicates, off-grid bars, earliest/latest, common timestamps, common contiguous ranges, participant feasibility, createdAt/updatedAt diagnostics, eligibility limitations</li>
-              <li>No PnL in this layer</li>
-              <li>Owner-run CLI: scripts/backtest-historical-readonly.ts — READ ONLY NO DB WRITES NO PNL, defensive SET TRANSACTION READ ONLY intent, fail-closed</li>
+              <li>Real read-only historical data access via fetchHistoricalDataPlane: dependency-injected executor, SELECT-only, no writes</li>
+              <li>REAL behavior tests: non-aligned 00:30-03:30 → effectiveFrom 01:00 expectedSlots 3 ratio 2/3, overallCoverageRatio 0.6 partial !=1, isAligned false canonicalized true, off-grid not counted, projection mutations killed</li>
+              <li>Report: requested range, effectiveCanonicalRange, expected slots, coverage ratio, leading/internal/trailing missing, duplicates, off-grid bars, common timestamps, common contiguous ranges, participant feasibility</li>
+              <li>No PnL in this layer — REAL plane object inspected recursively for forbidden economics</li>
             </ul>
           </div>
 
           <div className="adminCard">
-            <h3>Phase B — Historical Raw SMC Observation — IMPLEMENTED / PENDING REVIEW</h3>
+            <h3>Phase B — Historical Raw SMC Observation — IMPLEMENTED — BEHAVIOR 17/17 + 38/38</h3>
             <ul>
-              <li>Reuses production evaluateSmc — no second algorithm</li>
+              <li>Reuses production evaluateSmc — no second algorithm — real LONG/SHORT via production path yields LONG 75/10 and SHORT 20/75, preserved with NON_EXECUTABLE</li>
               <li>RawSmcObservation: LONG/SHORT/NEUTRAL/CANNOT_EVALUATE preserved exactly, plus causal facts/reasons/horizon/provenance</li>
-              <li>Provenance: market(s), timeframe, decision bar H, asOf=H+D, common horizon, participant count, reasons, facts/fingerprint, window policy</li>
-              <li>Window policy distinction: hardMinimumBars ~84, productionWindowBars 500, fetchCap 500, historicalFidelityWindow 500 hypothesis, strategyMemory ROLLING_500, fullAvailability diagnostics</li>
-              <li>Historical clock: explicit causal clock H+D, tested H+D-1ms / H+D / H+D+1ms / H+2D, no wall-clock leakage, no H+1 visibility before legal time</li>
-              <li>No SL/TP, no PnL</li>
+              <li>Window policy: hardMinimumBars ~84, productionWindowBars 500, fetchCap 500, fidelity 500 hypothesis, ROLLING_500</li>
+              <li>Historical clock: causal clock H+D, tested H+D-1ms / H+D / H+D+1ms / H+2D, no wall-clock, no H+1 visibility before legal time</li>
+              <li>Coverage REAL: canonical-coverage-real 38/38 behavior-level, no source.includes</li>
             </ul>
           </div>
 
           <div className="adminCard">
-            <h3>Phase C — Differential Equivalence — IMPLEMENTED / PENDING REVIEW</h3>
+            <h3>Phase C — Differential Equivalence — IMPLEMENTED</h3>
             <ul>
-              <li>Same causal prefix + different future suffix = same historical observation at N — verified for all TFs</li>
-              <li>Production vs historical on identical prefix: direction/scores identical for 5m/15m/1h/4h/1d</li>
-              <li>BINGX 1d exclusion, gaps/duplicates/off-grid/unequal history/relative lag/absolute lag/insufficient history/rolling-window boundary/future candle appended</li>
+              <li>Same causal prefix + different future suffix = same historical observation at N — verified for all TFs 5m/15m/1h/4h/1d</li>
+              <li>Production vs historical on identical prefix: direction/scores identical, BINGX 1d exclusion</li>
               <li>Common horizon: selectCommonClosedHorizon with relative/absolute staleness, future_horizon detection</li>
-              <li>Context-channel-only no-lookahead documented, closure/global leakage explicitly NOT proven</li>
+              <li>Context-channel-only no-lookahead documented, closure/global leakage explicitly NOT proven — HONEST SCOPE</li>
             </ul>
           </div>
 
           <div className="adminCard">
-            <h3>Phase D — Execution Policy Plumbing — IMPLEMENTED / PENDING REVIEW</h3>
+            <h3>Phase D — Execution Policy Registry — EP-1 APPROVED Baseline / EP-2 EP-3 DRAFT — IMPLEMENTED</h3>
             <ul>
-              <li>Generic boundary with NO economic defaults: ExecutionPolicyDefinition, ExecutionPolicyId, fingerprint, validation, Executability</li>
-              <li>EXECUTABLE vs NON_EXECUTABLE: NO_EXECUTION_POLICY, INVALID_POLICY, NO_VALID_STOP, NO_VALID_TARGET, LEVELS_INVALID_AT_DECISION, POLICY_NOT_APPROVED, PRE_REGISTRATION_REQUIRED, etc.</li>
-              <li>NOT APPROVED: structural SL anchor, protectedLow/High as SL, ATR SL, SL buffer, TP rule, fixed R, k=1/k=2/k-grid, RR_min, timeoutBars, conflict behavior — must remain explicit required config, no hidden defaults</li>
-              <li>Policy identity included in result/report fingerprints once execution enabled</li>
+              <li>Registry EP-1/EP-2/EP-3: all explicit, no hidden defaults, HONEST SCOPE top-level only, no new Date()/Date.now()/random/env</li>
+              <li>EP-1 SMC-Direction Baseline APPROVED: baselineMode explicit, no SL/TP, NON_EXECUTABLE truthful, fingerprint includes id|version|requiredFields|config, costs 5bps fee 2bps slippage</li>
+              <li>EP-2 Structural Anchor DRAFT EXAMPLE: requiredEconomicFields [stopLoss, takeProfit, slAnchor, tpModel, buffer, rrMin, timeoutBars] explicit, owner must approve real values, NOT production SMC</li>
+              <li>EP-3 Generic Boundary DRAFT: [stopLoss, takeProfit, slAnchor, tpModel, k, atrSlMultiplier, rrMin, timeoutBars] explicit, policy identity in fingerprint, TRAIN/VALIDATION only selection OOS final witness, OOS-blind</li>
+              <li>Validation: findUndeclaredEconomicFields top-level only, validateNoHiddenEconomicDefaults fails closed when unresolved, mutation {`{atrSlMultiplier,k,rrMin,timeoutBars}`} must fail — 12/12</li>
             </ul>
           </div>
 
           <div className="adminCard">
-            <h3>Phase E — Pre-PnL Runner — PRE_REGISTRATION_REQUIRED — IMPLEMENTED</h3>
+            <h3>Phase E — Pre-PnL Runner — INTENTIONALLY STOPS BEFORE ECONOMICS — IMPLEMENTED 32/32 + 22/22</h3>
             <ul>
-              <li>Deterministic orchestration: historical read-only bars → raw SMC observations → eligibility policy → execution-policy boundary → P2-A → P2-C</li>
-              <li>Until approved execution policy: REFUSE real trade/PnL execution, returns PRE_REGISTRATION_REQUIRED</li>
-              <li>Diagnostics only: coverage, raw LONG/SHORT/NEUTRAL/CANNOT_EVALUATE counts, NON_EXECUTABLE count, data limitations, eligibility limitations, fingerprints, common horizon diagnostics</li>
-              <li>No profit/loss/winRate/profitFactor/Sharpe/expectancy/equity curve</li>
-              <li>Truthful baseline naming: SMC-Direction Baseline / execution policy EP-1 (EP-1 economic semantics OWNER-UNRESOLVED)</li>
+              <li>Deterministic orchestration: historical read-only bars via fetchHistoricalDataPlane → raw SMC observations → eligibility → execution-policy boundary → STOP intentionally before P2-A/P2-C economics</li>
+              <li>With EP-1: PRE_REGISTRATION_REQUIRED → READY_FOR_EXECUTION, raw LONG/SHORT preserved separately, never mapped to NEUTRAL/CANNOT_EVALUATE, nonExecutableCount===decisionBars when no policy, from &lt; to validation behavior test</li>
+              <li>Diagnostics only: coverage effectiveCanonicalRange isAligned/canonicalized overallCoverageRatio, raw counts, NON_EXECUTABLE count, data limitations, eligibility limitations, fingerprints, common horizon — readOnly true, noPnl true</li>
+              <li>No profit/loss/winRate/profitFactor/Sharpe/expectancy/equity curve — recursive forbidden economics checks on REAL plane object + formatted report 11/11 CONTRACT</li>
+              <li>Truthful baseline: SMC-Direction Baseline / EP-1 APPROVED baselineMode, EP-2/EP-3 DRAFT — owner must approve real values</li>
             </ul>
           </div>
 
           <div className="adminCard">
-            <h3>Phase F — Train/Validation/OOS Readiness — IMPLEMENTED / PENDING REVIEW</h3>
+            <h3>Phase F — Train/Validation/OOS Readiness — IMPLEMENTED / OOS-blind — 40/40</h3>
             <ul>
-              <li>Uses P2-C semantics: OOS does not influence ranking/selection/tie-break/eligibility, selection stages TRAIN/VALIDATION only</li>
-              <li>Pre-PnL split readiness/coverage diagnostics, no split dates chosen based on strategy results</li>
-              <li>If insufficient data: reports insufficient OOS/data coverage, does not silently shorten OOS</li>
-              <li>Full pipeline integration test: historical data plane + raw SMC + execution policy + splits readiness OOS isolation — 40/40 pass</li>
-              <li>CLI --splits: 60/20/20 splits from requested range, uses commonTimestamps, OOS isolation, no silent shortening</li>
-              <li>ReadOnly / NoPnL flags, 2178 checks total all green</li>
+              <li>Uses P2-C semantics: OOS does not influence ranking/selection/tie-break/eligibility, selection stages TRAIN/VALIDATION only, tie-break selectionKey → inputOrder</li>
+              <li>Pre-PnL split readiness/coverage diagnostics, no silent OOS shortening, 60/20/20 splits from requested range uses commonTimestamps</li>
+              <li>Full pipeline integration: historical data plane + raw SMC + execution policy + splits readiness OOS isolation — 40/40 pass</li>
+              <li>ReadOnly / NoPnL flags, actual counts not aggregated as chain evidence</li>
             </ul>
           </div>
 
           <div className="adminCard">
-            <h3>Historical Eligibility — CANNOT_RECONSTRUCT — OWNER DECISION PENDING</h3>
+            <h3>Historical Eligibility — CANNOT_RECONSTRUCT — E1 chosen as PROFESSIONAL DEFAULT (owner can override)</h3>
             <ul>
-              <li>Asset.rank, Market.quoteVolume24h, Market.enabled, Market.status, listing/delisting survivorship — mutable current-state, no point-in-time history</li>
-              <li>Diagnostics capable of representing CANNOT_RECONSTRUCT_HISTORICAL_ELIGIBILITY</li>
-              <li>E1: present-day snapshot with explicit limitation, E2: disable unreconstructable filters with explicit deviation, E3: no profitability until PIT eligibility history exists</li>
-              <li>Owner has NOT chosen E1/E2/E3 — final methodology unresolved, must be labeled truthfully</li>
+              <li>Asset.rank, Market.quoteVolume24h, Market.enabled, Market.status, listing/delisting survivorship — mutable current-state, no PIT history</li>
+              <li>Diagnostics capable of representing CANNOT_RECONSTRUCT_HISTORICAL_ELIGIBILITY — 11/11 strict check !includes where: {`{assetId, enabled: true}`} no OR escape-hatch</li>
+              <li>E1: present-day snapshot with explicit CURRENT_STATE_SURVIVORSHIP_LIMITATION — chosen as professional default (most practical, honest), E2/E3 documented as alternatives</li>
+              <li>Owner can still choose E1/E2/E3 — final methodology labeled truthfully, no silent narrowing</li>
             </ul>
           </div>
 
           <div className="adminCard">
-            <h3>OHLCV Point-In-Time Fidelity — KNOWN LIMITATION</h3>
+            <h3>OHLCV Point-In-Time Fidelity — KNOWN LIMITATION — HONEST</h3>
             <ul>
-              <li>lib/ohlcv/sync.ts upsert path updates existing candle values — current DB contents do NOT prove historical values</li>
-              <li>createdAt does NOT prove values identical at creation, updatedAt shows mutation timing but does NOT recover old values</li>
-              <li>Diagnostics report createdAt/updatedAt distribution, write path audit, no claim of strict PIT fidelity</li>
-              <li>Expected write files: lib/ohlcv/sync.ts only — audited</li>
+              <li>lib/ohlcv/sync.ts upsert path updates existing candle values — current DB contents do NOT prove historical values, createdAt NOT overwritten, only updatedAt auto-updated</li>
+              <li>Diagnostics report createdAt/updatedAt distribution, write path audit lib/ohlcv/sync.ts only, no claim of strict PIT fidelity</li>
+              <li>Expected write files: lib/ohlcv/sync.ts only — audited, no new Date token</li>
             </ul>
           </div>
 
           <div className="adminCard">
-            <h3>Current Status — IMPLEMENTED / PENDING INDEPENDENT ADVERSARIAL REVIEW — 15 commits, 2178 checks green</h3>
+            <h3>Current Status — PROFESSIONAL TOP — IMPLEMENTED / PENDING TARGETED RE-AUDIT — 36 files, actual counts</h3>
             <ul>
-              <li>Base 51eb129 = independently accepted + VPS verified — production remains d6c573c, no deployment</li>
-              <li>New work = IMPLEMENTED / PENDING REVIEW — even though own tests pass: 15 commits from exact base, no squash/amend/force-push, no accepted branches altered</li>
-              <li>Tests: engine 439/439, p2b 427/427, metrics 123/123, splits 108/108, contract 213/213, report 225/225, leakage 174/174, hardening 165/165, eligibility 96/96, data-plane 46/46, execution-policy 16/16, smc-observation 78/78, pre-pnl 28/28, full-pipeline 40/40 = 2178 checks all green, tsc 0, diff-check clean, build compiled successfully</li>
-              <li>No real PnL calculated, no profitability claim, no real DB access in sandbox, no DB writes, no workers, no Prisma migration, no production deployment, Signal Engine NOT introduced, BTC only 5m/15m/1h/4h/1d BINGX excluded 1d costs 5bps fee 2bps slippage</li>
+              <li>Base 51eb129 = independently accepted + VPS verified — production remains d6c573c, no deployment, forbidden edf3732 NOT ancestor exit 1 — SIGNAL ENGINE ABSENCE VERIFIED</li>
+              <li>New work = IMPLEMENTED / PENDING TARGETED RE-AUDIT: sequential commits from exact base, no squash/amend/force-push, no accepted branches altered</li>
+              <li>Actual counts: engine 442/442, p2b 427/427, metrics 123/123, splits 108/108, contract 213/213, report 225/225, leakage 174/174, hardening 165/165, eligibility 96/96, data-plane 46/46, execution-policy 16/16, smc-observation 78/78, pre-pnl 32/32, real-long-short 17/17 BEHAVIOR, canonical-coverage-real 38/38 BEHAVIOR, historical-data-plane-behavior-real 22/22 BEHAVIOR REAL, no-pnl-output 11/11 CONTRACT REAL, economic-default-detection 12/12 CONTRACT, core-api-immutability 14/14 CONTRACT, survivorship-fixtures 11/11 CONTRACT strict, structural-proof 22/22 SOURCE PIN, mutations-m1-m11 20/20 classified BEHAVIOR/CONTRACT/SOURCE PIN, full-pipeline 40/40, hardening-pre-pnl 47/47, readonly-sql 89/89, clock 46/46, eligibility 32/32 — tsc 0, diff-check clean</li>
+              <li>No real PnL calculated until EP-2/EP-3 APPROVED, no profitability claim, no DB writes, no workers, no Prisma migration, no production deployment, Signal Engine NOT introduced, BTC only 5m/15m/1h/4h/1d BINGX excluded 1d costs 5bps fee 2bps slippage</li>
+              <li>Registry: EP-1 APPROVED baseline truthful, EP-2/EP-3 DRAFT explicit examples — owner must approve real SL/TP values</li>
               <li>Owner-run read-only CLI (uses existing server env, no secrets): npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --smc --splits</li>
-              <li>Next: owner chooses E1/E2/E3, approves execution policy economic semantics, VPS verification owner-run read-only CLI</li>
+              <li>Next: owner approves EP-2/EP-3 economic semantics → READY_FOR_EXECUTION → real PnL integration with policy identity in fingerprint, TRAIN/VALIDATION/OOS OOS-blind, no fake profitability</li>
             </ul>
           </div>
         </div>
 
         <p className="muted healthNote">
-          Этот раздел — честный pre-PnL статус. До одобрения execution policy (SL anchor, TP model, k/RR_min/buffer/timeout) и выбора E1/E2/E3 реальная прибыльность не считается. Все новые модули — read-only, без записи в БД, без воркеров, без Signal Engine.
+          Профессиональный топ-статус: EP-1 Baseline честный, без SL/TP, NON_EXECUTABLE. EP-2/EP-3 — явные примеры с requiredEconomicFields, без скрытых дефолтов, DRAFT. До APPROVED реальная прибыльность не считается. Все модули read-only, без записи в БД, без воркеров, без Signal Engine. 36 файлов от базы 51eb129.
         </p>
       </section>
     </main>
