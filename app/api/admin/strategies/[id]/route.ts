@@ -45,6 +45,7 @@ export async function PUT(
     return NextResponse.json({ error: "Отсутствует конфигурация" }, { status: 400 });
   }
 
+  // Discriminate validation by existing.slug from DB, not by body.slug.
   const { prisma } = await import("@/lib/prisma");
   const existing = await prisma.strategy.findUnique({ where: { id: strategyId } });
   if (!existing) {

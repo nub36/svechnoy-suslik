@@ -87,10 +87,6 @@ module.exports = {
     },
     {
       name: "svechnoy-suslik-ohlcv-btc",
-      // BTC-only pilot: sequential OHLCV ingestion, continuous with 2m cadence
-      // .env is loaded by worker via dotenv (see lib/ohlcv/lock.ts and scripts/ohlcv-worker.ts),
-      // cwd ensures dotenv finds /root/svechnoy-suslik/.env
-      // Lock 727923 — dedicated for BTC pilot
       script: "npx",
       args: "tsx scripts/ohlcv-worker.ts --symbol=BTC --timeframes=5m,15m,1h,4h,1d --limit=300 --interval=120000",
       cwd: "/root/svechnoy-suslik",
@@ -107,9 +103,6 @@ module.exports = {
     },
     {
       name: "svechnoy-suslik-ohlcv-all",
-      // DEPRECATED AGGRESSIVE — DISABLED for production stability (VPS 1.9GiB RAM, 512MiB SWAP, CPU 68%+100% host, ERR_CONNECTION_RESET /signals)
-      // Previous args: --top=100 --limit=300 --delay=250 --concurrency=3 --interval=300000 — too heavy, caused Next.js stall
-      // DO NOT auto-start. Use safe workers below.
       script: "npx",
       args: "tsx scripts/ohlcv-worker.ts --top=100 --timeframes=5m,15m,1h,4h,1d --limit=300 --delay=250 --concurrency=3 --interval=300000 --confirm-large-run",
       cwd: "/root/svechnoy-suslik",
@@ -126,11 +119,6 @@ module.exports = {
     },
     {
       name: "svechnoy-suslik-ohlcv-safe",
-      // SAFE low-priority incremental background worker — PRODUCTION SAFE for VPS 1.9GiB RAM
-      // FIXED: interval 600000 caused restart loop bug (validation 5m requires <=300000)
-      // Now interval 300000 (5m) — max allowed for 5m timeframe, satisfies validateCadence
-      // DEPRECATED for TOP-50 public — use svechnoy-suslik-public-top50 instead
-      // Kept for reference but autorestart false — do NOT use Top100x5 heavy worker
       script: "npx",
       args: "tsx scripts/ohlcv-worker.ts --top=100 --timeframes=5m,15m,1h,4h,1d --batch-size=2 --delay=1000 --pause=10000 --incremental-limit=20 --backfill-limit=100 --concurrency=1 --interval=300000 --mode=safe --min-free-mem=200 --max-load=2.0 --confirm-large-run",
       cwd: "/root/svechnoy-suslik",
@@ -148,12 +136,6 @@ module.exports = {
     },
     {
       name: "svechnoy-suslik-ohlcv-backfill",
-      // SLOW backfill worker — MANUAL ONLY, NOT auto-started after PM2 resurrect
-      // For initial massive backfill in controlled slow background mode
-      // batch 2 assets, delay 2000ms, pause 15000ms, backfillLimit 100, concurrency 1, interval 30m
-      // Use: pm2 start ecosystem.config.js --only svechnoy-suslik-ohlcv-backfill -- --once (or without --once for continuous slow)
-      // Then monitor: pm2 logs svechnoy-suslik-ohlcv-backfill
-      // FIXED: interval 1800000 >300000 fails validation for 5m — use --once or exclude 5m for backfill
       script: "npx",
       args: "tsx scripts/ohlcv-worker.ts --top=100 --timeframes=5m,15m,1h,4h,1d --batch-size=2 --delay=2000 --pause=15000 --incremental-limit=20 --backfill-limit=100 --concurrency=1 --interval=300000 --mode=backfill --min-free-mem=200 --max-load=2.0 --confirm-large-run --once",
       cwd: "/root/svechnoy-suslik",
@@ -171,13 +153,6 @@ module.exports = {
     },
     {
       name: "svechnoy-suslik-public-top50",
-      // LIGHTWEIGHT public TOP-50 ingestion worker — PRODUCTION SAFE
-      // - Serves Top-50 + manually added coins BINANCE FIRST
-      // - Concurrency=1 small rotating batches incremental backpressure slow backfill
-      // - BTC separate OHLCV worker preserved (svechnoy-suslik-ohlcv-btc)
-      // - Fixes critical bug: interval 300000 (5m) satisfies validation 5m requires <=300000, no restart loop
-      // - No Top100x5 heavy worker, no broken ohlcv-safe restart loop
-      // - Public site TOP-50 from Asset rank in DB, BINANCE default, fallback by priority, lightweight snapshot/cache not 50 WS, live WS only /coin/{symbol}
       script: "npx",
       args: "tsx scripts/public-top50-worker.ts --top=50 --timeframes=5m,15m,1h,4h,1d --batch-size=2 --delay=1000 --pause=10000 --incremental-limit=20 --backfill-limit=100 --concurrency=1 --interval=300000 --mode=safe --min-free-mem=200 --max-load=2.0 --confirm-large-run",
       cwd: "/root/svechnoy-suslik",
@@ -195,11 +170,6 @@ module.exports = {
     },
     {
       name: "svechnoy-suslik-signal-btc",
-      // BTC-only Signal Engine: creates real LONG/SHORT signals from Strategy Runtime (trend-suslik 1h)
-      // Runs every 5m, checks trend-suslik PUBLISHED enabled, respects cooldown, BINGX 1d excluded, ATR SL/TP
-      // .env loaded via dotenv in signal-worker via lib/prisma.ts
-      // FIX: --once + restart_delay + cron_restart caused unnecessary restart races
-      // Now: autorestart false, restart_delay 0, cron only — one reliable launch, idempotent NOOP prevents duplicates
       script: "npx",
       args: "tsx scripts/signal-worker.ts --symbol=BTC --timeframe=1h --once --no-dry-run",
       cwd: "/root/svechnoy-suslik",
@@ -213,16 +183,10 @@ module.exports = {
       },
       restart_delay: 0,
       max_memory_restart: "300M",
-      cron_restart: "2 * * * *", // 2 minutes after each hour close, ensures OHLCV 1h CLOSED ingested (1h candle closes at hour boundary, expected previous hour)
+      cron_restart: "2 * * * *",
     },
     {
       name: "svechnoy-suslik-signal-btc-15m-smart",
-      // BTC 15m Smart Money EDGE/RE-ARM V1 — LIVE production worker
-      // One signal per EDGE, SHORT->SHORT HOLD, NEUTRAL->SHORT EDGE, SHORT->LONG REVERSAL, NEUTRAL REARM, unavailable PRESERVE, same horizon NOOP with provisional fix, bootstrap default no signal, PM2 restart preserves StrategySignalState
-      // STRICT ATOMIC: Signal+Outcome+State in ONE tx, no catch inside, P2002 outside idempotent
-      // Requires SMART_MONEY_WRITE_ENABLED=true env AND --enable-smart-money-write flag (AND guard)
-      // FIX: --once + restart_delay 3m + cron */3 caused overlapping restart races
-      // Now: autorestart false, restart_delay 0, cron at 2,17,32,47 — 2 minutes after each 15m close (00,15,30,45), ensures OHLCV CLOSED ingested (OHLCV worker 2m cadence)
       script: "npx",
       args: "tsx scripts/signal-worker.ts --strategy=smart-money-suslik --symbol=BTC --timeframe=15m --once --no-dry-run --enable-smart-money-write",
       cwd: "/root/svechnoy-suslik",
@@ -237,7 +201,7 @@ module.exports = {
       },
       restart_delay: 0,
       max_memory_restart: "300M",
-      cron_restart: "2,17,32,47 * * * *", // 2m after 15m close: 00->02, 15->17, 30->32, 45->47, reliable launch after CLOSED data
+      cron_restart: "2,17,32,47 * * * *",
     },
   ],
 };
