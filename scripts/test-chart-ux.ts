@@ -505,6 +505,22 @@ for (const token of ["fitContent", "scrollToRealTime", "setVisibleRange(", "scro
 ok(/subscribeVisibleLogicalRangeChange/.test(chartCode), "chart: подгрузка истории влево сохранена (range.from <= 2)");
 ok(/range\.from <= 2/.test(chartCode), "chart: триггер подгрузки истории не менялся");
 ok(/mergeOlder\(/.test(chartCode), "chart: слияние истории — прежний lib/chart/history (semantics не менялись)");
+ok(
+  /isLiveHistoryRequest\(/.test(loadOlderCode),
+  "loadOlder: устаревший ответ сверяется с текущим generation/рынком/ТФ"
+);
+ok(
+  /historyPageMatchesWindow\(/.test(loadOlderCode),
+  "loadOlder: payload биржи/ТФ сверяется с окном (чужой рынок не сливается)"
+);
+ok(
+  /ownsAbortController\(/.test(loadOlderCode),
+  "loadOlder: finally не гасит чужой in-flight (смена рынка во время fetch)"
+);
+ok(
+  /olderAbortRef\.current = null/.test(chartCode),
+  "loadCandles: abort истории обнуляет контроллер, чтобы finally старого запроса молчал"
+);
 
 // fitContent остаётся ТОЛЬКО на свежей загрузке окна.
 const applyDataCode = stripComments(

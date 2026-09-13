@@ -185,3 +185,118 @@ export function candlesIntegrityOk(
 
   return true;
 }
+
+/* ---------- гонки подгрузки истории ---------- */
+
+/**
+ * Идентичность окна графика на момент СТАРТА запроса истории.
+ *
+ * generation — requestId основной загрузки свечей: смена актива /
+ * биржи / таймфрейма его увеличивает. Устаревший prepend не имеет
+ * права слиться в уже другое окно.
+ */
+export type HistoryWindowIdentity = {
+  generation: number;
+  symbol: string;
+  exchange: string;
+  timeframe: string;
+};
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/**
+ * Жив ли in-flight запрос истории относительно текущего окна.
+ *
+ * false — ответ применять нельзя: сменилось поколение (новая
+ * loadCandles), актив, биржа или таймфрейм. Пустые/битые поля
+ * тоже false: лучше отбросить, чем слить чужие свечи.
+ */
+export function isLiveHistoryRequest(
+  started: HistoryWindowIdentity | null | undefined,
+  live: HistoryWindowIdentity | null | undefined
+): boolean {
+  if (
+    started === null ||
+    started === undefined ||
+    live === null ||
+    live === undefined
+  ) {
+    return false;
+  }
+
+  if (
+    !Number.isInteger(started.generation) ||
+    !Number.isInteger(live.generation) ||
+    started.generation !== live.generation
+  ) {
+    return false;
+  }
+
+  if (
+    !nonEmptyString(started.symbol) ||
+    !nonEmptyString(started.exchange) ||
+    !nonEmptyString(started.timeframe) ||
+    !nonEmptyString(live.symbol) ||
+    !nonEmptyString(live.exchange) ||
+    !nonEmptyString(live.timeframe)
+  ) {
+    return false;
+  }
+
+  return (
+    started.symbol === live.symbol &&
+    started.exchange === live.exchange &&
+    started.timeframe === live.timeframe
+  );
+}
+
+/**
+ * Страница истории принадлежит текущему окну: биржа и таймфрейм
+ * ответа совпадают с запросом. symbol в payload свечей нет
+ * (только market.exchange / timeframe) — его сверяет
+ * isLiveHistoryRequest по URL-параметрам запроса.
+ */
+export function historyPageMatchesWindow(
+  page:
+    | {
+        market?: { exchange?: string } | null;
+        timeframe?: string | null;
+      }
+    | null
+    | undefined,
+  exchange: string,
+  timeframe: string
+): boolean {
+  if (page === null || page === undefined || typeof page !== "object") {
+    return false;
+  }
+
+  if (!nonEmptyString(exchange) || !nonEmptyString(timeframe)) {
+    return false;
+  }
+
+  return (
+    page.market?.exchange === exchange && page.timeframe === timeframe
+  );
+}
+
+/**
+ * finally подгрузки не должен гасить ЧУЖОЙ in-flight запрос:
+ * abort старого fetch + старт нового loadOlder может обогнать
+ * finally старого, и loadingOlderRef/индикатор сбросились бы
+ * посреди живой подгрузки.
+ */
+export function ownsAbortController(
+  active: unknown,
+  self: unknown
+): boolean {
+  return (
+    active !== null &&
+    active !== undefined &&
+    self !== null &&
+    self !== undefined &&
+    active === self
+  );
+}

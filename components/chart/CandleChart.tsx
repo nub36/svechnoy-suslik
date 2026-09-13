@@ -29,8 +29,11 @@ import {
 } from "@/lib/indicators";
 import {
   candlesIntegrityOk,
+  historyPageMatchesWindow,
+  isLiveHistoryRequest,
   mergeOlder,
   nextStatusAfterListFailure,
+  ownsAbortController,
   resolveSymbolFromList
 } from "@/lib/chart/history";
 import { candleFreshness } from "@/lib/data/freshness";
@@ -1747,8 +1750,11 @@ export default function CandleChart({
       }
 
       // смена окна: обрываем подгрузку истории
-      // и начинаем отсчёт заново
+      // и начинаем отсчёт заново. olderAbortRef обнуляется,
+      // чтобы finally старого loadOlder не сбросил флаги уже
+      // нового запроса (см. ownsAbortController).
       olderAbortRef.current?.abort();
+      olderAbortRef.current = null;
       loadingOlderRef.current = false;
       setHistoryLoading(false);
       setHistoryEnded(false);
@@ -1788,6 +1794,16 @@ export default function CandleChart({
               "Не удалось загрузить свечи"
           );
 
+          return;
+        }
+
+        if (
+          !historyPageMatchesWindow(
+            data,
+            exchange,
+            timeframe
+          )
+        ) {
           return;
         }
 
@@ -1855,6 +1871,20 @@ export default function CandleChart({
         return;
       }
 
+      const started = {
+        generation: requestIdRef.current,
+        symbol,
+        exchange,
+        timeframe
+      };
+
+      const liveWindow = () => ({
+        generation: requestIdRef.current,
+        symbol,
+        exchange,
+        timeframe
+      });
+
       loadingOlderRef.current = true;
       setHistoryLoading(true);
 
@@ -1873,6 +1903,25 @@ export default function CandleChart({
           await response.json();
 
         if (controller.signal.aborted) {
+          return;
+        }
+
+        if (
+          !isLiveHistoryRequest(
+            started,
+            liveWindow()
+          )
+        ) {
+          return;
+        }
+
+        if (
+          !historyPageMatchesWindow(
+            data,
+            exchange,
+            timeframe
+          )
+        ) {
           return;
         }
 
@@ -1895,6 +1944,13 @@ export default function CandleChart({
           data.candles
         );
 
+        if (
+          controller.signal.aborted ||
+          !isLiveHistoryRequest(started, liveWindow())
+        ) {
+          return;
+        }
+
         // Добавлять нечего — истории дальше нет,
         // прекращаем запросы.
         if (candlesMerge.added === 0) {
@@ -1909,15 +1965,6 @@ export default function CandleChart({
           data.volume
         );
 
-        rawCandlesRef.current =
-          candlesMerge.merged;
-        volumeRawRef.current =
-          volumeMerge.merged;
-        oldestTimeRef.current =
-          candlesMerge.merged[0].time * 1000;
-        hasMoreRef.current =
-          data.hasMore === true;
-
         // Полный пересчёт индикаторов по объединённому
         // окну тем же слоем lib/indicators.
         const indicators =
@@ -1929,6 +1976,22 @@ export default function CandleChart({
           volume: volumeMerge.merged,
           indicators
         };
+
+        if (
+          controller.signal.aborted ||
+          !isLiveHistoryRequest(started, liveWindow())
+        ) {
+          return;
+        }
+
+        rawCandlesRef.current =
+          candlesMerge.merged;
+        volumeRawRef.current =
+          volumeMerge.merged;
+        oldestTimeRef.current =
+          candlesMerge.merged[0].time * 1000;
+        hasMoreRef.current =
+          data.hasMore === true;
 
         dataRef.current = merged;
         rebuildLegendMaps(merged);
@@ -2068,14 +2131,27 @@ export default function CandleChart({
           return;
         }
 
+        if (
+          !isLiveHistoryRequest(started, liveWindow())
+        ) {
+          return;
+        }
+
         // Сеть/сервер недоступны: не зацикливаемся,
         // история остаётся как есть, сообщаем отдельно.
         hasMoreRef.current = false;
         setHistoryEnded(true);
         setHistoryError(true);
       } finally {
-        loadingOlderRef.current = false;
-        setHistoryLoading(false);
+        if (
+          ownsAbortController(
+            olderAbortRef.current,
+            controller
+          )
+        ) {
+          loadingOlderRef.current = false;
+          setHistoryLoading(false);
+        }
       }
     },
     [

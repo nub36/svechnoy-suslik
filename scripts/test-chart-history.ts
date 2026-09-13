@@ -8,12 +8,16 @@
 
 import {
   candlesIntegrityOk,
+  historyPageMatchesWindow,
+  isLiveHistoryRequest,
   mergeOlder,
   nextStatusAfterListFailure,
+  ownsAbortController,
   parseHistoryLimit,
   resolveSymbolFromList,
   validateCursor,
-  type ChartStatus
+  type ChartStatus,
+  type HistoryWindowIdentity
 } from "../lib/chart/history";
 
 let passed = 0;
@@ -279,6 +283,115 @@ ok(
 ok(
   candlesIntegrityOk(undefined, [{ time: 1 }]) === true,
   "integrity: count нет, свечи есть — ОК"
+);
+
+/* ---------- гонки подгрузки истории ---------- */
+
+const btc1h: HistoryWindowIdentity = {
+  generation: 4,
+  symbol: "BTC",
+  exchange: "BINANCE",
+  timeframe: "1h"
+};
+
+ok(
+  isLiveHistoryRequest(btc1h, { ...btc1h }) === true,
+  "race: тот же generation/символ/биржа/ТФ — живой запрос"
+);
+ok(
+  isLiveHistoryRequest(btc1h, { ...btc1h, generation: 5 }) === false,
+  "race: смена generation (loadCandles) — stale"
+);
+ok(
+  isLiveHistoryRequest(btc1h, { ...btc1h, symbol: "ETH" }) === false,
+  "race: смена актива — stale"
+);
+ok(
+  isLiveHistoryRequest(btc1h, { ...btc1h, exchange: "BYBIT" }) === false,
+  "race: смена биржи — stale"
+);
+ok(
+  isLiveHistoryRequest(btc1h, { ...btc1h, timeframe: "4h" }) === false,
+  "race: смена таймфрейма — stale"
+);
+ok(
+  isLiveHistoryRequest(null, btc1h) === false,
+  "race: started=null — не живой"
+);
+ok(
+  isLiveHistoryRequest(btc1h, null) === false,
+  "race: live=null — не живой"
+);
+ok(
+  isLiveHistoryRequest(
+    { generation: 1, symbol: "", exchange: "BINANCE", timeframe: "1h" },
+    { generation: 1, symbol: "", exchange: "BINANCE", timeframe: "1h" }
+  ) === false,
+  "race: пустой symbol — не живой"
+);
+ok(
+  isLiveHistoryRequest(
+    { generation: 1.5, symbol: "BTC", exchange: "BINANCE", timeframe: "1h" },
+    { generation: 1.5, symbol: "BTC", exchange: "BINANCE", timeframe: "1h" }
+  ) === false,
+  "race: дробный generation — не живой"
+);
+
+ok(
+  historyPageMatchesWindow(
+    { market: { exchange: "BINANCE" }, timeframe: "1h" },
+    "BINANCE",
+    "1h"
+  ) === true,
+  "race: страница истории совпадает с окном"
+);
+ok(
+  historyPageMatchesWindow(
+    { market: { exchange: "BINANCE" }, timeframe: "1h" },
+    "BYBIT",
+    "1h"
+  ) === false,
+  "race: чужая биржа в payload — отброшена"
+);
+ok(
+  historyPageMatchesWindow(
+    { market: { exchange: "BINANCE" }, timeframe: "4h" },
+    "BINANCE",
+    "1h"
+  ) === false,
+  "race: чужой ТФ в payload — отброшен"
+);
+ok(
+  historyPageMatchesWindow(null, "BINANCE", "1h") === false,
+  "race: пустой payload — отброшен"
+);
+ok(
+  historyPageMatchesWindow(
+    { market: { exchange: "BINANCE" }, timeframe: "1h" },
+    "",
+    "1h"
+  ) === false,
+  "race: пустая биржа окна — отброшен"
+);
+
+const controllerA = { id: "a" };
+const controllerB = { id: "b" };
+
+ok(
+  ownsAbortController(controllerA, controllerA) === true,
+  "race: finally принадлежит своему контроллеру"
+);
+ok(
+  ownsAbortController(controllerB, controllerA) === false,
+  "race: finally чужого контроллера не гасит новый in-flight"
+);
+ok(
+  ownsAbortController(null, controllerA) === false,
+  "race: обнулённый abort-ref — finally молчит"
+);
+ok(
+  ownsAbortController(controllerA, null) === false,
+  "race: self=null — finally молчит"
 );
 
 /* ---------- итог ---------- */
