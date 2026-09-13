@@ -4187,7 +4187,7 @@ H) Admin/backtests UI truthful readiness (no fake profitability), docs/runbooks
 - No DB writes: grep INSERT/UPDATE/DELETE/UPSERT in lib/backtest only allowlist comments, read-only-sql.ts enforces SELECT-only
 - No PnL: grep netPnl/profitFactor/sharpe/winRate/expectancy in pre-pnl-runner absent
 - No Signal Engine: lib/signals absent, signal-worker absent, test-signal-engine absent, merge-base --is-ancestor edf3732 HEAD exit 1 verified
-- Owner-run CLI: DATABASE_URL=... npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --smc --splits
+- Owner-run CLI (uses existing env, no secrets): npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --smc --splits
 
 **Status:** IMPLEMENTED / PENDING INDEPENDENT ADVERSARIAL REVIEW — no PnL, no DB writes, no Signal Engine, BTC only 5m/15m/1h/4h/1d, BINGX excluded 1d, costs 5bps fee 2bps slippage, no profitability claims, VPS verification pending.
 
