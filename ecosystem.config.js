@@ -106,7 +106,7 @@ module.exports = {
     },
     {
       name: "svechnoy-suslik-signal-btc",
-      // BTC-only Signal Engine: creates real LONG/SHORT signals from Strategy Runtime
+      // BTC-only Signal Engine: creates real LONG/SHORT signals from Strategy Runtime (trend-suslik 1h)
       // Runs every 5m, checks trend-suslik PUBLISHED enabled, respects cooldown, BINGX 1d excluded, ATR SL/TP
       // .env loaded via dotenv in signal-worker via lib/prisma.ts
       script: "npx",
@@ -123,6 +123,29 @@ module.exports = {
       restart_delay: 300000, // 5m between runs — conservative for 1h timeframe with cooldown 1
       max_memory_restart: "300M",
       cron_restart: "*/5 * * * *", // Also restart every 5m via cron as backup
+    },
+    {
+      name: "svechnoy-suslik-signal-btc-15m-smart",
+      // BTC 15m Smart Money EDGE/RE-ARM V1 — LIVE production worker
+      // One signal per EDGE, SHORT->SHORT HOLD, NEUTRAL->SHORT EDGE, SHORT->LONG REVERSAL, NEUTRAL REARM, unavailable PRESERVE, same horizon NOOP, bootstrap default no signal, PM2 restart preserves StrategySignalState
+      // STRICT ATOMIC: Signal+Outcome+State in ONE tx, no catch inside, P2002 outside idempotent
+      // Requires SMART_MONEY_WRITE_ENABLED=true env AND --enable-smart-money-write flag (AND guard)
+      // Runs every 3m for 15m timeframe (conservative, checks CLOSED 15m quorum 3/5)
+      script: "npx",
+      args: "tsx scripts/signal-worker.ts --strategy=smart-money-suslik --symbol=BTC --timeframe=15m --once --no-dry-run --enable-smart-money-write",
+      cwd: "/root/svechnoy-suslik",
+      interpreter: "none",
+      instances: 1,
+      exec_mode: "fork",
+      autorestart: true,
+      watch: false,
+      env: {
+        NODE_ENV: "production",
+        SMART_MONEY_WRITE_ENABLED: "true",
+      },
+      restart_delay: 180000, // 3m between runs — for 15m timeframe
+      max_memory_restart: "300M",
+      cron_restart: "*/3 * * * *", // Every 3m via cron backup, ensures new CLOSED 15m horizon processed
     },
   ],
 };
