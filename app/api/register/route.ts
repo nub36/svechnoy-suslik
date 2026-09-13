@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
-import { prisma } from "@/lib/prisma";
+
+export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   try {
+    const { prisma } = await import("@/lib/prisma");
     const body = await request.json();
 
     const name = String(body.name ?? "").trim();

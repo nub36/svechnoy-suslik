@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
-import { prisma } from "@/lib/prisma";
 import { validateTrendSuslikConfig } from "@/lib/strategies/config";
 import { validateSmartMoneyRuntime } from "@/lib/strategies/smart-money";
+
+export const dynamic = "force-dynamic";
 
 async function isAdmin() {
   const session = await auth();
@@ -28,6 +29,7 @@ export async function GET(
 
   const { id } = await context.params;
 
+  const { prisma } = await import("@/lib/prisma");
   const strategy =
     await prisma.strategy.findUnique({
       where: {
@@ -82,6 +84,7 @@ export async function PUT(
 
   // Discriminate validation by existing.slug from DB, not by body.slug.
   // Client cannot change slug/version via body — those fields are ignored.
+  const { prisma } = await import("@/lib/prisma");
   const existing = await prisma.strategy.findUnique({
     where: { id: strategyId },
   });
