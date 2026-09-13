@@ -90,6 +90,7 @@ module.exports = {
       // BTC-only pilot: sequential OHLCV ingestion, continuous with 2m cadence
       // .env is loaded by worker via dotenv (see lib/ohlcv/lock.ts and scripts/ohlcv-worker.ts),
       // cwd ensures dotenv finds /root/svechnoy-suslik/.env
+      // Lock 727923 — dedicated for BTC pilot
       script: "npx",
       args: "tsx scripts/ohlcv-worker.ts --symbol=BTC --timeframes=5m,15m,1h,4h,1d --limit=300 --interval=120000",
       cwd: "/root/svechnoy-suslik",
@@ -103,6 +104,31 @@ module.exports = {
       },
       restart_delay: 5000,
       max_memory_restart: "300M",
+    },
+    {
+      name: "svechnoy-suslik-ohlcv-all",
+      // Generic scalable ingestion for ALL ACTIVE coins (top 100)
+      // Universe from PostgreSQL: ACTIVE assets + ACTIVE SPOT USDT markets
+      // Bounded concurrency 3, rate limiting 250ms per exchange, retry/backoff, no overlapping via advisory lock 727924
+      // Incremental updates (filter >= last openTime), initial backfill 300 candles per market×tf
+      // Exclusions preserved: BINGX 1d excluded
+      // Does NOT break BTC ingestion: separate lock key, idempotent upsert
+      // Start with small concurrency and measure duration/error rate
+      // API estimate: top100 ~ 5 markets avg *5 tf = 2500 tasks, concurrency 3, delay 250ms => ~10-15min per pass, interval 5m ensures continuous but pass may overlap — lock prevents overlapping, next pass waits
+      // For production, recommended to start with --top=50 first, then 100 after measuring
+      script: "npx",
+      args: "tsx scripts/ohlcv-worker.ts --top=100 --timeframes=5m,15m,1h,4h,1d --limit=300 --delay=250 --concurrency=3 --interval=300000 --confirm-large-run",
+      cwd: "/root/svechnoy-suslik",
+      interpreter: "none",
+      instances: 1,
+      exec_mode: "fork",
+      autorestart: true,
+      watch: false,
+      env: {
+        NODE_ENV: "production",
+      },
+      restart_delay: 10000,
+      max_memory_restart: "500M",
     },
     {
       name: "svechnoy-suslik-signal-btc",
