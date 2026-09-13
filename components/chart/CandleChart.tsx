@@ -1475,9 +1475,15 @@ export default function CandleChart({
       const panes = chart.panes();
 
       if (panes.length >= 3) {
-        panes[0].setStretchFactor(4);
-        panes[1].setStretchFactor(1.6);
-        panes[2].setStretchFactor(1.6);
+        // Пропорции по высоте: ГЛАВНАЯ панель (свечи) получает 60%
+        // площади трёх панелей (3 : 1 : 1). С прежним 4 : 1.6 : 1.6 при
+        // контейнере 360..560px на свечи оставалось ~311px — главный
+        // контент выглядел сплющенным относительно индикаторов.
+        // Разделители панелей пользователь двигает сам (enableResize),
+        // пересчёт геометрии идёт штатной подпиской sizeChange.
+        panes[0].setStretchFactor(3);
+        panes[1].setStretchFactor(1);
+        panes[2].setStretchFactor(1);
       }
     } catch {
       // пропорции панелей не критичны

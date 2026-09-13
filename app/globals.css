@@ -1216,7 +1216,13 @@ td:nth-child(2) {
 }
 
 .chartContainer {
-  height: clamp(360px, 58vh, 560px);
+  /*
+   * Высота графика: свечи — главный контент, 58vh/560px максимум
+   * обрезал основную панель на ноутбуках. 68vh с потолком 700px;
+   * пропорции панелей (60% свечам) задаёт setStretchFactor в
+   * CandleChart, разделители панелей двигаются пользователем.
+   */
+  height: clamp(420px, 68vh, 700px);
   width: 100%;
 }
 
@@ -1275,7 +1281,7 @@ td:nth-child(2) {
   }
 
   .chartContainer {
-    height: 340px;
+    height: 400px;
   }
 }
 

@@ -421,7 +421,10 @@ ok(
   /\.chartLegend \{/.test(narrowReset),
   "CSS 430px: у легенды есть отдельное responsive-правило"
 );
-ok(/height: clamp\(360px, 58vh, 560px\)/.test(cssCode), "CSS: высота контейнера графика (responsive) не менялась");
+ok(
+  /height: clamp\(420px, 68vh, 700px\)/.test(cssCode),
+  "CSS: высота контейнера графика 420..700px (68vh) — chart height fix (владелец: основная панель не должна обрезаться)"
+);
 
 /* ================================================================ */
 /* 3. Ручная история: viewport не сбрасывается                       */
@@ -1717,10 +1720,36 @@ ok(
   /\}, \[applyChartTheme, renderLegendAt, applyChartMetrics\]\);/.test(chartCode),
   "chart: эффект создания графика по-прежнему создаёт график один раз"
 );
-ok(
-  /setStretchFactor\(4\)/.test(chartCode),
-  "chart: stretch-фактор основной панели не менялся"
-);
+/*
+ * Высота ГЛАВНОЙ панели — целевое поведение после chart height fix:
+ * свечи получают не менее 60% площади трёх панелей (3:1:1), RSI/MACD —
+ * равные меньшие доли. Прежний литеральный пин setStretchFactor(4)
+ * закрыт этим же фиксом по решению владельца; проверляется семантика
+ * пропорций, а не конкретная четвёрка.
+ */
+{
+  const stretches = [
+    ...chartCode.matchAll(/setStretchFactor\((\d+(?:\.\d+)?)\)/g)
+  ].map((m) => Number(m[1]));
+
+  eq(stretches.length, 3, "chart: три stretch-фактора (свечи, RSI, MACD)");
+  ok(
+    stretches[0] > stretches[1] && stretches[0] > stretches[2],
+    "chart: основная панель (свечи) имеет наибольшую долю высоты"
+  );
+  eq(
+    stretches[1],
+    stretches[2],
+    "chart: панели RSI и MACD симметричны между собой"
+  );
+  ok(
+    stretches[0] / (stretches[0] + stretches[1] + stretches[2]) >= 0.6 - 1e-9,
+    `chart: доле свечей ≥ 60% площади (факт ${(
+      (stretches[0] / (stretches[0] + stretches[1] + stretches[2])) *
+      100
+    ).toFixed(1)}%)`
+  );
+}
 
 /* ---------- 5.9 Легенда не закрывает ценовую шкалу (прежний фикс) ---------- */
 
