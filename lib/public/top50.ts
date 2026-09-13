@@ -27,10 +27,11 @@ export async function getPublicTop50(): Promise<PublicCoin[]> {
     // Get exchange configs
     let exchangeConfigs: { exchange: string; publicEnabled: boolean; priority: number; isDefault: boolean }[] = [];
     try {
-      exchangeConfigs = await prisma.exchangeConfig.findMany({
+      const raw = await (prisma as any).exchangeConfig?.findMany?.({
         orderBy: [{ priority: "desc" }, { exchange: "asc" }],
         select: { exchange: true, publicEnabled: true, priority: true, isDefault: true },
       });
+      if (Array.isArray(raw)) exchangeConfigs = raw;
     } catch {
       // Fallback to defaults if table not yet migrated
       exchangeConfigs = [
@@ -46,23 +47,28 @@ export async function getPublicTop50(): Promise<PublicCoin[]> {
     const defaultExchange = exchangeConfigs.find(c => c.isDefault && c.publicEnabled)?.exchange || "BINANCE";
 
     // Top-50 assets from DB: rank 1..50, enabled, not archived
-    const assets = await prisma.asset.findMany({
-      where: {
-        enabled: true,
-        archivedAt: null,
-        rank: { gte: 1, lte: TOP_UNIVERSE_SIZE, not: null },
-      },
-      orderBy: { rank: "asc" },
-      take: TOP_UNIVERSE_SIZE,
-      include: {
-        markets: {
-          where: { enabled: true, status: "ACTIVE", quote: "USDT", marketType: "SPOT" },
-          select: { exchange: true, price: true, quoteVolume24h: true, volume24h: true, change24h: true },
+    let assets: any[] = [];
+    try {
+      assets = await prisma.asset.findMany({
+        where: {
+          enabled: true,
+          archivedAt: null,
+          rank: { gte: 1, lte: TOP_UNIVERSE_SIZE, not: null },
         },
-      },
-    });
+        orderBy: { rank: "asc" },
+        take: TOP_UNIVERSE_SIZE,
+        include: {
+          markets: {
+            where: { enabled: true, status: "ACTIVE", quote: "USDT", marketType: "SPOT" },
+            select: { exchange: true, price: true, quoteVolume24h: true, volume24h: true, change24h: true },
+          },
+        },
+      }) as any[];
+    } catch {
+      assets = [];
+    }
 
-    if (assets.length === 0) {
+    if (!Array.isArray(assets) || assets.length === 0) {
       // Fallback to CoinGecko if no DB assets (dev)
       return [];
     }
