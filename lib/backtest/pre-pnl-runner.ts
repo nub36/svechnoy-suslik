@@ -25,6 +25,11 @@ import {
 } from "./smc-observation";
 import type { ExecutionPolicyDefinition, ExecutionPolicyResult } from "./execution-policy";
 import { buildNonExecutableResult, validateExecutionPolicyDefinition } from "./execution-policy";
+import {
+  getPolicyById as getRegistryPolicyById,
+  listPolicies as listRegistryPolicies,
+  listApprovedPolicies as listRegistryApprovedPolicies,
+} from "./execution-policy-registry";
 import { buildHistoricalEligibilityDiagnostics, type EligibilityMethodology } from "./historical-eligibility";
 import { formatIsoUtc, getTimeframeMs } from "./timeframe";
 import { deepFreeze } from "./immutable";
@@ -62,6 +67,8 @@ export type PrePnlDiagnostics = {
     readonly commonContiguousRanges: readonly { startTime: number; endTime: number; count: number }[];
   };
   readonly executionPolicy: ExecutionPolicyResult | null;
+  readonly registryPolicies: readonly { readonly id: string; readonly version: string; readonly status: string; readonly fingerprint: string }[];
+  readonly registryApprovedCount: number;
   readonly readOnly: true;
   readonly noPnl: true;
   readonly truthfulBaselineName: string; // e.g. "SMC-Direction Baseline / execution policy EP-1"
@@ -78,6 +85,7 @@ export type PrePnlRunnerRequest = {
   readonly allCandlesPerMarket: ReadonlyMap<number, readonly SmcRawCandle[]>; // marketId -> candles ASC
   readonly decisionBarsMs: readonly number[]; // sorted ASC decision bar open times (from requested range)
   readonly executionPolicy?: ExecutionPolicyDefinition | null;
+  readonly executionPolicyRegistryId?: string | null; // EP-1/EP-2/EP-3 from registry — Phase G
   readonly eligibilityMethodology?: EligibilityMethodology | null;
   readonly isSmartMoneyRunner?: boolean;
 };
@@ -141,12 +149,26 @@ export async function runPrePnlDiagnostics(
   const rawNeutralCount = allObservations.filter((o) => o.direction === "NEUTRAL").length;
   const rawCannotEvaluateCount = allObservations.filter((o) => o.direction === "CANNOT_EVALUATE").length;
 
-  // Execution policy handling
+  // Execution policy handling — supports both direct ExecutionPolicyDefinition and registry id EP-1/EP-2/EP-3
   let executionPolicyResult: ExecutionPolicyResult | null = null;
   let status: PrePnlRunnerStatus = "PRE_REGISTRATION_REQUIRED";
 
-  if (req.executionPolicy) {
-    const validation = validateExecutionPolicyDefinition(req.executionPolicy);
+  let resolvedPolicy: ExecutionPolicyDefinition | null = null;
+
+  if (req.executionPolicyRegistryId) {
+    const registryPolicy = getRegistryPolicyById(req.executionPolicyRegistryId);
+    if (!registryPolicy) {
+      executionPolicyResult = buildNonExecutableResult("INVALID_POLICY", `Registry policy ${req.executionPolicyRegistryId} not found`);
+      status = "PRE_REGISTRATION_REQUIRED";
+    } else {
+      resolvedPolicy = registryPolicy;
+    }
+  } else if (req.executionPolicy) {
+    resolvedPolicy = req.executionPolicy;
+  }
+
+  if (resolvedPolicy && !executionPolicyResult) {
+    const validation = validateExecutionPolicyDefinition(resolvedPolicy);
     if (!validation.ok) {
       executionPolicyResult = buildNonExecutableResult("INVALID_POLICY", validation.errors.join("; "));
       status = "PRE_REGISTRATION_REQUIRED";
@@ -165,10 +187,22 @@ export async function runPrePnlDiagnostics(
         status = "READY_FOR_EXECUTION";
       }
     }
-  } else {
+  } else if (!executionPolicyResult) {
     executionPolicyResult = buildNonExecutableResult("NO_EXECUTION_POLICY", "No execution policy supplied — PRE_REGISTRATION_REQUIRED");
     status = "PRE_REGISTRATION_REQUIRED";
   }
+
+  // Registry diagnostics — always expose available policies and fingerprints (Phase G)
+  const allRegistryPolicies = listRegistryPolicies();
+  const registryPoliciesInfo = allRegistryPolicies.map((p) =>
+    Object.freeze({
+      id: p.id,
+      version: p.version,
+      status: p.status,
+      fingerprint: p.fingerprint,
+    })
+  );
+  const registryApprovedCount = listRegistryApprovedPolicies().length;
 
   // Wrap with executability
   const wrapped: ObservationWithExecutability[] = allObservations.map((obs) =>
@@ -238,12 +272,14 @@ export async function runPrePnlDiagnostics(
       ),
     }),
     executionPolicy: executionPolicyResult ? Object.freeze(executionPolicyResult) : null,
+    registryPolicies: Object.freeze(registryPoliciesInfo),
+    registryApprovedCount,
     readOnly: true as const,
     noPnl: true as const,
     truthfulBaselineName:
       executionPolicyResult?.policyId != null
-        ? `SMC-Direction Baseline / execution policy ${executionPolicyResult.policyId}`
-        : "SMC-Direction Baseline / execution policy UNRESOLVED (PRE_REGISTRATION_REQUIRED)",
+        ? `SMC-Direction Baseline / execution policy ${executionPolicyResult.policyId} fingerprint=${executionPolicyResult.policyFingerprint ?? 'null'}`
+        : `SMC-Direction Baseline / execution policy UNRESOLVED (PRE_REGISTRATION_REQUIRED) registry=${registryPoliciesInfo.map((p) => `${p.id}:${p.status}`).join(',')} approved=${registryApprovedCount}`,
   };
 
   return deepFreeze(diagnostics) as PrePnlDiagnostics;
@@ -254,6 +290,15 @@ function buildInsufficientDataDiagnostics(
   reason: string
 ): PrePnlDiagnostics {
   const eligibilityDiagnostics = buildHistoricalEligibilityDiagnostics(req.eligibilityMethodology ?? null);
+  const allRegistryPolicies = listRegistryPolicies();
+  const registryPoliciesInfo = allRegistryPolicies.map((p) =>
+    Object.freeze({
+      id: p.id,
+      version: p.version,
+      status: p.status,
+      fingerprint: p.fingerprint,
+    })
+  );
   return Object.freeze({
     status: "INSUFFICIENT_DATA" as const,
     assetSymbol: req.assetSymbol,
@@ -279,6 +324,8 @@ function buildInsufficientDataDiagnostics(
       commonContiguousRanges: Object.freeze([]),
     }),
     executionPolicy: Object.freeze(buildNonExecutableResult("NO_EXECUTION_POLICY", reason)),
+    registryPolicies: Object.freeze(registryPoliciesInfo),
+    registryApprovedCount: listRegistryApprovedPolicies().length,
     readOnly: true as const,
     noPnl: true as const,
     truthfulBaselineName: "SMC-Direction Baseline / INSUFFICIENT_DATA",
@@ -304,6 +351,9 @@ export function formatPrePnlDiagnosticsReport(diag: PrePnlDiagnostics): string {
   lines.push(`executability: NON_EXECUTABLE=${diag.nonExecutableCount} EXECUTABLE=${diag.executableCount}`);
   if (diag.executionPolicy) {
     lines.push(`executionPolicy: id=${diag.executionPolicy.policyId ?? "null"} fingerprint=${diag.executionPolicy.policyFingerprint ?? "null"} status=${diag.executionPolicy.executability.status} reason=${diag.executionPolicy.executability.reason ?? "null"}`);
+  }
+  if (diag.registryPolicies && diag.registryPolicies.length > 0) {
+    lines.push(`registryPolicies: count=${diag.registryPolicies.length} approved=${diag.registryApprovedCount} ${diag.registryPolicies.map((p) => `${p.id}(${p.status}) fp=${p.fingerprint.slice(0, 24)}...`).join(", ")}`);
   }
   lines.push("dataLimitations:");
   for (const l of diag.dataLimitations) {
