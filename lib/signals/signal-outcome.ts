@@ -434,6 +434,48 @@ export function evaluateOutcomeProgression(
 }
 
 /**
+ * Helper to compute tp1BeforeStop etc from timestamps — FIXED metric
+ * Previously aggregate counted only terminal status, missing cases where TP1 hit earlier then later STOPPED
+ */
+export function computeReplayMetrics(outcome: OutcomeState): {
+  entryTime: Date | null;
+  tp1HitAt: Date | null;
+  tp2HitAt: Date | null;
+  tp3HitAt: Date | null;
+  stopHitAt: Date | null;
+  terminalExitAt: Date | null;
+  tp1BeforeStop: boolean;
+  tp2BeforeStop: boolean;
+  tp3BeforeStop: boolean;
+} {
+  const stopHitAt = outcome.status === "STOPPED" ? outcome.exitTime : null;
+  const terminalExitAt = outcome.exitTime;
+  const tp1HitAt = outcome.tp1HitAt;
+  const tp2HitAt = outcome.tp2HitAt;
+  const tp3HitAt = outcome.tp3HitAt;
+
+  // tp1BeforeStop = tp1HitAt != null && (stopHitAt == null || tp1HitAt < stopHitAt)
+  // If TP1 and SL inside same candle and order intrabar unknown: pessimistic => SL first, so tp1BeforeStop=false for that candle if TP1 not reached earlier
+  // Our evaluateOutcomeProgression already implements pessimistic: if both in same candle, SL wins and tp1HitAt not set for that candle
+  // So timestamp comparison is sufficient
+  const tp1BeforeStop = tp1HitAt != null && (stopHitAt == null || tp1HitAt.getTime() < stopHitAt.getTime());
+  const tp2BeforeStop = tp2HitAt != null && (stopHitAt == null || tp2HitAt.getTime() < stopHitAt.getTime());
+  const tp3BeforeStop = tp3HitAt != null && (stopHitAt == null || tp3HitAt.getTime() < stopHitAt.getTime());
+
+  return {
+    entryTime: outcome.entryTime,
+    tp1HitAt,
+    tp2HitAt,
+    tp3HitAt,
+    stopHitAt,
+    terminalExitAt,
+    tp1BeforeStop,
+    tp2BeforeStop,
+    tp3BeforeStop,
+  };
+}
+
+/**
  * Full evaluation from candidate through nextBar + subsequent
  */
 export function evaluateFullOutcome(input: OutcomeEvalInput): OutcomeState {

@@ -1,15 +1,15 @@
 /**
- * TASK B — 15M FORWARD EXECUTION REPLAY
+ * TASK B — 15M FORWARD EXECUTION REPLAY — FIXED METRICS
  * Using ONLY historical SMC signals and causal evaluation
  * Simulate SMC_ATR_V1 with NEXT_BAR_OPEN, research NOT live trading
- * For each signal: entry = exact next bar OPEN on referenceExchange, ATR frozen, SL/TP, same-bar pessimistic, gap-through
  * FIXED: referenceExchange matched by exchange string only, fail-closed, no fallback, ATR from reference, no aggregatePrice for execution
+ * FIXED: replay metrics now use timestamps, not terminal status — tp1BeforeStop = tp1HitAt != null && (stopHitAt == null || tp1HitAt < stopHitAt)
  */
 
 import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
 import { SMCTIMEFRAME_MS, type SmcTimeframe } from "../lib/smc/types";
-import { buildInitialOutcome, evaluateOutcomeProgression } from "../lib/signals/signal-outcome";
+import { buildInitialOutcome, evaluateOutcomeProgression, computeReplayMetrics } from "../lib/signals/signal-outcome";
 import { defaultSmcScoringConfig } from "../lib/smc/config";
 import { selectQuorumClosedHorizon } from "../lib/strategies/common-horizon-quorum";
 import { buildSmartMoneySignalCandidate } from "../lib/signals/smart-money-candidate";
@@ -19,7 +19,7 @@ const prisma = new PrismaClient();
 
 async function main() {
   const tf: SmcTimeframe = "15m";
-  console.log(`=== TASK B — 15M FORWARD EXECUTION REPLAY — ${tf} ===`);
+  console.log(`=== TASK B — 15M FORWARD EXECUTION REPLAY (FIXED METRICS) — ${tf} ===`);
   const asset = await prisma.asset.findUnique({ where: { symbol: "BTC" }, select: { id: true, rank: true } });
   if (!asset) throw new Error("BTC asset not found");
   const markets = await prisma.market.findMany({ where: { assetId: asset.id, enabled: true, status: "ACTIVE", marketType: "SPOT", quote: "USDT" }, select: { id: true, exchange: true, exchangeSymbol: true, quoteVolume24h: true } });
@@ -48,7 +48,6 @@ async function main() {
     const freshIds = new Set(quorumSel.freshMarkets.map((f) => f.marketId));
     const freshMarkets = truncated.filter((m) => freshIds.has(m.meta.marketId));
 
-    // Need next bar for entry — collect exact next bar per market
     const expectedNext = new Date(t.getTime() + SMCTIMEFRAME_MS[tf]);
     const nextBarCandles = allCandles.map((mc) => {
       const nb = mc.candles.find((c) => c.openTime.getTime() === expectedNext.getTime());
@@ -71,74 +70,110 @@ async function main() {
     });
 
     if (candidateRes.status === "ok" && candidateRes.candidate.score >= 72) {
-      // FIXED: referenceExchange matched by exchange string only, fail-closed
       const refExchange = candidateRes.candidate.referenceExchange;
       if (refExchange == null) {
         console.log(`  Skip signal at ${candidateRes.candidate.signalCandleTime.toISOString()}: referenceExchange null — fail-closed`);
         continue;
       }
-      // Must match exactly by exchange string, no marketId comparison
       const refMarket = allCandles.find((mc) => mc.meta.exchange === refExchange);
       if (!refMarket) {
         console.log(`  Skip signal at ${candidateRes.candidate.signalCandleTime.toISOString()}: referenceExchange ${refExchange} not found — fail-closed, no fallback`);
         continue;
       }
-      // Verify selected market corresponds to candidate.referenceExchange
       if (refMarket.meta.exchange !== refExchange) {
         console.log(`  Skip: mismatch refMarket ${refMarket.meta.exchange} vs candidate ${refExchange} — fail-closed`);
         continue;
       }
-      // ATR must belong to reference exchange — candidate.atrAtSignal already from reference, verify
       if (candidateRes.candidate.atrAtSignal == null) {
         console.log(`  Skip: atrAtSignal null for ref ${refExchange}`);
         continue;
       }
-      // Next-bar OPEN must be taken from this exact reference exchange, not aggregatePrice
       const nextBar = refMarket.candles.find((c) => c.openTime.getTime() === expectedNext.getTime());
       if (!nextBar) {
         console.log(`  Skip: next bar not available on ref ${refExchange} at ${expectedNext.toISOString()}`);
         continue;
-      }
-      // Ensure we do NOT use aggregatePrice for execution
-      if (candidateRes.candidate.aggregatePrice != null && candidateRes.candidate.entry === candidateRes.candidate.aggregatePrice) {
-        console.log(`  Warning: entry equals aggregatePrice — should be nextBar OPEN only, checking`);
       }
       const subsequent = refMarket.candles.filter((c) => c.openTime.getTime() > expectedNext.getTime()).slice(0, 50);
       signals.push({ candidate: candidateRes.candidate, nextBar, subsequent });
     }
   }
 
-  console.log(`Found ${signals.length} signals for execution replay`);
-  let tp1BeforeSL = 0, tp2Hit = 0, tp3Hit = 0, stopBeforeTP1 = 0;
+  console.log(`Found ${signals.length} RAW qualified signals for execution replay (expected 11 adjacent)`);
+
+  // FIXED METRICS — store timestamps
+  type ReplayRow = {
+    signalCandleTime: Date;
+    entryTime: Date | null;
+    entry: number | null;
+    sl: number | null;
+    tp1: number | null;
+    tp2: number | null;
+    tp3: number | null;
+    tp1HitAt: Date | null;
+    tp2HitAt: Date | null;
+    tp3HitAt: Date | null;
+    stopHitAt: Date | null;
+    terminalExitAt: Date | null;
+    tp1BeforeStop: boolean;
+    tp2BeforeStop: boolean;
+    tp3BeforeStop: boolean;
+    outcome: any;
+  };
+
+  const replayRows: ReplayRow[] = [];
   let rs: number[] = [];
   let maxDD = 0, cum = 0;
 
   for (const s of signals) {
     const initial = buildInitialOutcome({ candidate: s.candidate, nextBar: s.nextBar as any });
     const final = evaluateOutcomeProgression(initial as any, s.candidate, s.subsequent as any);
-    const entry = initial.entryPrice;
-    const sl = initial.stopLoss;
-    const tp1 = initial.takeProfit1, tp2 = initial.takeProfit2, tp3 = initial.takeProfit3;
-    console.log(`\nSignal ${s.candidate.signalCandleTime.toISOString()} ${s.candidate.direction} score=${s.candidate.score} ref=${s.candidate.referenceExchange} refPrice=${s.candidate.referencePrice} (analytic only)`);
-    console.log(`  entry=${entry} (OPEN of next bar on ${s.candidate.referenceExchange}) SL=${sl} TP1=${tp1} TP2=${tp2} TP3=${tp3} atr=${s.candidate.atrAtSignal} (frozen from ${s.candidate.referenceExchange})`);
-    console.log(`  outcome=${final.status} exit=${final.exitPrice} R=${final.realizedR} bars=${final.barsHeld} maxFavR=${final.maxFavorableR} maxAdvR=${final.maxAdverseR} tp1At=${final.tp1HitAt?.toISOString()} tp2At=${final.tp2HitAt?.toISOString()} tp3At=${final.tp3HitAt?.toISOString()}`);
+    const metrics = computeReplayMetrics(final as any);
+
+    console.log(`\nSignal ${s.candidate.signalCandleTime.toISOString()} ${s.candidate.direction} score=${s.candidate.score} ref=${s.candidate.referenceExchange}`);
+    console.log(`  entryTime=${metrics.entryTime?.toISOString()} entry=${initial.entryPrice} SL=${initial.stopLoss} TP1=${initial.takeProfit1} TP2=${initial.takeProfit2} TP3=${initial.takeProfit3} atr=${s.candidate.atrAtSignal}`);
+    console.log(`  tp1HitAt=${metrics.tp1HitAt?.toISOString() ?? "null"} tp2HitAt=${metrics.tp2HitAt?.toISOString() ?? "null"} tp3HitAt=${metrics.tp3HitAt?.toISOString() ?? "null"} stopHitAt=${metrics.stopHitAt?.toISOString() ?? "null"} terminal=${metrics.terminalExitAt?.toISOString() ?? "null"} status=${final.status}`);
+    console.log(`  tp1BeforeStop=${metrics.tp1BeforeStop} tp2BeforeStop=${metrics.tp2BeforeStop} tp3BeforeStop=${metrics.tp3BeforeStop} R=${final.realizedR} bars=${final.barsHeld} maxFavR=${final.maxFavorableR} maxAdvR=${final.maxAdverseR}`);
+
+    replayRows.push({
+      signalCandleTime: s.candidate.signalCandleTime,
+      entryTime: metrics.entryTime,
+      entry: initial.entryPrice,
+      sl: initial.stopLoss,
+      tp1: initial.takeProfit1,
+      tp2: initial.takeProfit2,
+      tp3: initial.takeProfit3,
+      tp1HitAt: metrics.tp1HitAt,
+      tp2HitAt: metrics.tp2HitAt,
+      tp3HitAt: metrics.tp3HitAt,
+      stopHitAt: metrics.stopHitAt,
+      terminalExitAt: metrics.terminalExitAt,
+      tp1BeforeStop: metrics.tp1BeforeStop,
+      tp2BeforeStop: metrics.tp2BeforeStop,
+      tp3BeforeStop: metrics.tp3BeforeStop,
+      outcome: final,
+    });
 
     if (final.realizedR !== null) {
       rs.push(final.realizedR);
       cum += final.realizedR;
       maxDD = Math.min(maxDD, cum);
     }
-    if (final.status === "TP1_HIT" || final.status === "TP2_HIT" || final.status === "TP3_HIT") {
-      if (final.tp1HitAt) tp1BeforeSL++;
-    }
-    if (final.tp2HitAt) tp2Hit++;
-    if (final.tp3HitAt) tp3Hit++;
-    if (final.status === "STOPPED" && !final.tp1HitAt) stopBeforeTP1++;
   }
 
-  const total = signals.length;
-  console.log(`\n=== AGGREGATE (research, NOT live trading, sample only ${total} signals ~6 days) ===`);
-  console.log(`signals=${total} TP1-before-SL=${total ? (tp1BeforeSL / total * 100).toFixed(1) + "%" : "0"} TP2 hit=${total ? (tp2Hit / total * 100).toFixed(1) + "%" : "0"} TP3 hit=${total ? (tp3Hit / total * 100).toFixed(1) + "%" : "0"} STOP before TP1=${total ? (stopBeforeTP1 / total * 100).toFixed(1) + "%" : "0"}`);
+  // CORRECTED AGGREGATE FROM TIMESTAMPS, not terminal status
+  const total = replayRows.length;
+  const tp1BeforeSLCount = replayRows.filter((r) => r.tp1BeforeStop).length;
+  const tp2BeforeSLCount = replayRows.filter((r) => r.tp2BeforeStop).length;
+  const tp3BeforeSLCount = replayRows.filter((r) => r.tp3BeforeStop).length;
+  const stopBeforeTP1Count = replayRows.filter((r) => r.stopHitAt != null && r.tp1HitAt == null).length;
+
+  console.log(`\n=== CORRECTED AGGREGATE (from timestamps, not terminal status) ===`);
+  console.log(`RAW qualified = ${total}`);
+  console.log(`TP1-before-SL = ${tp1BeforeSLCount}/${total} = ${total ? (tp1BeforeSLCount / total * 100).toFixed(1) + "%" : "0"} — previously buggy 18.2% because counted only terminal TP statuses`);
+  console.log(`TP2-before-SL = ${tp2BeforeSLCount}/${total} = ${total ? (tp2BeforeSLCount / total * 100).toFixed(1) + "%" : "0"}`);
+  console.log(`TP3-before-SL = ${tp3BeforeSLCount}/${total} = ${total ? (tp3BeforeSLCount / total * 100).toFixed(1) + "%" : "0"}`);
+  console.log(`STOP before TP1 = ${stopBeforeTP1Count}/${total} = ${total ? (stopBeforeTP1Count / total * 100).toFixed(1) + "%" : "0"}`);
+
   if (rs.length > 0) {
     const avg = rs.reduce((a, b) => a + b, 0) / rs.length;
     const sorted = [...rs].sort((a, b) => a - b);
@@ -147,7 +182,7 @@ async function main() {
     const losses = Math.abs(rs.filter((r) => r < 0).reduce((a, b) => a + b, 0));
     const pf = losses > 0 ? wins / losses : 0;
     console.log(`avg R=${avg.toFixed(2)} median R=${median.toFixed(2)} profit factor=${pf.toFixed(2)} maxDD=${maxDD.toFixed(2)} (R)`);
-    console.log(`Do NOT claim profitability: sample only ${total} signals`);
+    console.log(`Do NOT claim profitability: sample only ${total} signals ~6 days`);
   }
 
   await prisma.$disconnect();

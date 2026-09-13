@@ -139,6 +139,12 @@ model Signal {
   commonHorizonPolicy  String?
   referenceFallback    Boolean? @default(false)
 
+  // PHASE: SMC EVENT SEMANTICS — setup vs candle
+  // One persistent bearish regime 08:15..10:45 should be ONE setup, not 11
+  // setupKey causal from BOS key, OB key, FVG key, sweep key, direction, phase — no score, no future outcome
+  // Future unique: [strategyId, symbol, timeframe, setupKey] but not applied yet, keep signalCandleTime unique for now
+  setupKey             String?
+
   strategy Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
   outcome  SignalOutcome?
 
@@ -149,10 +155,12 @@ model Signal {
   @@index([strategyId, signalCandleTime])
   @@index([createdAt])
   @@index([signalSource])
+  @@index([setupKey])
   // Unique identity: one strategy + symbol + timeframe + candle can have max ONE signal
   // Direction NOT included to prevent LONG and SHORT on same candle
   // PostgreSQL treats NULL as distinct, so legacy rows with NULL signalCandleTime are not constrained
   // New SMC signals will have NOT NULL signalCandleTime and will be constrained
+  // Future: @@unique([strategyId, symbol, timeframe, setupKey]) for persistent setup dedup
   @@unique([strategyId, symbol, timeframe, signalCandleTime])
 }
 
