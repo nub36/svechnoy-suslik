@@ -297,8 +297,27 @@ td:nth-child(2) {
 }
 
 @media (max-width: 850px) {
+  /*
+   * Навигация на узких экранах остаётся ДОСТУПНОЙ: второй строкой
+   * под брендом/действиями (раньше .nav скрывалась целиком, и
+   * «Сигналы»/«Стратегии» на мобильном были недостижимы из шапки).
+   */
+  .header {
+    height: auto;
+    min-height: 64px;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    padding: 8px 14px;
+  }
+
   .nav {
-    display: none;
+    order: 3;
+    width: 100%;
+    gap: 16px;
+    font-size: 13px;
+    padding-bottom: 2px;
+    overflow-x: auto;
+    white-space: nowrap;
   }
 
   .cards {
@@ -307,10 +326,6 @@ td:nth-child(2) {
 
   .shell {
     padding: 0 13px 40px;
-  }
-
-  .header {
-    padding: 0 14px;
   }
 
   .adminGrid {
