@@ -144,7 +144,7 @@ export default async function AdminPage() {
 
         <div className="adminStats">
           <div className="adminStatCard">
-            <span>Top активов (Top-100)</span>
+            <span>Top активов (TOP-50)</span>
             <b>
               {data
                 ? data.assets
@@ -156,7 +156,7 @@ export default async function AdminPage() {
           </div>
 
           <div className="adminStatCard">
-            <span>Рынков Top-100</span>
+            <span>Рынков TOP-50</span>
             <b>
               {data
                 ? data.universeMarkets.toLocaleString(
@@ -165,8 +165,8 @@ export default async function AdminPage() {
                 : "—"}
             </b>
             <small>
-              активные SPOT USDT-рынки активов
-              Top-100; всего активных в БД:{" "}
+              активные SPOT USDT-рынки активов TOP-50 + вручную добавленные
+              Top-50; всего активных в БД:{" "}
               {data
                 ? data.markets.toLocaleString(
                     "ru-RU"

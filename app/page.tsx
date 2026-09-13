@@ -1,9 +1,9 @@
 import MarketOverview from "@/components/MarketOverview";
 import MarketTable from "@/components/MarketTable";
-import { getTopCoins } from "@/lib/market";
+import { getPublicTop50 } from "@/lib/public/top50";
 
 export default async function Home() {
-  const coins = await getTopCoins(500);
+  const coins = await getPublicTop50();
 
   return (
     <main className="shell">
@@ -11,7 +11,7 @@ export default async function Home() {
         <div>
           <h1>Рынок под микроскопом 🔬</h1>
           <div className="muted">
-            500 крупнейших активов и алгоритмический анализ без AI
+            TOP-50 из Asset rank в DB • BINANCE default, fallback по приоритету • Лёгкий snapshot, live WS только на /coin/{`{symbol}`}
           </div>
         </div>
       </section>
@@ -19,21 +19,19 @@ export default async function Home() {
       <MarketOverview />
 
       <section className="marketSection">
-        <h2>Рынок</h2>
+        <h2>TOP-50 Публичный</h2>
         <div className="muted">
-          Стратегии следят за рынком. Суслик следит за стратегиями.
+          Формируется из Asset rank 1..50 в PostgreSQL, не хардкод. BINANCE default exchange, fallback по ExchangeConfig priority. Лёгкий серверный snapshot/cache, не 50 WS соединений.
         </div>
 
         {coins.length === 0 ? (
           <div className="tableBox">
             <p className="muted" style={{ padding: "1rem" }}>
-              Нет данных: источник рынка (CoinGecko)
-              временно недоступен. Попробуйте обновить
-              страницу позже.
+              Нет данных: TOP-50 в БД пуст или источник временно недоступен. Попробуйте позже или проверьте /admin/data
             </p>
           </div>
         ) : (
-          <MarketTable coins={coins} />
+          <MarketTable coins={coins as any} />
         )}
       </section>
     </main>

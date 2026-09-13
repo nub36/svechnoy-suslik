@@ -39,6 +39,18 @@ const ITEMS: {
     icon: SlidersHorizontal
   },
   {
+    key: "assets",
+    href: "/admin/assets",
+    label: "Активы TOP-50",
+    icon: Database
+  },
+  {
+    key: "exchanges",
+    href: "/admin/exchanges",
+    label: "Биржи",
+    icon: BarChart3
+  },
+  {
     key: "indicators",
     href: "/admin/indicators",
     label: "Индикаторы",

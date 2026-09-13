@@ -1,13 +1,13 @@
 /**
  * Тесты согласованности админки (VPS-ревью 3af152c):
- * - контракт lib/universe (Top-100 vs legacy Top-500);
+ * - контракт lib/universe (TOP-50 vs legacy Top-500);
  * - AdminNav содержит все разделы, включая
  *   «Уведомления» (/admin/notifications не orphan);
  * - все admin-страницы используют единый AdminNav;
  * - семантика Monitoring: закрытые/открытые свечи
  *   считаются РАЗДЕЛЬНО, свежесть — только по закрытым;
- * - семантика рынков: рынки Top-100 universe считаются
- *   через rank 1..100, НЕ через legacy-флаг Asset.top500;
+ * - семантика рынков: рынки TOP-50 universe считаются
+ *   через rank 1..50, НЕ через legacy-флаг Asset.top500;
  * - «Уведомления» остаются честным empty-state.
  *
  * Запуск: npx tsx scripts/test-admin-consistency.ts
@@ -52,10 +52,10 @@ function read(path: string): string {
 
 /* ---------- контракт lib/universe ---------- */
 
-ok(TOP_UNIVERSE_SIZE === 100, "universe: размер 100");
+ok(TOP_UNIVERSE_SIZE === 50, "universe: размер 50");
 ok(
-  TOP_UNIVERSE_LABEL === "Top-100",
-  "universe: метка Top-100"
+  TOP_UNIVERSE_LABEL === "TOP-50",
+  "universe: метка TOP-50"
 );
 ok(
   LEGACY_TOP500_SIZE === 500,
@@ -66,8 +66,8 @@ const rankFilter = topUniverseRankFilter();
 
 ok(
   JSON.stringify(rankFilter) ===
-    '{"rank":{"gte":1,"lte":100,"not":null}}',
-  "universe: фильтр rank 1..100 с нижней границей (не top500)"
+    '{"rank":{"gte":1,"lte":50,"not":null}}',
+  "universe: фильтр rank 1..50 с нижней границей (не top500)"
 );
 
 ok(
@@ -75,8 +75,8 @@ ok(
   "universe: GRANITSA rank=1 входит"
 );
 ok(
-  isInTopUniverse(100) === true,
-  "universe: GRANITSA rank=100 входит"
+  isInTopUniverse(50) === true,
+  "universe: GRANITSA rank=50 входит"
 );
 ok(
   isInTopUniverse(0) === false,
@@ -87,8 +87,8 @@ ok(
   "universe: GRANITSA rank=-1 не входит"
 );
 ok(
-  isInTopUniverse(101) === false,
-  "universe: GRANITSA rank=101 не входит"
+  isInTopUniverse(51) === false,
+  "universe: GRANITSA rank=51 не входит"
 );
 ok(
   isInTopUniverse(null) === false,
@@ -108,6 +108,8 @@ const nav = read(
 const expectedItems: [string, string][] = [
   ["overview", "/admin"],
   ["strategies", "/admin/strategies"],
+  ["assets", "/admin/assets"],
+  ["exchanges", "/admin/exchanges"],
   ["indicators", "/admin/indicators"],
   ["data", "/admin/data"],
   ["markets", "/admin/markets"],
@@ -223,7 +225,7 @@ ok(
   "monitoring: freshness считается от последней ЗАКРЫТОЙ"
 );
 
-/* ---------- Рынки: Top-100 через rank ---------- */
+/* ---------- Рынки: TOP-50 через rank ---------- */
 
 const overview = read("app/admin/page.tsx");
 
@@ -231,13 +233,13 @@ ok(
   read("lib/admin/overview.ts").includes(
     "asset: topUniverseRankFilter()"
   ),
-  "overview: рынки Top-100 считаются через rank-фильтр universe"
+  "overview: рынки TOP-50 считаются через rank-фильтр universe"
 );
 ok(
   monitoring.includes(
     "asset: topUniverseRankFilter()"
   ),
-  "monitoring: рынки Top-100 считаются через rank-фильтр universe"
+  "monitoring: рынки TOP-50 считаются через rank-фильтр universe"
 );
 ok(
   !overview.includes("top500") &&
@@ -245,14 +247,14 @@ ok(
   "overview/monitoring: legacy-флаг top500 в выборках рынков не используется"
 );
 ok(
-  overview.includes("Рынков Top-100") &&
+  overview.includes("Рынков TOP-50") &&
     overview.includes("всего активных в БД"),
-  "overview: оба показателя видны (Top-100 и всего в БД)"
+  "overview: оба показателя видны (TOP-50 и всего в БД)"
 );
 ok(
-  monitoring.includes("рынков Top-100") &&
+  monitoring.includes("рынков TOP-50") &&
     monitoring.includes("всего активных SPOT USDT-рынков в БД"),
-  "monitoring: оба показателя видны (Top-100 и всего в БД)"
+  "monitoring: оба показателя видны (TOP-50 и всего в БД)"
 );
 
 /* ---------- Уведомления: честный empty-state ---------- */
@@ -277,10 +279,10 @@ ok(
  * Подставная БД ЗАПОМИНАЕТ каждый вызов; тест
  * доказывает позицию КАЖДОГО запроса в promises
  * (перестановка местами не может пройти зелёной):
- * позиция 1 = Asset.count Top-100, позиция 2 =
+ * позиция 1 = Asset.count TOP-50, позиция 2 =
  * Market.count с rank-фильтром universe, позиция 3 =
  * Market.count ACTIVE/SPOT/USDT БЕЗ ограничения
- * Top-100, и т.д. по OVERVIEW_QUERY_ORDER.
+ * TOP-50, и т.д. по OVERVIEW_QUERY_ORDER.
  */
 
 type RecordedCall = {
@@ -328,7 +330,7 @@ function makeFakeDb(): {
           arg: args
         });
 
-        return Promise.resolve(100);
+        return Promise.resolve(50);
       }
     },
 
@@ -409,8 +411,8 @@ async function checkOverviewSemantics(): Promise<void> {
     JSON.stringify(names) ===
       JSON.stringify([
         "strategies",
-        "assetsTop100",
-        "marketsTop100",
+        "assetsTop50",
+        "marketsTop50",
         "marketsActiveTotal",
         "candles",
         "signalsActive",
@@ -431,21 +433,21 @@ async function checkOverviewSemantics(): Promise<void> {
     "overview[0]: strategies получает Strategy.findMany"
   );
 
-  // Позиция 1: ТОЧНО Asset.count Top-100 (не рынки!).
+  // Позиция 1: ТОЧНО Asset.count TOP-50 (не рынки!).
   const assetWhere = (calls[1]?.arg as {
     where?: Record<string, unknown>;
   })?.where;
   ok(
     calls[1].model === "Asset" &&
       calls[1].op === "count" &&
-      results[1] === 100,
-    "overview[1]: assets получает Asset.count (Top-100)"
+      results[1] === 50,
+    "overview[1]: assets получает Asset.count (TOP-50)"
   );
   ok(
     JSON.stringify(assetWhere?.rank) ===
-      '{"gte":1,"lte":100,"not":null}' &&
+      '{"gte":1,"lte":50,"not":null}' &&
       assetWhere?.enabled === true,
-    "overview[1]: where = enabled + rank 1..100 (gte/lte)"
+    "overview[1]: where = enabled + rank 1..50 (gte/lte)"
   );
 
   // Позиция 2: Market.count С rank-фильтром universe.
@@ -461,8 +463,8 @@ async function checkOverviewSemantics(): Promise<void> {
   );
   ok(
     JSON.stringify(top100Asset?.rank) ===
-      '{"gte":1,"lte":100,"not":null}',
-    "overview[2]: фильтр asset.rank 1..100 (universe, не top500)"
+      '{"gte":1,"lte":50,"not":null}',
+    "overview[2]: фильтр asset.rank 1..50 (universe, не top500)"
   );
   ok(
     top100Where?.enabled === true &&
@@ -472,7 +474,7 @@ async function checkOverviewSemantics(): Promise<void> {
     "overview[2]: enabled + ACTIVE + SPOT + USDT"
   );
 
-  // Позиция 3: Market.count БЕЗ ограничения Top-100,
+  // Позиция 3: Market.count БЕЗ ограничения TOP-50,
   // но с ACTIVE/SPOT/USDT (total active, не bare enabled).
   const totalWhere = (calls[3]?.arg as {
     where?: Record<string, unknown>;
@@ -491,7 +493,7 @@ async function checkOverviewSemantics(): Promise<void> {
     "overview[3]: total = ACTIVE/SPOT/USDT без asset-фильтра"
   );
 
-  // Ровно ДВА счётчика рынков: Top-100 + total.
+  // Ровно ДВА счётчика рынков: TOP-50 + total.
   // (отсутствие третьего = нет дубля enabled-count
   //  и неиспользуемого activeMarkets)
   ok(

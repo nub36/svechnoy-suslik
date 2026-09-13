@@ -2233,6 +2233,265 @@ UX-FIX P1-C (12.09.2026): PROGRESSIVE DISCLOSURE — UI-only, semantics
   (@prisma/client), идентично baseline.
 
 
+## §31k. Chart UX fix базового графика — легенда/ценовая шкала, навигация, ручная история (12.09.2026)
+
+UI-only фикс собственного SuslikChart поверх принятого P1-C UX (§31j).
+Semantics данных не менялись: OHLC/индикаторы считает тот же серверный
+слой `lib/indicators`, история грузится тем же `GET /api/chart/candles`
+(cursor `before`), SMC DTO/API/runtime не тронуты.
+
+**1. ЛЕГЕНДА НЕ ПЕРЕКРЫВАЕТ ПРАВУЮ ЦЕНОВУЮ ШКАЛУ**
+- Было: `.chartLegend` с `max-width: calc(100% - 16px)` считал ширину от
+  контейнера графика, ВКЛЮЧАЯ колонку правой ценовой шкалы, поэтому
+  строка «дата/O/H/L/C/объём/EMA/RSI/MACD» уезжала под ценовые подписи.
+- Стало: место резервируется по ФАКТИЧЕСКИМ измерениям
+  lightweight-charts 5.2.1, без hardcoded координат —
+  `timeScale().width()` (ширина plot-области БЕЗ колонок ценовых шкал —
+  layout-конвенция библиотеки), `priceScale("right").width()` (ширина
+  самой шкалы) и `legend.offsetLeft` (фактический левый отступ из CSS,
+  включая media-правила). Арифметика — чистая функция `legendSpace()`
+  в новом `lib/chart/chart-ux.ts` (детерминированно тестируется).
+- Результат пишется CSS-переменными на обёртку графика:
+  `--chart-legend-max-w` → `max-width` легенды (fallback — прежний
+  `calc(100% - 16px)`, поэтому до первого измерения легенда не выходит
+  за контейнер) и `--chart-price-scale-w` → кнопка «Сбросить масштаб»
+  сдвигается на ширину шкалы и не закрывает нижние ценовые подписи.
+- При нехватке горизонтального места легенда корректно переносится
+  (`flex-wrap: wrap` + `overflow-wrap: anywhere`), остаётся внутри
+  plot-области (`position: absolute` относительно `.chartWrap`) и не
+  перехватывает ввод (`pointer-events: none` — crosshair-обновления и
+  drag/zoom не ломаются). Пересчёт — штатной подпиской
+  `timeScale().subscribeSizeChange()`, при обновлении легенды и после
+  применения данных/истории; responsive-правила 430px/360px сохранены.
+
+**2. НАВИГАЦИЯ И МАСШТАБ — ШТАТНЫЕ OPTIONS БИБЛИОТЕКИ**
+Собственная «физика» drag/zoom поверх lightweight-charts НЕ писалась
+(в `CandleChart.tsx` нет `addEventListener`/wheel/pointer-обработчиков —
+проверяется тестом). Значения зафиксированы явно в
+`lib/chart/chart-ux.ts` и передаются в `createChart`:
+- `SUSLIK_HANDLE_SCROLL`: `pressedMouseMove` (click+drag внутри plot →
+  горизонтальное перемещение истории), `mouseWheel` (deltaX колеса/
+  тачпада → листание истории), `horzTouchDrag` (touch-драг),
+  `vertTouchDrag: false` — вертикальный touch-свайп отдаётся странице
+  `/coin/[symbol]`, иначе график «ловит» палец.
+- `SUSLIK_HANDLE_SCALE`: `mouseWheel` (deltaY → zoom временной шкалы в
+  точке курсора), `pinch` (touch-щипок), `axisPressedMouseMove:
+  { time: true, price: true }` — драг по оси времени растягивает/сжимает
+  временную шкалу, драг по правой ценовой шкале ШТАТНО меняет
+  вертикальный масштаб, `axisDoubleClickReset: { time: true, price: true }`
+  — двойной клик по оси возвращает auto-scale.
+- `SUSLIK_KINETIC_SCROLL`: `{ mouse: false, touch: true }` — инерция на
+  touch штатная, мышью drag точный.
+- `SUSLIK_RIGHT_PRICE_SCALE`: `visible/autoScale/alignLabels/
+  borderVisible` + `ensureEdgeTickMarksVisible: true` (крайние ценовые
+  метки не обрезаются); `mode` и `minimumWidth` не переопределяются —
+  ширина берётся измерением, а не хардкодом.
+- `SUSLIK_TIME_SCALE_NAVIGATION`: `fixLeftEdge/fixRightEdge: false`
+  (иначе подгрузка истории влево и возврат к последним барам
+  блокировались бы штатным механизмом), `rightBarStaysOnScroll: false`.
+- Сброс масштаба (кнопка «Сбросить масштаб» и двойной клик по графику):
+  `timeScale().resetTimeScale()` + `setAutoScale(true)` на правой шкале
+  КАЖДОЙ панели (`chart.panes()` — свечи/объём, RSI, MACD; панели не
+  сломаны) + `timeScale().scrollToRealTime()`.
+
+**3. РУЧНАЯ ИСТОРИЯ: VIEWPORT НЕ СБРАСЫВАЕТСЯ**
+- До `setData` запоминается `getVisibleLogicalRange()`; после
+  `mergeOlder` диапазон сдвигается на число добавленных свечей чистой
+  функцией `shiftLogicalRange(range, added)` и восстанавливается
+  `setVisibleLogicalRange()`. При `null` (диапазон неизвестен либо
+  добавлено 0 свечей) viewport не трогается ВООБЩЕ.
+- `fitContent()` остаётся только в `applyData` — свежая загрузка окна
+  (первый рендер, смена актива/биржи/таймфрейма, «Повторить»);
+  `scrollToRealTime()` — только явный сброс масштаба. В `loadOlder` ни
+  то, ни другое не вызывается (гарантируется тестом), поэтому подгрузка
+  старых свечей не возвращает пользователя к последним барам.
+- Попутно устранена причина неожиданного сброса вида: переключение
+  индикаторов (Volume/EMA/SMA/RSI/MACD) больше НЕ пересоздаёт график и
+  НЕ перезапрашивает свечи — `applyVisibility` передаётся потребителям
+  через стабильный ref, видимость применяется отдельным эффектом к
+  живым сериям (поведение индикаторов не изменилось).
+
+**4. TradingView / P1-TV**: в этом фиксе НЕ реализовывался — ни widget,
+ни script, ни зависимости; новое решение пользователя
+`[ Суслик | TradingView ]` внутри блока графика (два switch control →
+один mode state) зафиксировано в §2 roadmap как SUPERSEDED прежнее
+«отменено» и как будущий этап **P1-TV** (перед/вместе с P1-D).
+
+**ГРАНИЦЫ**: не менялись `lib/chart/smc-contract.ts`,
+`smc-projection.ts`, `smc-api-service.ts`, `app/api/chart/smc/route.ts`,
+`lib/smc/*`, `lib/strategies/*`, `prisma/*`, `package.json`,
+`package-lock.json`; `components/chart/SmartMoneyPanel.tsx` не менялся
+вовсе (принятый P1-C compact UX, collapsed «Почему»/«Технические
+детали», commit-гейт, cannot-evaluate ≠ NEUTRAL, 1d Option A — на
+месте). БД не мутировалась, worker'ы не запускались, новых зависимостей
+нет.
+
+**TESTS**: новый `scripts/test-chart-ux.ts` — 179 проверок, 0 провалов:
+точные значения и ключевой набор interaction options (drag/scroll/wheel/
+pinch/оси/двойной клик/auto-scale), геометрия `legendSpace` (desktop,
+narrow, tiny, fallback до измерения, мусорные входы, кастомный зазор,
+инвариант «легенда внутри plot-области, резерв ≥ ширины шкалы»),
+`shiftLogicalRange` + интеграция с реальным `mergeOlder` (видимыми
+остаются ТЕ ЖЕ свечи, правый край ≠ последний бар), статические гарды
+`CandleChart.tsx` (нет самодельной физики ввода; в `loadOlder` нет
+`fitContent`/`scrollToRealTime`/`setVisibleRange`; видимость 9 серий;
+RSI/MACD в панелях 1/2; сброс масштаба; P1-C Smart Money не тронут; нет
+protected-path/Signal-токенов) и `globals.css` (var()-based max-width,
+flex-wrap, overflow-wrap, pointer-events, резерв кнопки, media 430/360).
+Проверено mutation-тестированием: 10 преднамеренных поломок (убрать
+восстановление viewport; добавить fitContent после merge; выключить
+drag/price-axis/wheel-zoom; сломать резерв легенды; убрать CSS-var;
+убрать subscribeSizeChange; убрать scrollToRealTime; вернуть
+applyVisibility в deps создания графика) — ловятся все 10.
+Регрессия без изменений: test-smc-panel 2872, api-service 111,
+projection 206, chart history 50 / params 37 / sql / url-state 18,
+indicators 74, freshness 52, common horizon 227, eligibility 96,
+lookahead 13, evaluate 31, smart-money 62, phase3c-fix 59, smc core
+(scoring 75, fvg 37, order-blocks 63, liquidity 48, pivots 24, range 50,
+fsm 62, displacement 23, phase3d-config 70), strategy-runtime
+--self-test 56 / --check-validation 32. `npx tsc --noEmit` exit 0,
+`git diff --check` чисто. Dev-smoke: `/coin/BTC` → 200, новые CSS-правила
+отдаются клиенту; `npm run build` в песочнице падает только по
+environment-причине (@prisma/client не сгенерирован, binaries.prisma.sh
+недоступен) — сигнатура идентична baseline.
+
+
+## §31l. Chart UX vertical fix — AUTO-запас основной панели и свобода ручного price scale (12.09.2026)
+
+UI-only фикс поверх §31k (parent `fa43d2f`). Семантика данных не менялась:
+OHLC/индикаторы считает тот же серверный слой, SMC DTO/API/runtime,
+`lib/strategies`, Prisma и package-файлы не тронуты. TradingView-интеграция
+(§2, P1-TV) по-прежнему документация-only — в этом фиксе не реализовывалась.
+
+**1. ПРИЧИНА: В AUTO-SCALE ЭКСТРЕМУМЫ ЛОЖИЛИСЬ ВПЛОТНУЮ К КРАЮ ПОЛОСЫ**
+
+Аудит установленной lightweight-charts 5.2.1
+(`dist/lightweight-charts.development.mjs`, `dist/typings.d.ts`):
+- у правой шкалы основной панели `scaleMargins` не задавались явно →
+  действовал дефолт библиотеки `{ bottom: 0.1, top: 0.2 }`;
+- `PriceScale._private__logicalToCoordinate` вместе с
+  `_internal_invertedCoordinate` (invertScale = false) даёт
+  `y(price) = topMarginPx + (internalHeight − 1) × (rangeMax − price) / длина`,
+  а auto-scale-диапазон — это ровно видимые min/max источников
+  (`_private__recalculatePriceRangeImpl` → `source.autoscaleInfo(...)`).
+  Следовательно видимый high ложился ТОЧНО на верхнюю границу полосы
+  рисования (y = topMarginPx), а low — точно на нижнюю: зазор нулевой,
+  на длинной свече это выглядело как «цена/high уходит за верхнюю границу»;
+- легенда — overlay ВНУТРИ панели (`top: 8px`, фон `panel2` 88%), на узких
+  экранах переносится в 3–5 строк (≈60–126px) и накрывает весь верхний
+  отступ (0.2 × 200–300px = 40–60px), поэтому pump-high уходил ещё и под
+  legend-бокс;
+- `Model._internal_applyPriceScaleOptions("right", …)` применяет опции
+  сразу ко ВСЕМ панелям → chart-level `scaleMargins` задели бы RSI/MACD;
+- `PriceScale._private__topMarginPx/_bottomMarginPx`: `scaleMargins`
+  участвуют в пересчёте координат ВСЕГДА — и в auto-, и в ручном режиме,
+  поэтому «динамическими» отступами резерв под легенду делать нельзя
+  (сжали бы полосу ручного вертикального zoom'а);
+- `_private__recalculatePriceRangeImpl` сразу завершается при
+  `isCustomPriceRange() && !isAutoScale()` → после ручного drag'а диапазон
+  не пересчитывается: ручной масштаб свободен, `autoscaleInfoProvider`
+  в нём не вызывается;
+- px-поля `AutoScaleMargins` (`margins.above/below`) хранятся на шкале и
+  добавлялись бы к полосе рисования и в ручном режиме → для запаса не
+  использовались.
+
+**2. РЕШЕНИЕ: ДВЕ ШТАТНЫЕ МЕХАНИКИ, РАЗДЕЛЁННЫЕ ПО РЕЖИМАМ**
+
+AUTO (открытие графика, «Сбросить масштаб», двойной клик):
+- явные `SUSLIK_MAIN_PANE_SCALE_MARGINS = { top: 0.2, bottom: 0.1 }`
+  (`lib/chart/chart-ux.ts`) применяются ТОЛЬКО к шкале серии свечей —
+  `candle.priceScale().applyOptions({ scaleMargins })`, поэтому pane 0
+  получает фиксированный профессиональный отступ, а RSI/MACD остаются на
+  штатных дефолтах со своим autoscale (0/100 у RSI не форсируются);
+- штатный `autoscaleInfoProvider` серии свечей
+  (`createMainPaneAutoscaleProvider()`): базовый расчёт библиотеки по
+  ВИДИМЫМ high/low (не close) расширяется в ЦЕНОВЫХ единицах —
+  диапазон только шире, high/low не клампятся и не подменяются:
+  * пропорциональный запас `AUTOSCALE_SPAN_PAD_RATIO = 0.025` сверху и
+    снизу и минимум `AUTOSCALE_MIN_EDGE_PAD_PX = 2` px от края полосы;
+  * резерв под легенду: запас сверху растёт так, чтобы видимый high
+    оказался ниже legend-бокса (решение уравнения проекции
+    `above ≥ r × (span + below) / (1 − r)`, r — доля полосы, которую
+    легенда занимает сверх верхнего отступа);
+  * потолок `AUTOSCALE_LEGEND_RESERVE_MAX = 0.45` — даже при легенде в
+    5 строк видимые свечи занимают не меньше половины полосы;
+  * геометрия — измерения (`chart.panes()[0].getHeight()`,
+    `legend.offsetTop + offsetHeight + LEGEND_BOTTOM_GAP_PX`), а не
+    хардкод; метрики пересчитываются ПОСЛЕ записи легенды в DOM
+    (`legendHtml()` вынесен в чистую функцию) и только при реальном
+    изменении геометрии, пересчёт auto-scale — повторным применением тех
+    же `scaleMargins` (штатный `fullUpdate`), без самодельных эффектов.
+
+MANUAL (drag по правой ценовой шкале) — свобода без ограничений приложения:
+- `handleScale.axisPressedMouseMove.price = true` (§31k); путь в библиотеке
+  подтверждён аудитом: `PriceAxisWidget._private__mouseDownEvent` →
+  `model.startScalePrice(pane, priceScale, localY)` → `PriceScale.scaleTo`
+  → `setMode({ autoScale: false })` + пользовательский диапазон;
+  единственная блокировка — `priceScale.isEmpty()` (нулевая высота или
+  пустой диапазон), к основной панели неприменима. Шкалу панели 0 ничто
+  не перекрывает: легенда и кнопка сброса сдвинуты левее шкалы на её
+  фактическую ширину (`--chart-price-scale-w`), у легенды
+  `pointer-events: none`;
+- сводная карта жестов — чистая функция `chartGestureBindings()`:
+  drag по plot → история, колесо deltaY → zoom ВРЕМЕНИ, deltaX → история,
+  drag по оси времени → растянуть/сжать время, drag по правой ценовой
+  шкале → вертикальный масштаб, двойной клик по шкале → price auto-scale,
+  вертикальный touch → страница. Вертикального zoom'а колесом в модели
+  библиотеки нет, поэтому wheel цену не подменяет;
+- собственных ограничений приложение не добавляет: в `CandleChart.tsx` нет
+  `setVisibleRange`, `margins:`, `Math.min/Math.max`, манипуляций
+  `priceRange`, pointer/wheel-обработчиков (статические гарды в тестах) —
+  вручную можно и «сплющить» свечи в полоску, и растянуть на всю панель;
+- ручной режим не отменяется React-эффектами: `setAutoScale(true)` — ровно
+  один вызов, в `resetChartScale` (кнопка и двойной клик по графику);
+  перечитывание геометрии выполняется только при
+  `priceScale().options().autoScale === true`, а двойной клик по ценовой
+  шкале возвращает auto-scale штатным `axisDoubleClickReset.price`
+  (`Pane.resetPriceScale` → `setMode({ autoScale: true })`).
+
+**3. ГОРИЗОНТАЛЬНЫЙ UX И ПРОЧИЕ ПАНЕЛИ НЕ ТРОНУТЫ**
+
+`shiftLogicalRange`/loadOlder, `fitContent` (ровно один — на свежей
+загрузке окна), `scrollToRealTime` (только сброс), `subscribeSizeChange`,
+stretch-факторы 4 / 1.6 / 1.6, volume-overlay `scaleMargins { top: 0.82,
+bottom: 0 }` на собственной шкале, EMA/SMA и RSI/MACD — без изменений;
+резерв легенды под ценовую шкалу (§31k) сохранён.
+
+**4. ТЕСТЫ И ПРОВЕРКИ**
+
+`scripts/test-chart-ux.ts` — новая секция 5 (вертикальный масштаб):
+валидация отступов по правилам библиотеки (top/bottom в 0..1, сумма < 1),
+геометрия полосы, штатный mapping экстремумов (включая детект «экстремум
+вне диапазона» вместо клампа), AUTO-запас (desktop/mobile/без легенды/
+экстремальная легенда/монотонность/мусорные входы), провайдер (расширение,
+отсутствие клампов, проброс `margins`, null/вырожденный диапазон, сетка
+геометрий), разделение AUTO ≠ MANUAL (`verticalScaleModePolicy`: AUTO —
+запас применяется, MANUAL — не применяется и clamps пусты), карта жестов
+(цену масштабируют ровно два жеста, колесо — только время), статические
+гарды CandleChart. Итог 424/424 (было 179). Mutation-тестирование:
+15 преднамеренных поломок (убрать провайдер; вернуть запас в px `margins`;
+клампить/сузить диапазон; игнорировать легенду; раздуть/обнулить отступы;
+убрать гард ручного режима; вернуть auto-scale в эффекте; вызвать
+`setVisibleRange`; задать отступы chart-level; считать метрики до записи
+легенды; выключить price drag / двойной клик; отдать колесу цену;
+перечитывать отступы на каждое движение курсора) — ловятся все 15.
+Регрессия без изменений: test-smc-panel 2872, api-service 111,
+projection 206, chart history 50 / params 37 / url-state 18,
+common horizon 227, eligibility, lookahead 13, evaluate 31, smart-money,
+admin-consistency 84, indicators 74, freshness 52, journal 30, ohlcv
+(cli 105, lock 56, pilot 131), smc core (scoring 75, fvg 37,
+order-blocks 63, liquidity 48, pivots 24, range 50, fsm 62,
+displacement 23, phase3d-b 55 / -c 91 / -d 128 / config 70),
+strategy-periods 59, snapshot-cli 47, chart-sql. `npx tsc --noEmit`
+exit 0, `git diff --check` чисто. Dev-smoke: `/coin/BTC` → 200
+(SSR отдаёт `chartWrap`/`chartContainer`/`chartLegend` и кнопку
+«Сбросить масштаб»), `/api/chart/candles` → 503 с безопасным русским
+сообщением (БД в песочнице нет). `npm run build` в песочнице падает
+только по environment-причине (@prisma/client не сгенерирован) — лог
+побайтово совпадает с baseline `fa43d2f` (нормированы только тайминги),
+«Compiled successfully» и валидация типов/линта проходят.
+
+
 ==================================================
 32. PRODUCT ROADMAP / ДАЛЬНЕЙШЕЕ РАЗВИТИЕ (10.09.2026)
 ==================================================
@@ -2241,6 +2500,148 @@ UX-FIX P1-C (12.09.2026): PROGRESSIVE DISCLOSURE — UI-only, semantics
 > После этого commit docs/ROADMAP.md удалён, чтобы не было двух источников правды.
 > База: HEAD 9085d55 RANGE_POSITION CLOSED/UNDERSTOOD + Option A eligibility (принят на VPS 10.09.2026; real BTC diagnostic 5m READY, 15m READY, 1h READY, 4h READY, 1d verified via eligibility — BINGX 16:00 UTC excluded for 1d aggregation, 4/4 eligible BINANCE/BYBIT/GATE/KUCOIN aligned 2026-09-09T00:00:00Z safe=true), ветка arena/01a08b68-svechnoy-suslik. Rollout: Admin/API now supports all five TFs ["5m","15m","1h","4h","1d"].
 > Документация-only — без изменения runtime/Admin/DB.
+
+## §31m. Chart UX vertical fix #2 — снят перехват двойного клика обёрткой; добавлена runtime-регрессия (12.09.2026)
+
+UI-only фикс поверх §31l (parent `5ff7795`). Данные, SMC DTO/API/runtime,
+`lib/strategies`, Prisma, package-файлы, Signal Engine и TradingView не
+тронуты. Повод — провал ручного браузерного ревью §31l: «Ничего не изменилось —
+также удаляет и приближает».
+
+**1. ПОЧЕМУ СТАТИЧЕСКИЕ 424/424 НЕ СПАСЛИ**
+
+`scripts/test-chart-ux.ts` проверяет чистые функции `lib/chart/chart-ux.ts`
+и литералы исходников. Он доказал, что `axisPressedMouseMove.price === true`
+и что `scaleMargins`/`autoscaleInfoProvider` заданы верно, — но НИ ОДНА из
+этих проверок не исполняет lightweight-charts и не диспатчит события мыши.
+Поведение «drag по ценовой шкале» и «что происходит с ручным режимом дальше»
+оставалось непроверенным: баг жил не в опциях, а в JSX-обвязке.
+
+**2. HEADLESS-RUNTIME ХАРНЕС (новый постоянный актив)**
+
+Браузера, jsdom/happy-dom/linkedom/canvas и сети в песочнице нет, а
+`package.json` защищён (новых зависимостей не добавляли). Поэтому написан
+ручной минимальный DOM — `scripts/chart-dom-shim.ts`:
+
+- `installChartDom()` ставит глобалы (`window`, `document`, `navigator`,
+  `HTMLElement`, `Event`/`MouseEvent`/`TouchEvent`/`WheelEvent`,
+  `ResizeObserver`, `requestAnimationFrame`, `getComputedStyle`,
+  `matchMedia`, `devicePixelRatio`) ДО импорта библиотеки: lightweight-charts
+  фиксирует `isRunningOnClientSide = typeof window !== 'undefined'` в момент
+  вычисления модуля;
+- `ResizeObserver` отдаёт `devicePixelContentBoxSize`, поэтому fancy-canvas
+  2.1.0 идёт по штатному пути и bitmap-размеры canvas'ов ненулевые;
+- canvas 2D-контекст — Proxy-заглушка (`measureText`, градиенты, back-ref на
+  canvas); `getComputedStyle` нормализует цвет в `rgb()/rgba()`, иначе
+  `ColorParser._private__parseColor` падает ещё до создания панелей;
+- `Event.timeStamp` — как в браузере: `DOMHighResTimeStamp` от timeOrigin
+  (плюс «возраст страницы» 60 s). С epoch-мс `MouseEventHandler`
+  (`eventTimeStamp(e) < lastTouchEventTimeStamp + 500`, защита от призрачных
+  mouse-событий после touch) глушил бы мышь навсегда;
+- `shimLayoutTree()` раскладывает таблицу панелей (`table → tr → td → div →
+  canvas`) и проставляет `getBoundingClientRect`, иначе `localX/localY`
+  считались бы от нуля и тест «тыкал» бы не туда;
+- события всплывают до `document.documentElement` — там висят root-слушатели
+  `mousemove`/`mouseup`, которые библиотека добавляет на время нажатия.
+
+Development-бандл берётся прямым file-URL
+(`node_modules/lightweight-charts/dist/lightweight-charts.development.mjs`):
+exports-карта пакета разрешает только `"."`.
+
+**3. ЧТО ХАРНЕС ИЗМЕРИЛ НА НАШИХ РЕАЛЬНЫХ ОПЦИЯХ (до фикса)**
+
+График строится ровно как в `CandleChart.tsx` (те же `SUSLIK_*`, тот же
+`createMainPaneAutoscaleProvider`, volume-overlay `priceScaleId: ""` с
+`{top: 0.82, bottom: 0}`, три панели 4/1.6/1.6, 300 свечей с pump в конце):
+
+- виджет правой ценовой шкалы существует как отдельная колонка
+  (canvas 58×294 справа от plot 1142×294), на нём висят `mousedown` и
+  `touchstart`, при наведении его обёртка получает `cursor: ns-resize`
+  (ровно та «↕», которую видит пользователь);
+- drag по шкале: `autoScale true → false`, диапазон `92.48…156.41 →
+  49.42…199.47`, при этом `getVisibleLogicalRange()` и `barSpacing`
+  НЕ изменились — то есть вертикальный масштаб независим от времени;
+- wheel над plot — это zoom ВРЕМЕНИ (`barSpacing 3.81 → 4.19`), ручной
+  режим цены и её диапазон он не трогает;
+- ручной режим переживает `chart.applyOptions(...)` (путь `applyChartTheme`),
+  `scale.applyOptions({scaleMargins})` (путь `applyChartMetrics`),
+  `series.setData([...older, ...candles])` (путь `loadOlder`: viewport
+  сдвинулся ровно на 40 добавленных баров) и переключение видимости серий;
+- двойной клик по шкале: `autoScale → true`, время НЕ тронуто;
+- `Model._internal_applyOptions` передаёт в `Pane._internal_applyScaleOptions`
+  ТОЛЬКО переданные ключи, поэтому `chart.applyOptions({rightPriceScale:
+  {borderColor}})` не сбрасывает `autoScale` (подозрение снято).
+
+Вывод: слой библиотеки и опций уже был корректен — значит сбой давал наш слой.
+
+**4. КОРЕНЬ ПРОБЛЕМЫ: REACT-`onDoubleClick` НА ОБЁРТКЕ ГРАФИКА**
+
+`<div className="chartWrap" onDoubleClick={resetChartScale}>`. Двойной клик
+по canvas'у ценовой шкалы всплывает до обёртки, поэтому поверх штатного
+`axisDoubleClickReset.price` выполнялся наш полный сброс:
+`timeScale().resetTimeScale()` (barSpacing/rightOffset к дефолту — «приближает/
+отдаляет»), `scrollToRealTime()` (анимированный прыжок к последним барам —
+история «уезжает») и `setAutoScale(true)` по всем панелям (только что
+выставленный drag'ом вертикальный масштаб уничтожался). Два коротких
+повторных нажатия на шкалу браузер тоже квалифицирует как dblclick, так что
+сброс срабатывал в процессе проверки жеста. Обработчик существовал и до
+`5ff7795` — отсюда буквальное «ничего не изменилось».
+
+**5. ФИКС**
+
+- `onDoubleClick` с обёртки снят полностью: двойной клик по ценовой шкале
+  обрабатывает библиотека (`axisDoubleClickReset.price` →
+  `Pane._internal_resetPriceScale` → `setMode({autoScale: true})` +
+  `recalculatePriceRange(visibleBars)`), двойной клик по оси времени — тоже
+  библиотека (`axisDoubleClickReset.time`);
+- полный сброс (цена + время + последние бары) остался ТОЛЬКО на кнопке
+  «Сбросить масштаб»: `resetChartScale` упоминается в файле ровно дважды
+  (определение + `onClick` кнопки) — это заперто тестами;
+- никакой собственной pointer-физики не добавлено.
+
+Карта жестов после фикса: plot-drag → история; wheel/pinch → zoom времени;
+drag оси времени → растянуть/сжать время; drag правой ценовой шкалы →
+вертикальный масштаб (время не трогается); dblclick ценовой шкалы → только
+авто-масштаб цены; dblclick оси времени → только сброс времени; кнопка
+«Сбросить масштаб» → авто-масштаб цены во всех панелях + последние бары.
+
+**6. ИЗВЕСТНОЕ ОГРАНИЧЕНИЕ TOUCH (осознанно, не регрессия)**
+
+`PriceAxisWidget` передаёт в `MouseEventHandler`
+`treatVertTouchDragAsPageScroll: () => !handleScroll.vertTouchDrag`, то есть
+наш `vertTouchDrag: false` (вертикальный свайп отдан прокрутке страницы —
+решение §31k) отключает и вертикальный touch-драг по ценовой шкале: пальцем
+шкалу не растянуть, доступен только двойной тап (возврат авто-масштаба).
+Мышиный drag работает всегда. Зафиксировано проверкой в runtime-тесте, чтобы
+поведение было явным, а не «внезапным».
+
+**7. РЕГРЕССИЯ**
+
+- НОВЫЙ `scripts/test-chart-runtime.ts` — 81 проверка состояний и
+  инвариантов взаимодействия (не литералов опций): hit-target шкалы и курсор
+  `ns-resize`, AUTO-экстремумы не обрезаны и не под легендой, drag по шкале
+  меняет ТОЛЬКО цену, ручной режим живёт после wheel/plot-drag/
+  `applyOptions`/`scaleMargins`/`setData`/toggles, dblclick по шкале не
+  трогает время, сброс кнопкой, touch-поведение, dblclick по оси времени не
+  возвращает авто-масштаб цены. Запуск: `npx tsx scripts/test-chart-runtime.ts`.
+- Mutation-check: возврат `onDoubleClick={resetChartScale}` на обёртку →
+  80/81 (падает именно замок на перехват); после снятия мутации → 81/81.
+- `scripts/test-chart-ux.ts` — 426/426: требование «двойной клик по графику
+  сбрасывает масштаб» заменено на обратное (0 `onDoubleClick`, 1
+  `onClick={resetChartScale}`, 2 упоминания `resetChartScale`).
+- `scripts/test-chart-history.ts` 50/50, `scripts/test-chart-params.ts` 37/37,
+  `scripts/test-chart-sql.ts` — зелёные (горизонтальная навигация §31k не
+  задета).
+
+**Files changed (один коммит):** `components/chart/CandleChart.tsx` (снят
+`onDoubleClick` с обёртки, комментарии), `scripts/chart-dom-shim.ts` (новый),
+`scripts/test-chart-runtime.ts` (новый), `scripts/test-chart-ux.ts` (инверсия
+замка dblclick), `PROJECT_CONTEXT.md` (этот §31m).
+
+**Deliverable:** ОДИН reviewable FIX-коммит ровно поверх
+`5ff7795b29012dc322b3de09b8674cda10ab4d76` (не amend), push только в
+`arena/01a09406-svechnoy-suslik`. Приёмка — повторное ручное ревью на VPS
+:3001; автоматические тесты приёмкой не считаются.
 
 # Свечной Суслик — Product Roadmap & Backlog
 
@@ -2293,9 +2694,22 @@ HEAD: `9085d55936b20d54add3ab6a1534515be2d3480b` (RANGE_POSITION CLOSED/UNDERSTO
   /api/chart/smc с текущими symbol/timeframe + summary/WHY панель из
   принятого DTO; AbortController/requestId race-safety; cannot-evaluate
   ≠ NEUTRAL; агрегат ≠ выбранная биржа; см. §31j
-- P1-D (**next**): визуальные SMC-примитивы поверх свечей (swing/BOS/
+- P1-C-UX (12.09.2026, **implemented**): UI-only fix поверх P1-C —
+  progressive disclosure панели Smart Money (compact default, collapsed
+  «Почему» и «Технические детали», unmount commit-gate; см. §31j) и
+  chart UX базового графика: легенда не перекрывает правую ценовую
+  шкалу, штатная навигация/масштаб lightweight-charts 5.2.1, ручной
+  viewport сохраняется при подгрузке истории (см. §31k)
+- P1-TV (**next**, перед/вместе с дальнейшим P1-D): переключатель
+  режимов `[ Суслик | TradingView ]` ВНУТРИ блока графика (не страницы);
+  два визуальных switch control → ОДИН mode state; «Суслик» —
+  PostgreSQL-свечи/наши индикаторы/Smart Money/P1-D overlays,
+  «TradingView» — отдельная официальная интеграция без имитации UI.
+  На 12.09.2026 НЕ реализован: только зафиксирован (§2 roadmap)
+- P1-D: визуальные SMC-примитивы поверх свечей (swing/BOS/
   CHoCH, liquidity/sweep, FVG/Order Block, dealing range,
-  premium/equilibrium/discount) с использованием factIds из P1-A
+  premium/equilibrium/discount) с использованием factIds из P1-A —
+  планируется после/вместе с P1-TV
 - Собственный график на PostgreSQL-свечах, оверлеи SMC, объяснение `WHY` сигнала
 
 **P2 — Backtest Engine / тестер стратегий**
@@ -2319,11 +2733,33 @@ HEAD: `9085d55936b20d54add3ab6a1534515be2d3480b` (RANGE_POSITION CLOSED/UNDERSTO
 
 ## 2. SuslikChart — изменение требования
 
-**Отменено:** переключатель страниц `[ Суслик ] [ TradingView ]`
+> **SUPERSEDED (12.09.2026, новое решение пользователя).** Прежнее
+> «**Отменено:** переключатель страниц `[ Суслик ] [ TradingView ]`»
+> больше не действует как отказ от переключателя: отменён был только
+> ПЕРЕключатель СТРАНИЦ. Принято новое решение — переключатель режимов
+> ВНУТРИ блока графика, будущий этап **P1-TV** (см. §1 roadmap).
 
-**Сейчас:**
+**Новое решение (зафиксировано документацией; реализация — P1-TV):**
+- В самом блоке графика будет переключатель `[ Суслик | TradingView ]`.
+  Это НЕ переключение всей страницы `/coin/[symbol]` — оба режима
+  сохраняются и относятся только к области графика.
+- Режим **«Суслик»** (текущий): собственные PostgreSQL-свечи
+  (`lib/exchanges`, `Candle`, `IndicatorSnapshot`), наши индикаторы,
+  Smart Money (P1-A…P1-C), будущие P1-D overlays.
+- Режим **«TradingView»**: отдельная ОФИЦИАЛЬНАЯ TradingView
+  integration — не подделка/копия TradingView, не имитация его UI,
+  самодельный график за TradingView не выдаётся.
+- В chart interface предусмотрены ДВА визуальных switch control
+  (например primary + compact рядом с областью графика), но ОБА
+  управляют ОДНИМ И ТЕМ ЖЕ mode state — двух независимых флагов не
+  будет.
+- В chart UX fix от 12.09.2026 (§31k) TradingView НЕ реализовывался:
+  ни widget, ни script, ни новые зависимости не добавлялись — только
+  эта документация и фикс базового графика.
+
+**Сейчас (без изменений):**
 - Развивать **собственный SuslikChart** на PostgreSQL-свечах (`lib/exchanges`, `Candle`, `IndicatorSnapshot`)
-- Не реализовывать TradingView-режим, не имитировать его UI, не выдавать самодельный график за TradingView
+- Не имитировать UI TradingView и не выдавать самодельный график за TradingView
 
 **Текущие оверлеи:**
 - Свечи, Volume, EMA(20/50/200), RSI(14), MACD(12/26/9)
@@ -2443,6 +2879,25 @@ Funding / Open Interest / ликвидации / order book / CVD / on-chain —
 - стабильность по активам / таймфреймам / режимам рынка
 
 Нельзя заявлять прибыльность до этих тестов. Никакого фейкового PnL/winrate.
+
+**Статус P2-A (фундамент, 12.09.2026; исправлен hardening-коммитом того же дня).** Реализован чистый детерминированный слой `lib/backtest/*`: контракт и зафиксированная политика исполнения, строгая валидация входа, издержки (слиппедж/комиссия), движок исполнения, метрики, хронологическое разбиение TRAIN/VALIDATION/OOS, каноническая сериализация с sha256-отпечатками и инструмент контроля no-lookahead.
+
+**Первая версия P2-A (`096e13d2`) НЕ прошла независимый адверсарный аудит**: контрфактическая проверка выдавалась за доказательство отсутствия lookahead (хотя не ловит читера с замыканием на собственный массив), гэп на входе отклонял сделку и тем самым подчищал выборку убыточных исходов, знаменатель R считался от фактической цены входа и мог схлопнуться (R ≈ 19999), `validateBars` падала на null/разреженных барах, метрика «mark-to-market» выдавалась за консервативную, сегментный прогон сваливал чужие стадии в `provider`, метка сегмента передавалась провайдеру. Все замечания исправлены или честно задокументированы как ограничения отдельным hardening-коммитом (родитель — ровно `096e13d2`, исходный коммит НЕ переписан): контракт поднят до `p2a-1.1.0`, тестов 294 + 123 + 108 + 396 = **921**. Подробности — §43 (историческая запись с пометками) и **§44** (исправления). **Повторный независимый аудит `f87d6f90` дал вердикт PASS WITH RISKS**: все BLOCKER/HIGH подтверждены исправленными, новых BLOCKER/HIGH нет, найдены два замечания MEDIUM — TOCTOU решения источника сигналов (движок читал `stopLoss`/`takeProfit`/`label`/`facts` несколько раз, поэтому «проверили 90 — исполнили −5» было возможно) и fail-open контейнера `signals` (`{}`, `42`, `Map`, array-like и «адаптер» с `Decide` давали `ok:true` и 0 сделок). Оба закрыты вторым hardening-коммитом (родитель — ровно `f87d6f90`, он НЕ переписан): решение и адаптер читаются РОВНО ОДИН РАЗ в неизменяемые снимки до валидации, контейнер классифицируется строго (Array | функция | валидный SignalAdapter, иначе отказ со стадией `signals`/`adapter`), контракт поднят до `p2a-1.2.0`, тестов 294 + 123 + 108 + 567 = **1092**, фиксы покрыты мутационными контролями. Подробности — **§45**. Прибыльность по-прежнему НЕ заявляется; независимая проверка на VPS владельцем НЕ выполнена — статус этапа **IMPLEMENTED / PENDING FINAL INDEPENDENT VERIFICATION**.
+
+**Статус P2-A: IMPLEMENTED / PENDING INDEPENDENT VPS VERIFICATION.** Автоматические тесты приёмкой не являются: независимая проверка слоя на VPS владельцем НЕ выполнена. Прибыльность чего-либо по P2-A не заявляется и не может быть заявлена.
+
+**Статус P2-B (data plane, 12.09.2026).** Слой данных `lib/backtest/*` (adapter, coverage, data-plan, data-source, eligibility, gaps, intervals, timeframe, immutable + CLI `scripts/backtest-data-plan.ts`) принят на уровне кода. Цепочка: `a0e94a1` (первая реализация) → `aa85309` (hardening #1: requested-range coverage, безопасная пагинация, upstream-eligibility Smart Money, historical as-of, CLI SIMULATED/NO DB) → `3234007` (hardening #2: КАНОНИЧЕСКАЯ сетка покрытия вместо from-anchored, V2-адверсариальные тесты, реальная граница `maxRows`, глубокая иммутабельность, честная формулировка no-lookahead) → `15ffd8a` (hardening #3: test-pin финальной ASC-защиты, уточнение классификации мутаций M23/M31, документированный контракт провайдера). Независимый аудит `3234007` — **PASS WITH RISKS**; узкая независимая проверка H2 на `15ffd8a` — **PASS**. Канонический контракт покрытия: слоты сетки `openTime % D == 0` в `[from, to)`, НЕ from-anchored fake grid; невыровненный запрос канонизируется и это раскрывается в coverage/aggregate/plan/report/CLI; окно без канонических слотов падает fail-closed; off-grid бары не считаются каноническим покрытием. `maxRows` — жёсткая граница вывода (успешный fetch никогда не больше; превышение — fail closed, без молчаливого усечения). Публичные структуры глубоко заморожены, Date-поля копируются. Финальная ASC-проверка — defense-in-depth против пост-фактум мутации уже принятых provider-строк (контракт провайдера: строки не мутируются после возврата). No-lookahead: гарантия только структурная (context-channel) + контрфактическая ДИАГНОСТИКА с публикуемыми ограничениями; произвольный JS-чит через замыкание/глобальную переменную недоказуемо предотвратим. Прибыльность по P2-B НЕ заявляется; независимая проверка на VPS владельцем НЕ выполнена — статус **IMPLEMENTED / PENDING FINAL INDEPENDENT VERIFICATION**.
+
+Слой не использует PostgreSQL/Prisma/workers/сеть/`process.env`/текущее время/случайность (единственный внешний импорт — детерминированный `node:crypto` для sha256) и проверяется на это тестом-сканом исходников. Ни одна production-стратегия, SMC-логика, API и схема БД не изменены.
+
+Что P2-A сознательно НЕ делает (это P2-B/P2-C; для P2-B дополнительно нужны реальная БД и отдельное одобрение):
+- Sharpe/Sortino, walk-forward, Monte-Carlo, устойчивость по активам/таймфреймам/режимам рынка
+- подбор и оптимизация параметров, сравнение конфигураций, выбор «лучшей» стратегии
+- подключение к реальным данным (PostgreSQL/Prisma), runner, сохранение прогонов, UI «Тестер стратегий»
+- маржинальная модель и ликвидации, частичные закрытия, пирамидинг, несколько одновременных позиций, трейлинг-стоп, перенос в breakeven
+- Kill Zones / AMD / AI / on-chain / funding / OI / Signal Engine
+
+Заявлять прибыльность по-прежнему нельзя: P2-A даёт измеряемость и семантику, а не результат какой-либо стратегии.
 
 ---
 
@@ -3259,3 +3714,564 @@ Reason: real Phase3E PostgreSQL data proves BingX 1d is **observed as 16:00 UTC*
 **Files changed (один коммит):** `lib/strategies/common-horizon.ts` (переписан), `lib/strategies/smart-money.ts` (`evaluateMarketsAtCommonHorizon` + partition + anchor), `scripts/smart-money-readonly.ts`, `scripts/smart-money-diagnostic.ts` (единый gate + честная диагностика + возврат explainability), `scripts/test-common-horizon.ts` (переписан, 227 проверок), `PROJECT_CONTEXT.md` (этот §42).
 
 **Deliverable:** ОДИН reviewable FIX-коммит ровно поверх `ec73320723327f68a64be435b87aff0e5701f110` (не amend), push только в `arena/01a09002-svechnoy-suslik`. DB/Strategy/PM2/worker/Signal Engine — не тронуты. После коммита и отчёта — STOP.
+==================================================
+43. P2-A — BACKTEST ENGINE FOUNDATION: ЧИСТЫЙ ДЕТЕРМИНИРОВАННЫЙ СЛОЙ БЕЗ БД (12.09.2026)
+==================================================
+
+> **СТАТУС ЭТОГО РАЗДЕЛА ИЗМЕНЁН (12.09.2026): НЕЗАВИСИМЫЙ АДВЕРСАРНЫЙ АУДИТ КОММИТА `096e13d2` НЕ ПРОЙДЕН.**
+> Раздел сохранён КАК ИСТОРИЧЕСКАЯ ЗАПИСЬ (текст не переписан и не удалён), но часть его заявлений
+> опровергнута аудитом и исправлена отдельным коммитом hardening — см. **§44**. Опровергнуты, в частности:
+> (1) «доказуемое отсутствие lookahead» и «контрфактическая СЕРТИФИКАЦИЯ ловит читера с замыканием на
+> внешний массив» — не ловит, это доказанный предел метода; (2) отклонение входа при гэпе за уровень
+> (`entry-levels-breached-at-open` / `entry-fill-outside-levels`) — отсекало класс убыточных исходов и
+> подкрашивало статистику; (3) R от фактической цены входа — знаменатель схлопывался (R ≈ 19999);
+> (4) «MTM-просадка консервативнее реализованной» — это close-to-close оценка, внутрибарный уход она
+> не видит; (5) `visibleBars = index + 1` — завышало доступную историю при warmup > 0;
+> (6) `validateBars` падала с TypeError на null/undefined/разреженных барах; (7) сегментный прогон
+> сваливал любые внутренние отказы в `stage = "provider"`; (8) метка сегмента передавалась провайдеру
+> (фиктивный «слепой» OOS). Ниже эти места помечены inline-маркерами **[исправлено аудитом, §44]**.
+> Статус P2-A после hardening: **IMPLEMENTED / PENDING INDEPENDENT VPS VERIFICATION** — автоматические
+> тесты приёмкой не являются.
+
+**Хронология и baseline (проверено git, не «на глаз»):**
+- Родитель ЭТОГО коммита — ровно `0d4b652edb8c6cf92df3df5cef3c68fc361106a1` («Chart vertical fix #2: снят перехват dblclick обёрткой + runtime-регрессия», родитель `5ff7795b29012dc322b3de09b8674cda10ab4d76`). Без amend, без rebase, без rewrite: OДИН новый коммит поверх принятого в работу состояния.
+- `0d4b652` на момент начала P2-A имеет статус **IMPLEMENTED / PENDING INDEPENDENT VPS ACCEPTANCE**: автоматические тесты не являются приёмкой UX, ручная проверка графика на VPS (:3001) выполняется владельцем отдельно. P2-A этой приёмки не ждал и не подменял.
+- Ветка — только `arena/01a09406-svechnoy-suslik`; `main` не тронут. `edf3732da81…` (Signal Engine dry-run) НЕ является предком: `git merge-base --is-ancestor edf3732 <P2A_SHA>` → exit 1 (проверено до и после коммита).
+- Защищённые области не изменены: `components/chart/*`, `lib/smc/*`, `lib/strategies/*`, `lib/chart/*`, `app/api/chart/smc/route.ts`, `prisma/*`, `package.json`, `package-lock.json`, `lib/signals`, `signal-worker`, `test-signal-engine` — в диффе отсутствуют (0 строк).
+
+**Что такое P2-A (границы этапа).** P2-A — ФУНДАМЕНТ: формально зафиксированная семантика исполнения, доказуемое отсутствие lookahead, издержки, метрики, хронологический TRAIN/VALIDATION/OOS-контракт и детерминированный вывод. Это НЕ тестер стратегий как продукт: никаких подключений к PostgreSQL, никаких записей в БД, никаких workers, никаких production-бэктестов, никакой оптимизации параметров, никаких новых зависимостей. Стратегии не выбираются и не сравниваются «на лучшую».
+
+**Вне объёма P2-A (осознанно, без заглушек):** PostgreSQL/Prisma-раннер и сохранение прогонов; UI «Тестер стратегий»; Sharpe/Sortino, walk-forward, Monte-Carlo, устойчивость по активам/режимам; подбор параметров; маржинальная модель и ликвидации; частичные закрытия, пирамидинг, несколько одновременных позиций, трейлинг-стоп, перенос в breakeven; Kill Zones / AMD / AI / on-chain / funding / OI / outsideRange; TradingView и Signal Engine; любая правка production-SMC.
+
+**Архитектура (8 файлов, `lib/backtest/`, все — чистые типизированные функции):**
+- `contract.ts` (819 строк) — единственный источник истины: типы + докстринг из 16 пунктов политики, где зафиксирована КАЖДАЯ спорная финансовая семантика. `BACKTEST_CONTRACT_VERSION = "p2a-1.0.0"` входит в отпечатки, поэтому любое изменение семантики меняет fingerprint тех же данных. Здесь же `resolveBacktestConfig` (частичный конфиг → полный, любое несогласование = ошибка, тихих подмен нет), `BACKTEST_DEFAULTS` (quantity 1, initialEquity 10 000, `next-bar-open`, `pessimistic`, timeout=null, слиппедж 2 bp, комиссия 5 bp — нулевые издержки дефолтом НЕ являются), типовые защиты `isEntryDecision`/`isNoTradeDecision` (у `NoTradeDecision.kind` объединение двух литералов, поэтому сужение по `kind` «в лоб» в TS не срабатывает), хелперы `entryDecision`/`noTradeDecision`/`signalProviderFromList`.
+- `validate.ts` (342) — строгая валидация: форма бара, монотонность `time`, дубликаты, сетка, границы сегмента, структурная валидность уровней. Вход НЕ сортируется и НЕ дедуплицируется.
+- `costs.ts` (142) — слиппедж (всегда против сделки), комиссия (bps от нотионала + фикс на каждую сторону), gross PnL, `riskAmount`, `plannedRewardRisk`, аналитический `slippageCost`.
+- `engine.ts` (722) — цикл исполнения: вход → сопровождение → оценка сигнала, одна позиция, все исходы и отказы.
+- `metrics.ts` (334) — метрики только из исполненных сделок, реализованная и mark-to-market базы просадки (`markToMarketEquity`, `realizedEquity`, `drawdownStats` экспортированы для тестов и будущей отрисовки).
+- `splits.ts` (431) — хронологическое разбиение, инвариант отсутствия утечки `assertNoSegmentLeakage`, `runSegmentedBacktest`, `summarizeSegments` (сводка, НЕ отбор), `isChronological`.
+- `serialize.ts` (158) — каноническая форма (сортировка ключей, 10 знаков, −0 → 0), sha256-отпечатки конфига/баров/результата/входа прогона.
+- `no-lookahead.ts` (409) — доказательство, а не договорённость: `probeProvider` (активная проба барьера на каждом баре), `poisonFutureBars` (детерминированное «отравление» будущего), `assertDecisionInvariance` (контрфактическая проверка). Экспортировано как ОБЯЗАТЕЛЬНЫЙ инструмент сертификации любого будущего провайдера решений в P2-B/P2-C. **[исправлено аудитом, §44: сертификацией здесь является только структурная проба; контрфакт — ДИАГНОСТИКА с публикуемыми ограничениями, а для P2-B добавлен контракт `SignalAdapter` + `certifySignalAdapter`]**
+
+Изоляция подтверждается не только намерением: тест-скан читает все `.ts` слоя (с вырезанными комментариями, чтобы документация «никаких Date.now()» не давала ложных срабатываний; после hardening вырезается и ТЕКСТ строковых/шаблонных литералов, но код внутри `${…}` сохраняется и проверяется — см. §44) и падает при появлении `process.`/`process.env`/`Date.now`/`new Date`/`Math.random`/`randomUUID`/`randomBytes`/`performance.now`/`fetch(`/`@prisma`/`require(`/`setTimeout`/`setInterval`, а также требует, чтобы каждый import-спецификатор был либо относительным, либо `node:crypto` (и только в `serialize.ts`). Единственный внешний импорт слоя — детерминированный sha256. Движок работает с замороженными КОПИЯМИ баров (`Object.freeze`), поэтому ни вызывающий код, ни провайдер не могут подменить данные во время прогона; результат тоже заморожен (проверяется тестом, включая попытку провайдера перезаписать `ctx.bar.close` → TypeError).
+
+**Политика исполнения (16 пунктов `contract.ts`), включая каждую пограничную семантику:**
+1. **Данные.** Только закрытые свечи, `time` — целое > 0 (openTime, мс UTC), строго возрастает. Цены конечны и > 0, `high ≥ max(open, close)`, `low ≤ min(open, close)`, `high ≥ low`, `volume ≥ 0` либо отсутствует. **Дубликат `time` = ошибка, немонотонность = ошибка** (никакого молчаливого dedup/sort — «починка» входа исказила бы хронологию). Пустой набор = ошибка: честный «ноль сделок» возникает из решений, а не из отсутствия данных.
+2. **Сетка.** Пропуски допустимы и подсчитываются (`gridGaps`, `maxGapMs`, `minGapMs`, `timeframeMs` при равномерности). Две НЕЗАВИСИМЫЕ строгие настройки с разной строгостью (намеренно): `requireUniformGrid` — каждая дельта обязана равняться шагу (любой пропуск = ошибка); `expectedTimeframeMs` — каждая дельта обязана быть целым кратным заявленного шага и не меньше него (пропуск 2 × 1h в часовом ряде допустим и подсчитан, чужой таймфрейм или некратная дельта = ошибка).
+3. **No-lookahead.** Сигнал оценивается на ЗАКРЫТОМ баре N. Провайдер не получает массив баров вовсе — только `SignalContext` с `barAt(i)`, который бросает исключение при `i > index` (будущее) и при `i < firstVisibleIndex` (до warmup-окна сегмента). Единственная точка входа — `open` бара N+1 (`entryPolicy = "next-bar-open"`, других значений конфиг не принимает). `visibleBars = index + 1`. **[исправлено аудитом, §44: `visibleBars = index − firstVisibleIndex + 1`]**
+4. **Одна позиция.** Пирамидинга нет. Провайдер вызывается на КАЖДОМ баре окна (чтобы `decisionCounts` был полным), LONG/SHORT при открытой позиции → `skippedSignals "position-open"`. Порядок «сопровождение → оценка сигнала» означает, что стратегия видит собственный стоп-аут в том же баре и может дать новый сигнал; вход всё равно только на следующем баре (это законная информация, проверено отдельным тестом re-entry).
+5. **Вход.** `plannedEntryPrice = open(N+1)`; фактическая цена = плановая, сдвинутая слиппеджем против сделки. Требование к уровням одно — СТРОГО обрамлять опорную цену (LONG: `sl < ref < tp`, SHORT: `tp < ref < sl`), проверяется ДВАЖДЫ с разными опорами, и именно опора задаёт код отказа: (a) `ref = close(N)` → нарушение означает внутренне противоречивое решение, `"levels-on-wrong-side"`, вход даже не планируется; (b) `ref = open(N+1)` → решение было согласованным, но рынок гэпнул за уровень, `"entry-levels-breached-at-open"`; (c) `ref = entryPrice` (после слиппеджа) → экстремальный слиппедж вынес фактическую цену за уровни, `"entry-fill-outside-levels"` (сделка, которая открылась бы уже за собственным SL/TP, не создаётся). **[исправлено аудитом, §44: проверки (b) и (c) УПРАЗДНЕНЫ — вход исполняется всегда по `open(N+1)`, а гэп за уровень закрывает позицию по тому же open общим правилом пункта 7; коды сохранены в типе как отставные (`RETIRED_REJECT_REASONS`), счётчики всегда 0]** Структурно невалидные уровни (не конечные, ≤ 0, `sl = tp`) → `"invalid-levels"`. Сделка, мгновенно выбитая гэпом, НЕ фабрикуются — иначе PnL рисовался бы из цены исполнения, которой не существовало. **[исправлено аудитом, §44: сделка не «фабрикуется» — она исполняется по реальному open и закрывается по нему же, давая валовый PnL 0 и чистый минус издержки; удаление таких сделок из выборки и было смещением]**
+6. **Нет следующего бара.** Сигнал на последнем баре набора → `skippedSignals "no-next-bar"`; на последнем баре сегмента → `"segment-boundary"`. Вход через границу не переносится.
+7. **Сопровождение** начинается с бара входа E (вход по open, поэтому rest-of-bar законно доступен; на баре входа гэп через уровень невозможен — уровни проверены относительно того же open) **[исправлено аудитом, §44: возможен — вход больше не отклоняется, поэтому на баре входа действует то же гэповое правило]**. Порядок внутри бара: (a) гэп через уровень на open → исполнение ПО OPEN; (b) оба уровня внутри бара → `sameBarPolicy`; (c) SL; (d) TP; (e) timeout по close; (f) конец данных/сегмента по close. Timeout проверяется ПОСЛЕ SL/TP, потому что внутриварное касание хронологически раньше close.
+8. **Same-bar SL+TP** (порядок касаний внутри бара принципиально неизвестен — поэтому политика явная, а не «удобная»): `"pessimistic"` — первым считается SL (ДЕФОЛТ); `"optimistic"` — первым TP; `"open-proximity"` — ближайший к open, при равенстве дистанций SL. Факт неоднозначности помечается в сделке (`sameBarAmbiguity`) и агрегируется в метриках (`sameBarAmbiguityTrades`) — скрывать «вилку» нельзя.
+9. **Гэп через уровень.** Исполнение по OPEN (для SL хуже уровня, для TP лучше), не по уровню: цены, которой не было в момент входа в бар, не существует. `gapThrough` помечается, слиппедж применяется и к гэповому исполнению. R при гэпе честно уходит за −1 (пример теста: −1.4). **[уточнено аудитом, §44: знаменатель R теперь ПЛАНОВЫЙ риск от close бара сигнала; при гэпе на входе (вход и выход по одному open) валовый R = 0, а не «честно за −1»]**
+10. **Изъятие по close.** timeout и END_OF_DATA/SEGMENT_END исполняются по close (плановая цена), затем слиппедж в невыгодную сторону. Открытая на конец набора позиция ЗАКРЫВАЕТСЯ по close последнего бара, учитывается в метриках и видна как `exitReasonCounts.END_OF_DATA` / `openAtEndTrades` — «незакрытые сделки исчезают» запрещено.
+11. **Timeout.** `timeoutBars = N` ⇒ закрытие по close N-го бара удержания, бар входа = 1-й (`barsHeld` на баре входа = 1). `timeoutBars = 1` закрывает позицию по close бара входа. `null` ⇒ таймаута нет (дефолт).
+12. **Издержки.** Слиппедж — bps от цены-основания либо абсолютная величина, всегда против сделки, на входе и на выходе (LONG вход ↑ / LONG выход ↓, SHORT вход ↓ / SHORT выход ↑); цена исполнения не может стать отрицательной. Комиссия — bps от НОТИОНАЛА (фактическая цена × quantity) + `fixedPerSide`, отдельно на каждую сторону. В `netPnl` слиппедж уже содержится в ценах исполнения (двойного счёта нет), комиссия вычитается явно; `slippageCost` публикуется аналитически. Инвариант теста: издержки никогда не улучшают net.
+13. **PnL и R.** LONG `gross = (exit − entry) × qty`, SHORT `gross = (entry − exit) × qty`, `net = gross − fees`. `riskAmount = |entryPrice − stopLoss| × qty` (ФАКТИЧЕСКАЯ цена входа, ПЛАНОВЫЙ уровень SL). `grossR = gross / risk`, `rMultiple = net / risk` (заголовный R — чистый, консервативно), `plannedRewardRisk = |tp − entry| / |entry − sl|`.
+14. **Метрики — только из исполненных сделок** (никаких «целевых» winrate/PF). `win ⇔ netPnl > 0`, `loss ⇔ netPnl < 0`, иначе `breakeven` (нуль — не победа и не убыток; breakeven прерывает обе серии). При нуле сделок все отношения/средние/медианы = `null`, а не 0 (0/0 ≠ 0). Profit factor — по ЧИСТОМУ PnL; при нулевом знаменателе `null` + явный `profitFactorState` (`"no-trades"` / `"no-losses"`), Infinity в вывод не попадает. Медиана для чётного числа — среднее двух центральных.
+15. **Drawdown.** Основная база — РЕАЛИЗОВАННАЯ эквити-кривая (`initialEquity` + накопленный net, точка на каждую закрытую сделку). Дополнительно считается более консервативная mark-to-market база (открытая позиция переоценивается по close каждого бара; будущая комиссия выхода не резервируется). **[исправлено аудитом, §44: close-to-close MTM НЕ консервативна — добавлена третья база `maxAdverseExcursionDrawdown` (LONG → low, SHORT → high); имя и значение MTM-поля сохранены без изменений]** Процент берётся в точке максимального АБСОЛЮТНОГО спада (одно событие — два представления), при пике ≤ 0 = `null`. Уход эквити в ноль/минус фиксируется флагом `equityNonPositive` (маржинальной модели и ликвидаций в P2-A нет — это заявленное ограничение). Процент может превышать 100. Размер позиции фиксированный (`quantity`), компаундинга нет.
+16. **Округление и метаданные.** Внутри — IEEE-754 double БЕЗ промежуточных округлений; в выводе все конечные числа нормализуются до 10 знаков и −0 → 0 (этого достаточно, чтобы погасить шум представления: 9.957999999999998 → 9.958, и сохранить экономически значимые различия). NaN/Infinity/BigInt/Date/функции в канонической сериализации — ИСКЛЮЧЕНИЕ, а не тихий `null`. Ключи сортируются лексикографически на всех уровнях. Метаданные детерминированы: `contractVersion`, `engine = "suslik-backtest"`, sha256-отпечатки конфига и баров, характеристики окна (`barsCount`, `firstBarTime`, `lastBarTime`, `timeframeMs`, `gridGaps`, `maxGapMs`), границы сегмента и `warmupStartIndex`, `signalsEvaluated` и `decisionCounts`. Никаких `Date.now()`, `randomUUID`, hostname, pid, версий зависимостей.
+
+**Решения ( LONG / SHORT / NEUTRAL / CANNOT_EVALUATE / NO_SIGNAL ).** NEUTRAL и CANNOT_EVALUATE — РАЗНЫЕ исходы и считаются раздельно (инвариант проекта «cannot-evaluate ≠ NEUTRAL»): «стратегия решила стоять» не маскируется под «стратегия не смогла оценить». Отсутствие решения (null/undefined) — третье состояние, `NO_SIGNAL`. Сумма `decisionCounts` равна числу вызовов провайдера (проверяется тестом), поэтому «провайдер молча не вызван на части баров» невозможно. Неизвестный `kind` → структурированный отказ `stage = "provider"`, а не тихий пропуск.
+
+**Доказательство no-lookahead (три независимых уровня + отрицательные контроли):**
+1. **Структурный барьер:** `barAt(i)` при `i > index` бросает исключение с текстом `no-lookahead: barAt(K) при текущем индексе I`. Провайдер, который читает будущее, НЕ может отработать вовсе: прогон завершается отказом `stage = "provider"` (проверено на «читере», берущем `barAt(index + 1)`).
+2. **Активная проба `probeProvider`:** на каждом баре обёртка сама пытается прочитать `index + 1, + 2, + 10, + 1000` и `firstVisibleIndex − 1`; любая незаблокированная попытка попадает в `guardFailures`/`windowFailures` и краснит пробу. Дополнительно проверяется `visibleBars === index + 1` **[исправлено аудитом, §44: `index − firstVisibleIndex + 1`]**, что `barAt(index)` возвращает текущий бар, что бары обрабатываются без пропусков и в хронологическом порядке.
+3. **Контрфакт `assertDecisionInvariance`:** прогон повторяется на данных, у которых ВСЕ бары после границы заменены «отравленной» серией (`poisonFutureBars`: те же `time`, цены × 3.5 — OHLC-инварианты и монотонность сохраняются, что проверяется отдельно). Решения до границы обязаны совпасть ПОЭЛЕМЕНТНО (index, time, kind, stopLoss, takeProfit, positionOpen), как и сделки, закрывшиеся до границы, и списки skipped/rejected. На фикстуре сравнено 40 решений и 10 сделок. Отрицательный контроль: провайдер, заглядывающий в будущее в обход `barAt` (замыкание на внешний массив), этой проверкой ЛОВИТСЯ. **[ОПРОВЕРГНУТО аудитом, §44: НЕ ловится — `poisonFutureBars` создаёт новый массив, а замыкание держит исходный; тест теперь фиксирует именно предел метода, а реальная сила контрфакта появляется только при явном крючке `rebind`]**
+4. **Префиксное свойство сегментации:** сделки полного прогона с `exitIndex < 36` совпадают поэлементно (включая `netPnl`) со сделками TRAIN-прогона без SEGMENT_END — 9 из 9; сделка на границе входит идентично (тот же `entryIndex`/`entryPrice`), но в TRAIN закрывается по SEGMENT_END, а в полном прогоне удерживается дальше. То есть сегментация не меняет поведение внутри сегмента и не «дорисовывает» продолжение за границей.
+
+**TRAIN/VALIDATION/OOS.** Только хронологически, по индексам баров: `trainEnd = floor(barsCount × trainFraction)`, `validationEnd = trainEnd + floor(barsCount × validationFraction)`, OOS = остаток (детерминированная арифметика: 100 баров → 60/20/20, 101 бар → 60/20/21, 60 баров → 36/12/12). Никакого random и shuffling. Сегменты стыкуются вплотную: `train.end === validation.start`, `validation.end === oos.start`, `oos.end === barsCount`, сумма длин = `barsCount` (всё проверяется). Отказы: доли вне (0, 1), `trainFraction + validationFraction ≥ 1`, `minBarsPerSegment < 1`, дробный/отрицательный `barsCount`, отрицательный `warmupBars`, любой сегмент короче минимума (с указанием, какой именно). Утечка исключена конструкцией + инвариантом `assertNoSegmentLeakage` (сигнал внутри окна, `entryIndex = signalIndex + 1`, вход и выход внутри окна, `exitTime ≥ entryTime`, отсутствие перекрытия позиций), для которого есть ОТРИЦАТЕЛЬНЫЙ контроль: на суженном окне проверка обязана покраснеть. Чтение истории ДО начала сегмента разрешено в пределах `warmupBars` (это прошлое, не будущее) и зафиксировано в `warmupStart`; при `warmupBars = 0` чтение предыдущего сегмента заблокировано (оба случая проверены). Каждый сегмент стартует с `initialEquity` и имеет локальную нумерацию сделок — состояние через границу не переносится (`finalEquity` сегмента = `initialEquity + его собственный totalNetPnl`). `runSegmentedBacktest` пробрасывает отказы по стадиям (`config` / `split` / `provider` / `leakage`) **[исправлено аудитом, §44: внутренние стадии (`bars` / `adapter` / `provider` / `arithmetic` / `config`) сохраняются, а не сваливаются в `provider`]**, а «ноль сигналов» остаётся валидным исходом. `summarizeSegments` — детерминированная сводка для отчёта; в комментарии зафиксировано, что подбор параметров по сводке — задача P2-B/P2-C и здесь намеренно не выполняется.
+
+**Тесты (три набора, 491 проверка, все зелёные дважды подряд — детерминизм подтверждён повтором).** **[обновлено аудитом, §44: после hardening 294 + 123 + 108 + 396 = 921 проверка; часть ожиданий исходного набора кодифицировала неверную семантику и была переписана вместе с контрактом]**
+- `scripts/test-backtest-engine.ts` — **260/260**: конфиг (16 отказов + дефолты), данные (дубликат, немонотонность, OHLC, нулевые/отрицательные/NaN/Infinity цены, нецелый и нулевой `time`, отрицательный `volume`), сетка и метаданные, базис входа и `next-bar-open`, слиппедж (LONG/SHORT/bps/absolute/дефолт) и комиссия (ручной расчёт 1.2 + 1.22 на quantity 2), «издержки всегда ухудшают», LONG/SHORT TP/SL и R, same-bar × 3 политики + tie + флаг + агрегат, гэпы (LONG SL/TP, SHORT SL, приоритет гэпа над внутриварными касаниями), timeout (счёт баров, приоритет SL, timeout=1, timeout=null), END_OF_DATA / SEGMENT_END / no-next-bar / segment-boundary, четыре кода отказов, одна позиция + re-entry на том же баре + полнота `decisionCounts`, NEUTRAL vs CANNOT_EVALUATE vs NO_SIGNAL, неизвестный `kind`, читающий будущее провайдер, все три уровня no-lookahead, скан изоляции слоя, заморозка входа и результата, equity curve, ноль сделок.
+- `scripts/test-backtest-metrics.ts` — **123/123**: фикстура из 4 сделок с РУЧНЫМ расчётом (победа +10/R+2, два поражения −5/R−1, breakeven 0/R0) → winRate 25 %, PF(net) = 1, expectancy 0, avgR 0, medianR −0.5, серии 1/2, avgBarsHeld 2, `exitReasonCounts` (сумма = trades), `openAtEndTrades`, `finalEquity`; пропущенный сигнал не попадает в метрики; кривая эквити (5 точек) и MTM-кривая (9 точек, переоценка по close 101 и 101.5); MTM консервативнее реализованной базы (4 против 1); PF-состояния `ok` / `no-losses` / `no-trades`; уход эквити в −1000 (`equityNonPositive`, просадка 2000, процент 200); `drawdownStats` на пустой кривой, на пике ≤ 0 и на обычной; пересчёт метрик как чистой функции; точность (−0, 0.1+0.2, 1/3, 1e-11, Infinity/NaN/Date/функция → исключение), каноническая сортировка, отпечатки и байт-в-байт повтор, отсутствие Infinity/NaN/−0 в выводе, нормализация 9.957999999999998 → 9.958.
+- `scripts/test-backtest-splits.ts` — **108/108**: арифметика разбиения (100/101/60/200 баров, стыковка, покрытие, warmupStart), 12 отказов конфигурации разбиения, сегментный прогон (метаданные, число оцененных баров по сегментам), границы (ни одна сделка не выходит за окно, SEGMENT_END на последнем баре TRAIN, segment-boundary на последнем баре VALIDATION, OOS начинает со своего первого бара, сегменты не перекрываются во времени), независимость состояния, префиксное свойство (9/9), leakage-инвариант по всем трём сегментам + отрицательный контроль, `isChronological` (прямой и перевёрнутый), warmup (чтение разрешено/заблокировано), ошибки сегментного прогона по стадиям, сводка, детерминизм канонического вывода и отпечатков, sha256-векторы `""` и `"abc"`, каноничность, отпечатки конфига/баров/входа прогона (порядок полей не влияет, изменение цены/количества/окна — влияет), идемпотентность канонической сериализации.
+
+**Verification (Arena-песочница; БД, workers, PM2, сеть и `.env` не использовались и не читались):**
+- `npx tsx scripts/test-backtest-engine.ts` → **260/260**; `…-metrics.ts` → **123/123**; `…-splits.ts` → **108/108**; каждый набор повторно — те же числа (детерминизм).
+- Регрессии, которые этап не должен был задеть (изменений в их модулях нет): `test-chart-runtime 81/81`, `test-chart-ux 426/426`, `test-chart-history 50/50`, `test-chart-params 37/37`, `test-smc-lookahead 13/13`, `test-smc-evaluate 31/31`.
+- `npx tsc --noEmit` локальным typescript — 0 ошибок на всём репозитории. Дополнительно `--noUnusedLocals --noUnusedParameters`: в `lib/backtest/*` и `scripts/test-backtest-*.ts` замечаний нет (существующие предупреждения в `app/*` — дотираются этим этапом не были и не тронуты).
+- `npm run build` — `✓ Compiled successfully in 11.4s`, далее падение на сборе page-data для `/api/register`: `@prisma/client did not initialize yet` — известное ограничение песочницы (нет сгенерированного клиента и `DATABASE_URL`), идентичное baseline; ни одна страница/API в этом этапе не менялась.
+- `git diff --check` — чисто; новых зависимостей нет (`package.json`/`package-lock.json` — 0 изменений); временных файлов-проб в репозитории нет.
+- БД и workers: ни одного запуска, ни одной записи. `prisma/schema.prisma` — 0 изменений; `lib/signals`, `signal-worker`, `test-signal-engine` в диффе отсутствуют; `Strategy`/`Signal` не тронуты.
+
+**Известные ограничения (честно, без маркетинга):**
+1. Провайдер, замкнувшийся на ВНЕШНЕМ массиве с будущими барами, структурно не блокируется (JS не позволяет отозвать уже выданные данные). Компенсация — экспортируемая контрфактическая сертификация `assertDecisionInvariance`, которая такого читера ловит (проверено отрицательным контролем); в P2-B любой провайдер обязан проходить её до подключения. **[ОПРОВЕРГНУТО аудитом, §44: заявленная «компенсация» не работает — такой читер проходит проверку зелёным. Гарантии разделены: A — структурная (доказуема), B — внешнее состояние источника решений (в JS недоказуема); для P2-B обязателен контракт адаптера, получающего данные исключительно через `SignalContext`, плюс ревью источника данных]**
+2. Нет маржинальной модели, ликвидаций, комиссий фонда, borrow-стоимости и ограничений ликвидности: эквити может уйти ≤ 0, это помечается `equityNonPositive`, а не имитируется.
+3. Одна позиция, фиксированный `quantity`, без компаундинга, без частичных закрытий и без управления позицией после входа (трейлинг/breakeven — вне P2-A).
+4. MTM-просадка не резервирует будущую комиссию выхода (чуть оптимистичнее «полной» оценки), но при этом консервативнее реализованной базы; обе публикуются раздельно. **[исправлено аудитом, §44: MTM-база close-to-close и НЕ является консервативной; добавлена третья база adverse excursion]**
+5. `expectedTimeframeMs` допускает кратные пропуски; строгая равномерность — только через `requireUniformGrid`. Движок предполагает, что бары приходят ЗАКРЫТЫМИ и упорядоченными от источника: он не сортирует и не дедуплицирует вход.
+6. Нормализация до 10 знаков — это гигиена вывода, а не экономическая точность; сравнение прогонов следует делать по отпечаткам, а не по «красивым» числам.
+7. P2-A не оценивает и не доказывает прибыльность чего-либо: это семантика и измеряемость. Никаких выводов о стратегиях по этому этапу делать нельзя.
+
+**Что дальше.** P2-B (подключение реальных данных, walk-forward, оптимизация, runner/UI) требует реальной PostgreSQL, учётных данных, записей в БД и отдельного одобрения владельца — поэтому P2-A завершён и СТОП: P2-B не начат, ничего не развёрнуто. **[обновлено, §44: «завершён» больше не означает «принят» — независимый аудит этот коммит не прошёл, исправления внесены отдельным коммитом hardening, а независимая проверка P2-A на VPS по-прежнему НЕ выполнена]**
+
+**Files changed (один коммит):** `lib/backtest/contract.ts`, `lib/backtest/validate.ts`, `lib/backtest/costs.ts`, `lib/backtest/engine.ts`, `lib/backtest/metrics.ts`, `lib/backtest/splits.ts`, `lib/backtest/serialize.ts`, `lib/backtest/no-lookahead.ts` (все — новые), `scripts/test-backtest-engine.ts`, `scripts/test-backtest-metrics.ts`, `scripts/test-backtest-splits.ts` (новые), `PROJECT_CONTEXT.md` (этот §43 + статус в roadmap §7).
+
+**Deliverable:** ОДИН логический коммит ровно поверх `0d4b652edb8c6cf92df3df5cef3c68fc361106a1` (не amend), push только в `arena/01a09406-svechnoy-suslik`. БД/workers/Strategy/деплой/Signal Engine не тронуты. После коммита и отчёта — STOP.
+
+44. P2-A HARDENING — НЕЗАВИСИМЫЙ АУДИТ `096e13d2` НЕ ПРОЙДЕН: ИСПРАВЛЕННЫЕ КОНТРАКТЫ (12.09.2026)
+==================================================
+
+**Итог одной строкой.** Исходная P2-A (`096e13d2`, §43) не прошла независимый адверсарный аудит: часть заявленных гарантий была ложной, а часть семантики исполнения смещала статистику в выгодную сторону. Исправления внесены ОДНИМ hardening-коммитом, родитель которого — ровно `096e13d2a5a526d304b0448d987afdc6abf09ce2`; исходный коммит НЕ переписан, НЕ amend-нут и НЕ удалён из истории. §43 сохранён как историческая запись с inline-пометками **[исправлено аудитом, §44]**. Контракт поднят до `p2a-1.1.0`. Тестов: 294 + 123 + 108 + 396 = **921** (все зелёные). Прибыльность чего-либо по-прежнему НЕ заявляется: P2-A — это семантика и измеряемость. Статус этапа: **IMPLEMENTED / PENDING INDEPENDENT VPS VERIFICATION** (независимая проверка на VPS владельцем не выполнена; автоматические тесты приёмкой не являются).
+
+**Топология веток (решение владельца, а не догадка).** Hardening физически не мог лечь в основную arena-ветку: её HEAD уже содержал P2-C (`6d621e4`), а требование аудита — родитель ровно `096e13d2` и никакого базирования на P2-B/P2-C. Владелец явно одобрил создание и push ОТДЕЛЬНОЙ sibling-ветки `arena/01a09406-svechnoy-suslik-p2a-hardening`; основная ветка осталась на `6d621e4`. Интеграция hardening + P2-C — отдельный последующий шаг (см. «Миграционное влияние»).
+
+**Что НЕ тронуто (проверено диффом).** `prisma/*`, БД и любые записи, workers, `lib/signals`, Signal Engine, `lib/smc/*`, `lib/strategies/*`, `lib/chart/*`, `components/chart/*`, `app/api/chart/smc/route.ts`, TradingView, `package.json`/`package-lock.json` (новых зависимостей нет), деплой. Изменены только `lib/backtest/*`, тесты P2-A и этот документ.
+
+---
+
+**ДИСПОЗИЦИИ ЗАМЕЧАНИЙ АУДИТА (каждое — FIXED / DOCUMENTED LIMITATION / REJECTED):**
+
+| # | Замечание | Диспозиция | Что сделано |
+|---|---|---|---|
+| BLOCKER 1 | `assertDecisionInvariance` выдавалась за доказательство no-lookahead, но читер с замыканием на собственный массив проходит её зелёным | **FIXED (контракт) + DOCUMENTED LIMITATION (язык)** | Гарантии РАЗДЕЛЕНЫ: A — структурная (доказуема кодом), B — внешнее состояние источника решений (в JS недоказуема). Контрфакт переименован по смыслу в `diagnoseDecisionInvariance` (старое имя сохранено как deprecated-обёртка), каждый отчёт несёт `guarantee: "counterfactual-diagnostic"` и непустой `limitations`. Добавлен крючок `rebind` — единственный способ подменить будущее в держателе источника решений. Для P2-B введён контракт `SignalAdapter` и `certifySignalAdapter` (`guarantee: "context-channel-only"`). Тесты ДОКАЗЫВАЮТ предел метода: читер проходит диагностику (`ok=true`), и это зафиксировано как ожидаемое поведение, а не как успех |
+| HIGH 1 | Гэп на входе отклонял сделку → класс убыточных исходов удалялся из выборки (смещение winRate/PF/drawdown/expectancy) | **FIXED** | Отклонения `entry-levels-breached-at-open` и `entry-fill-outside-levels` УПРАЗДНЕНЫ. Вход исполняется ВСЕГДА по `open(N+1)`; если open за уровнем, позиция открывается и закрывается по тому же open общим гэповым правилом: валовый PnL = 0, чистый = минус издержки. Коды сохранены в типе `RejectReason` и в `RETIRED_REJECT_REASONS` (счётчики всегда 0) — ради совместимости проекций, а не ради видимости работы |
+| HIGH 2 | R считался от фактической цены входа → знаменатель схлопывался (аудит: open = 90.001 при sl = 90 → R ≈ 19999) | **FIXED** | Первичный знаменатель — ПЛАНОВЫЙ риск, известный на баре сигнала: `plannedEntryReference = close(N)`, `plannedRisk = |ref − sl| × qty`; `grossR = gross / plannedRisk`, `rMultiple = net / plannedRisk`, `plannedRewardRisk = |tp − ref| / |ref − sl|`. Слиппедж и гэпы влияют ТОЛЬКО на числитель. Фактическое исполнение публикуются отдельно как диагностика: `riskAmount`, `grossRActualFill`, `rMultipleActualFill`, в метриках `avgRActualFill`, `medianRActualFill`. Прогон «вход в 0.001 от SL, выход по TP» теперь даёт заголовный R ≈ 19.999 при диагностическом ≈ 19999 |
+| HIGH 3 | `validateBars` разыменовывала `null`/дыры → uncaught TypeError | **FIXED** | Обход явным циклом (не `forEach`, который пропускает дыры): `null`/`undefined`/дыра — структурированная ошибка с индексом и причиной; дельты, `firstBarTime`/`lastBarTime` и проверка кратности шага защищены от невалидных записей. Проверено на null-баре, undefined-баре и разреженном массиве — в `runBacktest` и в `runSegmentedBacktest` исключения нет, стадия `bars` |
+| MEDIUM | Числовая полнота: конечные, но огромные входы давали NaN/Infinity в «успешном» результате (maxDrawdown = 0, PF «no-losses»), после чего `serializeResult` бросала | **FIXED** | После вычислений результат сканируется ЦЕЛИКОМ (`findNonFiniteNumbers`): любое неконечное значение → `{ok:false, stage:"arithmetic", errors:[путь]}`. `ok:true` с NaN/Infinity невозможен, сериализация успешного результата не бросает. Проверено на quantity 1e308, fees.bps 1e308, fixedPerSide 1e308, absolute-слиппедже 1e308 × quantity 1e10, ценах 1e200/1e300. Ложных срабатываний нет: огромный `initialEquity` без переполнения остаётся `ok:true` |
+| MEDIUM | Конфиг и результат заморожены только сверху: вложенная мутация рвала `configFingerprint` и `metadata` | **FIXED** | `deepFreeze` применён к разрешённому конфигу, `BACKTEST_DEFAULTS` и всему результату (включая `config.slippage`, `config.fees`, `metrics.exitReasonCounts`, сделки, `facts`, точки эквити). Шесть попыток вложенной мутации бросают TypeError, отпечаток совпадает с `metadata.configFingerprint` до и после |
+| MEDIUM | `warmupBars = 0` ломал реалистичные провайдеры в VALIDATION/OOS | **FIXED** | Адаптер ОБЯЗАН объявить `requiredLookbackBars`; движок и сегментный прогон поднимают разгон как `max(config.warmupBars, requiredLookbackBars − 1)`. Каузальная история ДО окна — это прошлое, а не утечка; искусственных разрывов между сегментами нет (стыковка вплотную проверена). Решения адаптера в сегменте идентичны решениям полного прогона. Для «голой» функции чужое требование истории не выдумывается (requiredLookbackBars = 1) |
+| MEDIUM | `runSegmentedBacktest` сваливал любые внутренние отказы в `stage = "provider"` | **FIXED** | Внутренние стадии сохраняются (`config` / `adapter` / `bars` / `provider` / `arithmetic`), стадия видна и в тексте каждой ошибки (`TRAIN [stage=bars]: …`). При разных стадиях в разных сегментах сообщается стадия ПЕРВОГО упавшего сегмента (TRAIN → VALIDATION → OOS), остальные видны в `errors`; схлопывания нет |
+| MEDIUM | `visibleBars = index + 1` противоречил `firstVisibleIndex > 0` | **FIXED** | `visibleBars = index − firstVisibleIndex + 1` — фактическое число баров, достижимых через `barAt`. Проверка обновлена в пробе и в тестах (warmup = 5, startIndex = 20 → firstVisibleIndex = 15, visibleBars = 6, а не 21) |
+| MEDIUM | «mark-to-market» просадка по close не является консервативной | **FIXED (решение владельца: ОБА варианта)** | Имя и значение `maxDrawdownMarkToMarket` / `…Pct` СОХРАНЕНЫ без изменений (проекция P2-C читает поле по имени), но смысл задокументирован как close-to-close нереализованная оценка. Добавлена отдельная консервативная база `maxAdverseExcursionDrawdown` / `…Pct` (LONG → low, SHORT → high) и экспортируемая кривая `adverseExcursionEquity`. Заголовочные метрики молча не переименованы и не подменены |
+| MEDIUM | `Math.max(...largeArray)` падает RangeError примерно на 150k+ записей | **FIXED** | Все агрегаты переведены на циклы (`maxValue`/`minValue`); spread в слое не остался (проверено grep). Тест на 160 000 сделках: метрики считаются, `largestWin`/`largestLoss`/`maxBarsHeld` корректны, неконечных значений нет. В тесте есть самоконтроль: `Math.max(...те же 160k)` действительно бросает — иначе регрессия ничего не доказывала бы |
+| LOW | Решения не проверялись и не снэпшотились на баре сигнала | **FIXED** | `validateDecisionObject`: `label` — строка (если задан), `facts` — массив строк (если задан), иначе структурированная ошибка провайдера. Скаляры и факты КОПИРУЮТСЯ в отложенный вход: мутация объекта решения после возврата (включая `facts.push`) не меняет запланированную сделку — проверено тестом |
+| LOW | Неизвестные ключи конфига молча игнорировались | **FIXED** | Fail closed: неизвестный ключ на верхнем уровне и внутри `slippage`/`fees` → ошибка стадии `config` (`BACKTEST_CONFIG_KEYS`). Опечатка `timeoutBar` больше не означает «таймаута нет» |
+| LOW | `open-proximity` tie-break не был проверен на «сыром» open | **FIXED (тестами)** | Добавлены проверки: при равенстве дистанций выбирается SL; со слиппеджем, уносящим фактический вход к TP, выбор всё равно делается от `bar.open` без слиппеджа |
+| LOW | `maxDrawdownPct = 0` при нулевой просадке не был зафиксирован | **FIXED (контракт + тест)** | 0 (не `null`) при положительной эквити и отсутствии спада; `null` — только при пике ≤ 0 |
+| LOW | Состояние «все сделки в breakeven» не было разъяснено | **FIXED (контракт + тест)** | PF = `null` с `profitFactorState = "no-losses"`, winRate = 0, expectancy = 0: breakeven не считается прибылью |
+| LOW | `finalEquity` могла разойтись с кривой эквити из-за порядка float-сложения | **FIXED** | `finalEquity` берётся из ПОСЛЕДНЕЙ точки реализованной кривой (тот же порядок сложения), а не как `initialEquity + totalNetPnl`; самосогласованность проверена тестом |
+| OOS | Метка сегмента передавалась провайдеру → «слепой» OOS был фиктивным | **FIXED** | Поле `segment` УДАЛЕНО из `SignalContext` (набор полей зафиксирован тестом: `index, visibleBars, firstVisibleIndex, bar, barAt, position`). Знает ли логика, что её прогоняют в OOS, теперь решает вызывающий слой — и такая утечка становится явной, а не замаскированной движком |
+| OOS | Не было задокументировано, что состояние замыкания провайдера не сбрасывается | **DOCUMENTED + TESTED** | Движок сбрасывает состояние сделок/эквити на границе сегмента, а ПРОИЗВОЛЬНОЕ замыкание провайдера — нет: это обязанность автора стратегии. Зафиксировано в пункте 19 политики и тестом (счётчик замыкания на первом баре OOS ≠ 1) |
+
+REJECTED (с технической причиной) — одно требование в исходной формулировке:
+- «Сертифицировать отсутствие lookahead у произвольного провайдера-функции средствами JS» — **технически невозможно**: язык не позволяет отозвать уже выданные данные, а `poisonFutureBars` создаёт новый массив. Вместо имитации сертификации введены раздельные гарантии (A/B), публикуемые ограничения, `rebind`-крючок и контракт адаптера для P2-B.
+
+---
+
+**СТРУКТУРНАЯ ГАРАНТИЯ vs КОНТРФАКТИЧЕСКАЯ ДИАГНОСТИКА (ключевое различие, которое исходная P2-A смешала).**
+
+- **A. Структурная (доказуема кодом, проверяется пробой).** Данные, которые движок выдаёт через `SignalContext` (`bar`, `barAt`, `position`), будущего не содержат: `barAt(index + k)` при k > 0 бросает, `barAt(firstVisibleIndex − 1)` бросает, `visibleBars` равен фактически доступному числу баров, законные чтения на границах окна работают. Это свойство КАНАЛА ДВИЖКА; оно не зависит от поведения вызывающего кода. Инструмент: `probeProvider` (`guarantee: "structural-context-barrier"` + непустой `limitations`).
+- **B. Внешнее состояние источника решений (в JS недоказуема).** Функция-провайдер может держать будущие бары в замыкании, глобале, кэше, заранее вычисленном срезе или получить их из сети. Никакой тест не может это опровергнуть: подмена массива, переданного движку, до такого источника не доходит. Доказано тестом: читер с замыканием на собственный массив проходит контрфакт с `ok=true`, и при этом его прогон успешен — движок его просто не видит.
+- **Что делает контрфакт.** `diagnoseDecisionInvariance` сравнивает решения до границы и сделки, закрывшиеся до границы, на исходных и «отравленных» данных. Реальная сила: (1) повторная проверка структурного барьера в обоих прогонах, (2) обнаружение утечки на стороне ДВИЖКА (если бы исполнения до границы зависели от будущих баров), (3) при явном `rebind` — обнаружение lookahead в держателе данных источника решений (тот же читер ловится). Без `rebind` проверка вырождена, и это написано в `limitations` каждого отчёта, включая успешный.
+- **Что обязан делать P2-B.** Рыночные данные поступают адаптеру ИСКЛЮЧИТЕЛЬНО через каузальный `SignalContext`, которым владеет движок: никаких собственных массивов баров, глобалов и заранее вычисленных «будущих» срезов. Только при этом условии диагностика имеет смысл, а структурный барьер покрывает весь канал данных. Собственная выборка данных адаптера (источник баров, кэши, внешние факторы) сертифицируется ревью кода, а не этим инструментом. PROJECT_CONTEXT больше НЕ заявляет, что контрфактическая проверка обнаруживает lookahead через замыкания.
+
+**`SignalAdapter` (контракт для P2-B).** `{ adapterId, version, requiredLookbackBars, decide }`; `requiredLookbackBars` — целое ≥ 1 (1 = только текущий бар). Невалидный адаптер → `stage = "adapter"` с перечнем причин (включая неизвестные ключи). Идентичность источника решений попадает в метаданные прогона (`signalSourceKind`, `adapterId`, `adapterVersion`, `requiredLookbackBars`, `historyStartIndex`), то есть в отпечатки: прогон нельзя выдать за прогон другой стратегии.
+
+**`certifySignalAdapter` (что именно сертифицируется).** Четыре проверки: (1) структурная проба в заданном окне; (2) воспроизводимость — два идентичных прогона обязаны дать идентичные решения (ловит накопительное состояние замыкания, текущее время и псевдослучайность); (3) достаточность заявленного `requiredLookbackBars` — прогон с намеренно увеличенной (но всё ещё каузальной) историей обязан дать те же решения, иначе адаптер читает глубже, чем объявил, и его поведение зависит от длины разгона; если увеличенная история упирается в начало массива, проверка объявляется ВЫРОЖДЕННОЙ в `limitations`, а не засчитывается как успех; (4) контрфактическая диагностика с её ограничениями. Отчёт несёт `guarantee: "context-channel-only"` и всегда непустой `limitations`. Проверено на трёх адаптерах: корректный (SMA3) — сертифицирован; занизивший требуемую историю (заявил 2, использует 6) — не сертифицирован с указанием причины; накапливающий счётчик — не сертифицирован по воспроизводимости.
+
+---
+
+**ИЗМЕНЁННАЯ СЕМАНТИКА ИСПОЛНЕНИЯ (полный список, чтобы старые прогоны не читали как новые).**
+
+1. **Вход при гэпе за уровень.** Было: сделка не создавалась, сигнал попадал в `rejectedSignals`. Стало: сделка создаётся, входит по `open(N+1)` и закрывается по тому же open (триггер SL или TP, `gapThrough = true`, `barsHeld = 1`, валовый PnL = 0, чистый = минус издержки). Следствие: winRate/PF/drawdown/expectancy на гэповых сериях СТАЛИ ХУЖЕ — это не регрессия, это устранение смещения.
+2. **Знаменатель R.** Было: `|entryPrice − sl| × qty`. Стало: `|plannedEntryReference − sl| × qty`, где `plannedEntryReference = close` бара сигнала. Следствие: значения `grossR`/`rMultiple`/`avgR`/`medianR`/`avgGrossR`/`medianGrossR` и `plannedRewardRisk` изменились для всех сделок, где open входа ≠ close сигнала (то есть практически для всех).
+3. **Просадка.** Добавлена третья база (adverse excursion); MTM-поле сохранено по имени и значению.
+4. **`visibleBars`.** Формула изменена (при warmup = 0 значение прежнее).
+5. **`SignalContext`.** Поле `segment` удалено — код, который его читал, перестанет компилироваться (намеренно).
+6. **Стадии отказов.** Добавлены `adapter` и `arithmetic`; сегментный прогон больше не сваливает всё в `provider`.
+7. **Конфиг.** Неизвестные ключи — ошибка (прежде игнорировались).
+8. **`RejectedSignal`.** `stopLoss`/`takeProfit`/`referencePrice` теперь `number | null`: неконечные уровни нормализуются в `null`, фактическое значение остаётся в `detail`.
+9. **Метаданные.** Добавлены `signalSourceKind`, `adapterId`, `adapterVersion`, `requiredLookbackBars`, `historyStartIndex`; `warmupStartIndex` сохранил прежний смысл (null для полного прогона).
+10. **Версия контракта.** `p2a-1.0.0` → `p2a-1.1.0`: отпечатки тех же данных и конфигов ИЗМЕНЯТСЯ, старые результаты нельзя сравнивать с новыми байт-в-байт.
+11. **Результат заморожен глубоко** — код, который мутировал вложенные поля результата «для удобства», получит TypeError.
+
+**Миграционное влияние на P2-B и P2-C.**
+- **P2-C (`6d621e4`, отдельная ветка).** (1) Проекция читает `metrics.maxDrawdownMarkToMarket` по имени — имя и значение сохранены, правка не требуется. (2) `mapBacktestFailure` отображает неизвестные стадии в `provider` — новые `adapter`/`arithmetic` не сломают её, но при интеграции их стоит пробросить явно. (3) `contractVersion` сравнивается с импортируемой константой — подъём до `p2a-1.1.0` совместим. (4) `RejectReason` сохранён полностью, поэтому `ZERO_REJECT_COUNTS` с четырьмя ключами остаётся валидным; отставные коды просто всегда нулевые. (5) Новые обязательные поля сделок/метрик/метаданных потребуют дополнить проекции при интеграции (компилятор укажет места). Интеграция — отдельный шаг, в этом коммите P2-C не тронут.
+- **P2-B.** Источник решений обязан быть `SignalAdapter` (а не «голой» функцией) и проходить `certifySignalAdapter` до подключения; данные — только через `SignalContext`; `requiredLookbackBars` объявляется честно (занижение ловится сертификацией); собственное состояние адаптера сбрасывается автором на границах сегментов. Любая выборка данных вне движка — предмет ревью, а не сертификации.
+
+---
+
+**Тесты.** Четыре набора P2-A, все зелёные, детерминированные (без Date.now/random/env/сети/БД):
+- `scripts/test-backtest-engine.ts` — **294/294** (было 260; переписаны ожидания, кодифицировавшие неверную семантику: R по плановому риску, гэповый вход как зафиксированная сделка, формула видимости, предел контрфакта вместо «читер обнаружен»; изоляционный скан теперь вырезает и текст строковых литералов, сохраняя код внутри `${…}`).
+- `scripts/test-backtest-metrics.ts` — **123/123** (без изменений: базовая семантика метрик сохранена).
+- `scripts/test-backtest-splits.ts` — **108/108** (без изменений).
+- `scripts/test-backtest-hardening.ts` — **396/396** (НОВЫЙ): регрессия на каждое замечание аудита + все 16 обязательных adversarial-кейсов (предел контрфакта; LONG/SHORT гэп на уровне и за уровнем SL; LONG/SHORT гэп на уровне и за уровнем TP; вход вблизи SL без схлопывания знаменателя; null-бар; undefined-бар; разреженный массив; overflow; вложенная мутация конфига/результата; реалистичный провайдер с историей в сегментном прогоне; некорректные бары в сегменте → `bars`; `visibleBars` при warmup > 0; 160 000 записей в метриках; провайдер не знает сегмент) + сертификация адаптеров, три базы просадки, `rebind`, снэшот решений, неизвестные ключи конфига, tie-break, `finalEquity`, all-breakeven PF, отставные коды отказов.
+
+**Verification (Arena-песочница; БД, workers, PM2, сеть и `.env` не использовались и не читались).**
+- `npx tsx scripts/test-backtest-{engine,metrics,splits,hardening}.ts` → 294/294, 123/123, 108/108, 396/396.
+- Регрессии, которые этап не должен был задеть (изменений в их модулях нет): `test-smc-lookahead 13/13`, `test-smc-evaluate 31/31`, `test-chart-runtime 81/81`, `test-chart-ux 426/426`, `test-chart-params 37/37`, `test-chart-history 50/50`.
+- `npx tsc --noEmit` локальным typescript — 0 ошибок на всём репозитории.
+- `npm run build` — компиляция успешна; далее известное ограничение песочницы (сбор page-data падает на неинициализированном `@prisma/client` без `DATABASE_URL`), идентичное baseline: ни одна страница/API в этом этапе не менялась.
+- `git diff --check` — чисто; `package.json`/`package-lock.json` — 0 изменений; временные файлы-пробы в репозиторий не попали.
+- Сигнал истории: `git merge-base --is-ancestor edf3732 <HARDENING_SHA>` → exit **1** (Signal Engine dry-run НЕ предок); родитель коммита — ровно `096e13d2`.
+
+**Известные ограничения ПОСЛЕ hardening (честно, без маркетинга).**
+1. **Lookahead через внешнее состояние источника решений недоказуем в JS.** Гарантируется только канал движка; `rebind` расширяет диагностику на держатель данных, но не на замыкания, скопировавшие бары заранее. Компенсация — контракт адаптера (данные только через `SignalContext`) + ревью источника данных + сертификация.
+2. **Сертификация адаптера не проверяет, откуда адаптер берёт данные вне движка**, и не говорит ничего о прибыльности.
+3. **Гэп на входе трактуется как исполнение по open с немедленным закрытием по тому же open.** Это самосогласовано с правилом гэпа на выходе, но реальная биржа могла бы исполнить такой вход иначе (например, отклонить ордер): модель сознательно консервативна по издержкам и не имитирует отказ исполнения.
+4. **Adverse excursion — модельная оценка**: позиция отмечается по наихудшей цене каждого бара (LONG → low, SHORT → high), будущая комиссия выхода не резервируется ни в одной из трёх баз; маржинальной модели и ликвидаций нет, уход эквити ≤ 0 помечается флагом `equityNonPositive`.
+5. **Плановый R — это R против ЗАДУМАННОГО риска**, а не против фактически принятого: при большом слиппедже на входе фактический риск отличается, и это видно только в диагностических полях `*ActualFill`.
+6. **Состояние замыкания провайдера не сбрасывается на границах сегментов** (движок сбрасывает только своё) — воспроизводимость сегментного прогона лежит на авторе стратегии; сертификация ловит нестабильность, но не «чинит» её.
+7. Нет Sharpe/Sortino, walk-forward, Monte-Carlo, подбора параметров, маржинальной модели, частичных закрытий, пирамидинга, трейлинга — всё это вне P2-A (см. §43).
+8. **Независимая проверка P2-A на VPS не выполнена**: 921 автоматическая проверка — это не приёмка. Приёмка — отдельный ручной шаг владельца.
+9. P2-A не оценивает и не доказывает прибыльность чего-либо: никаких выводов о стратегиях по этому этапу делать нельзя.
+
+**Files changed (один коммит, `lib/backtest/contract.ts` 1169 строк, `engine.ts` 811, `no-lookahead.ts` 1020, `validate.ts` 547, `splits.ts` 495, `metrics.ts` 440, `costs.ts` 160, `serialize.ts` 158 — без изменений; `scripts/test-backtest-hardening.ts` новый, `scripts/test-backtest-engine.ts` обновлён; `PROJECT_CONTEXT.md` — этот §44, баннер и inline-пометки в §43, статус в roadmap §7).**
+
+**Deliverable.** ОДИН hardening-коммит с родителем ровно `096e13d2a5a526d304b0448d987afdc6abf09ce2` в одобренной владельцем sibling-ветке `arena/01a09406-svechnoy-suslik-p2a-hardening`; основная arena-ветка осталась на `6d621e4` (P2-C); `main` не тронут. Исходная P2-A не переписана. БД/workers/Strategy/деплой/Signal Engine не тронуты. После коммита, push и отчёта — STOP.
+---
+
+## 45. P2-A HARDENING #2 — повторный независимый аудит `f87d6f90`: вердикт **PASS WITH RISKS**, закрыты два замечания MEDIUM (NEW-1 TOCTOU решения, NEW-2 fail-open контейнера `signals`)
+
+Эта запись ДОПОЛНЯЕТ §43 (исходная P2-A `096e13d2` + inline-пометки) и §44 (hardening #1 `f87d6f90`) и ничего в них не стирает и не переписывает. История коммитов сохранена: `096e13d2` → `f87d6f90` → этот коммит; ни один из предыдущих коммитов не amend-нут, не переписан и не удалён.
+
+### 45.1. Вердикт повторного аудита
+
+Коммит `f87d6f90` (hardening #1, §44) прошёл повторный независимый адверсарный аудит с вердиктом **PASS WITH RISKS**:
+
+- Все исходные замечания **BLOCKER и HIGH подтверждены ИСПРАВЛЕННЫМИ**: контрфактическая проверка больше не выдаётся за доказательство (гарантии A/B разделены, `diagnoseDecisionInvariance` + `rebind`, `certifySignalAdapter`), гэп на входе исполняется по `open(N+1)` и НЕ удаляет сделку из выборки, знаменатель R — плановый риск (`plannedRisk`), `validateBars` не падает на null/undefined/дырах, стадии сегментного прогона сохраняются (не схлопываются в `provider`), warmup поднимается по заявленному `requiredLookbackBars`, `maxDrawdownMarkToMarket` сохранён по имени и значению + добавлен консервативный `maxAdverseExcursionDrawdown`, результат заморожен глубоко и конечен целиком, метка сегмента из контекста убрана (слепой OOS), неизвестные ключи конфига отклоняются.
+- Новых замечаний BLOCKER/HIGH аудит не выявил.
+- Выявлены **ДВА новых замечания MEDIUM** (NEW-1, NEW-2) — оба закрыты этим коммитом (§45.2, §45.3).
+- Риски вердикта — это ограничения метода, а не дефекты кода: они перечислены в §44 (пункты 1-9) и дополнены в §45.6 (пункты 10-15).
+
+### 45.2. NEW-1 (MEDIUM, ЗАКРЫТО) — TOCTOU решения источника сигналов
+
+**Замечание аудитора.** Движок читал поля возвращённого решения НЕСКОЛЬКО раз: `validateDecisionObject` (структурные проверки) → `validateEntryDecisionShape` (уровни) → `levelsBracket` (обрамление опорной цены) → снимок отложенного входа. Объект с геттерами или Proxy мог возвращать разные значения на разных чтениях: сценарий аудитора — `stopLoss` возвращает `90` при первом чтении (валидация и обрамление проходят) и `-5` при повторном (в сделку уходит `-5`). Формально это «проверили одно — исполнили другое»: валидация теряла смысл, а плановый риск/R считались от значения, которое никто не проверял.
+
+**Что сделано (пункт 23 политики контракта).**
+
+1. Добавлен `captureSignalDecision(raw: unknown): DecisionCapture` (contract.ts): возвращённое источником значение читается в **plain-снимок `CapturedDecision` ДО любой семантической проверки**, и КАЖДОЕ поле читается **РОВНО ОДИН РАЗ**: `kind`, `stopLoss`, `takeProfit`, `label`, `facts` (массив копируется поэлементно один раз и замораживается). Неиспользуемые собственные поля перечисляются в `extraKeys` (диагностика, на исполнение не влияют).
+2. **Проверяется снимок, а не исходный объект**: `validateEntryDecisionShape(levels: CapturedLevels)` принимает уровни как `unknown` и при успехе возвращает **проверенные числа** (`stopLoss`, `takeProfit`); движок исполняет именно их.
+3. После снимка исходный объект решения в движке **не читается нигде**: ни для обрамления (`levelsBracket`), ни для снимка отложенного входа, ни для записи сделки (`label`, `facts` берутся из снимка).
+4. `label` приведён к документированному типу: строка, если поле задано, иначе `""`; `facts` — только НАСТОЯЩИЙ массив строк, копия, `Object.freeze`.
+5. Снимок делается **под той же защитой try/catch**, что и вызов провайдера: геттер/ловушка Proxy, которая бросает, даёт структурированный отказ `stage: "provider"` с причиной, а не исключение движка.
+6. Тот же принцип распространён на **адаптер**: `captureSignalAdapter(raw)` читает `adapterId`, `version`, `requiredLookbackBars`, `decide` по одному разу и возвращает замороженный снимок; движок, сегментный прогон, `probeProvider` и `certifySignalAdapter` работают со снимком (геттер не может пройти проверку одной `decide`, а прогонам отдать другую, и `requiredLookbackBars` не может «подрасти» после расчёта warmup). `validateSignalAdapter` сохранена как тонкая обёртка над снимком — тексты ошибок прежние.
+7. Тексты ошибок строятся через `describeValue(value)`, который **не вызывает пользовательский `toString`/`Symbol.toPrimitive`**: hostile-значение не может ни бросить исключение, ни подставить произвольный текст в отказ.
+8. `validateDecisionObject` **УДАЛЁН**: он дублировал проверки снимка и был вторым чтением полей (единственная точка входа теперь снимок).
+
+**Тесты (секция 14 файла `scripts/test-backtest-hardening.ts`).** Счётчик чтений ведётся по каждому из пяти полей: геттер `stopLoss` 90 → −5 (исполнен 90, прочтений 1, плановый риск от 90); геттер `takeProfit` 110 → 5; геттер `label`; геттер `facts` (копия, не ссылка; мутация исходного массива ПОСЛЕ прогона сделку не меняет); все пять полей — по одному чтению, причём геттеры **бросают на втором чтении** (прогон успешен ⇒ повторных чтений нет); **Proxy**-решение с переключающимся `stopLoss` (ловушка `get` вызвана по разу на поле); детерминизм — два прогона с идентичным поведением геттеров дают идентичный `serializeResult`; невалидное ПЕРВОЕ значение (`stopLoss: −5 → 90`) даёт отказ сигнала `invalid-levels` с видимым в причине `-5` и БЕЗ второго чтения («второго шанса» нет); no-trade решение (`CANNOT_EVALUATE`) тоже читается по одному разу на поле; бросающий геттер → `stage: "provider"`, движок не падает; снимок адаптера: `adapterId`/`version`/`requiredLookbackBars`/`decide` прочитаны по разу, в метаданных первые значения, warmup посчитан по первому `requiredLookbackBars`; юнит-проверки `captureSignalDecision` (null/undefined/число/строка/массив/функция/Map/Date — не решение; неизвестный `kind`; `label` не-строка; `facts` не-массив; не-строка внутри `facts`; `extraKeys`; снимок заморожен) и `describeValue` (детерминированные описания, чужой `toString` не вызывается).
+
+### 45.3. NEW-2 (MEDIUM, ЗАКРЫТО) — контейнер `signals` был fail-open
+
+**Замечание аудитора.** Любой объект, не похожий на адаптер, молча трактовался как «пустой список решений»: `signals: {}`, `42`, `true`, `new Map()`, `new Set()`, `new Date()`, `null`, `undefined`, array-like `{0: decision, length: 1}`, объект с `Decide` вместо `decide` давали **`ok: true` и 0 сделок** — то есть опечатка или мусор на входе выглядели как «стратегия не дала ни одного сигнала». Это fail-open: ложный «успешный» прогон вместо структурированного отказа.
+
+**Что сделано (пункт 24 политики контракта).**
+
+1. Добавлена `classifySignalSource(source: unknown): SignalSourceCheck` (validate.ts) — **строгая классификация ДО исполнения**. Допустимы ровно три формы: (A) настоящий `Array` решений, (B) функция-провайдер, (C) валидный `SignalAdapter`. Всё остальное — структурированный отказ.
+2. Введена **новая узкая стадия отказа `"signals"`** (недопустимый контейнер); объект, похожий на адаптер, но невалидный (нет `decide`, опечатка `Decide`, `decide` не функция, мусорный `requiredLookbackBars`, пустой `adapterId`), отказывает со стадией `"adapter"` и с явной подсказкой про регистр ключа.
+3. **Объект, похожий на массив, массивом НЕ считается**: у `{length, 0: …}` отказ `stage: "signals"` с отдельной строкой про array-like; у `Map`/`Set` — подсказка про `Array.from(...)`. Общий объектный fallback удалён: `signalProviderFromList` вызывается только для настоящего `Array`.
+4. Признаки «похож на адаптер» ищутся по собственным ключам И по прототипу (`in`, геттеры не вызываются): класс-стратегия с `decide` в прототипе падает как невалидный адаптер, а не как «неизвестный контейнер».
+5. **Сегментное распространение обновлено**: `runSegmentedBacktest` классифицирует контейнер до сплита и до прогонов (недопустимый контейнер больше не даёт три «успешных» сегмента с нулём сделок), все три сегмента получают ОДИН замороженный снимок адаптера; тип `SegmentedFailureStage` теперь **наследуется** из стадий движка (`Exclude<BacktestOutcome, { ok: true }>["stage"] | "split" | "leakage"`), поэтому новая стадия `"signals"` распространяется автоматически, без второго списка, который мог бы разойтись.
+6. Диагностика наследует то же правило: `probeProvider` с недопустимым контейнером возвращает `ok: false`, повторяет ошибки классификации и передаёт источник движку КАК ЕСТЬ, чтобы отказ остался структурированным (`diagnoseDecisionInvariance` и `certifySignalAdapter` идут через ту же точку входа).
+
+**Тесты (секция 15).** 19 недопустимых контейнеров (`{}`, `42`, `true`, `false`, строка, `new Map()`, `new Set()`, `new Date(0)`, `null`, `undefined`, `Map` с решениями, array-like `{0: decision, length: 1}`, `{length: 3}`, класс-экземпляр без `decide`, адаптер без `decide`, адаптер с `Decide`, адаптер с `decide: 42`, адаптер с `requiredLookbackBars: 0`, адаптер с пустым `adapterId`) × 4 проверки каждая: не `ok:true`; ожидаемая стадия (`signals`/`adapter`); ошибки непустые; `classifySignalSource` согласован с движком. Плюс: array-like — подсказка в тексте; `Map` — подсказка про Map/Set; опечатка `Decide` — отказ `adapter` с указанием обоих ключей. Валидные формы по-прежнему работают: `[]` → `ok:true`, 0 сделок, `signalSourceKind: "list"`; функция → `"provider"`; `Array` с решением → сделка есть; `SignalAdapter` → `"adapter"` с `adapterId` в метаданных. Сегментный прогон: `{}` → `stage: "signals"`, опечатка `Decide` → `stage: "adapter"`, array-like → `stage: "signals"`, валидный пустой массив → `ok:true`. `probeProvider`: мусорный контейнер → `ok:false` + `stage: "signals"`, валидный провайдер — зелёный. Юнит: снимок адаптера (чтение `adapterId` один раз, снимок заморожен, неполный адаптер отклонён, `validateSignalAdapter` совместим).
+
+### 45.4. Побочный дешёвый hardening (без расширения скоупа)
+
+- **`deepFreeze`: защита от циклов** через `visited: WeakSet<object>` (параметр необязательный, существующие вызовы не изменились). Самоцикл `a.self = a`, взаимный цикл `a ↔ b` и циклический массив больше не дают бесконечную рекурсию/`RangeError`; объекты заморожены.
+- **Срез глубины в скане конечности УДАЛЁН**: прежний `depth > 8` в `findNonFiniteNumbers` означал, что неконечное число глубже 8 уровней не находилось, то есть проверка «результат конечен целиком» (пункт 17 политики) была неполной. Теперь обход без ограничителя глубины, циклы отсекаются `WeakSet`, а `limit` ограничивает число СООБЩЕНИЙ (не обход): NaN на глубине 15 находится, `Infinity` в циклической структуре находится, 25 NaN при `limit=20` дают 20 сообщений и 25 при `limit=100`.
+
+### 45.5. Что НЕ изменилось
+
+Семантика исполнения ВАЛИДНЫХ прогонов не менялась: те же правила входа/выхода, гэпов, издержек, R, просадок, сегментов и warmup. Все 921 проверка hardening #1 остались зелёными без изменения ожиданий, кроме двух мест: константа версии контракта (`p2a-1.1.0` → `p2a-1.2.0`) и текст ошибки про не-строку внутри `facts` (сообщение объединено в одно: «facts должен содержать только строки: facts[i] = …»). Версия контракта поднята, потому что изменилась семантика ОТКАЗОВ (новая стадия `"signals"`, снимки решений и адаптеров) — отпечатки тех же данных и конфигов изменятся, старые результаты нельзя сравнивать с новыми байт-в-байт.
+
+### 45.6. Мутационные контроли (негативные проверки тестов)
+
+Каждый фикс проверен «обратной мутацией»: если фикс откатить, тесты ОБЯЗАНЫ падать.
+
+| Мутация (временная, затем откачена) | Результат |
+|---|---|
+| В `classifySignalSource` вернуть fail-open: любой объект → пустой список решений | **37 падений** (527/564): все проверки стадий `signals`/`adapter`, сегментного прогона и пробы |
+| В движке исполнять уровень ПОВТОРНЫМ чтением исходного решения вместо снимка | Падения: «исполнен −5 вместо 90», «подменённое значение −5 исполнено», «прочтений 2 вместо 1», «плановый риск 102 вместо 7» |
+| Вернуть срез глубины (`> 8` уровней не сканируется) в `findNonFiniteNumbers` | Падение: «NaN на глубине 15 найден» |
+
+После восстановления исходного кода — **567/567**.
+
+### 45.7. Проверки этого коммита
+
+- Тесты P2-A: `test-backtest-engine` **294/294**, `test-backtest-metrics` **123/123**, `test-backtest-splits` **108/108**, `test-backtest-hardening` **567/567** (было 396; добавлено 171 проверка) = **1092**.
+- Регрессии смежных слоёв (не изменялись, прогнаны для контроля): `test-smc-lookahead` 13/13, `test-smc-evaluate` 31/31, `test-chart-runtime` 81/81, `test-chart-ux` 426/426, `test-chart-params` 37/37, `test-chart-history` 50/50 = 638.
+- `npx tsc --noEmit` — 0 ошибок (`tsx` типы НЕ проверяет, поэтому проверка отдельная).
+- `npm run build` — компиляция успешна; далее известное ограничение песочницы (сбор page-data падает на неинициализированном `@prisma/client` без `DATABASE_URL`), идентичное baseline: ни одна страница/API в этом этапе не менялась.
+- `git diff --check` — чисто; `package.json`/`package-lock.json` — 0 изменений (новых зависимостей нет); временные файлы-скрипты в репозиторий не попали.
+- История: родитель коммита — ровно `f87d6f90a864ab60e9ce74e412f7259233011d8b`; `f87d6f90` не переписан, не amend-нут; `096e13d2` — его родитель; сигнал-предок `git merge-base --is-ancestor edf3732 <NEW_SHA>` → exit **1** (Signal Engine dry-run НЕ предок).
+
+**Что НЕ тронуто (проверено диффом).** `prisma/*`, БД и любые записи, workers, `lib/signals`, Signal Engine, `lib/smc/*`, `lib/strategies/*`, `lib/chart/*`, `components/*`, `app/*`, TradingView, `package.json`/`package-lock.json`, деплой. Изменены только `lib/backtest/{contract,engine,validate,splits,no-lookahead}.ts`, `scripts/test-backtest-hardening.ts` и этот документ. P2-B и P2-C в этот коммит НЕ входили (P2-C живёт в отдельной ветке `6d621e4`).
+
+### 45.8. Ограничения ПОСЛЕ hardening #2
+
+Пункты 1-9 из §44 остаются в силе без изменений (недоказуемость lookahead через внешнее состояние источника решений в JS; пределы сертификации; трактовка гэпа на входе; модельность adverse excursion; плановый R против задуманного риска; состояние замыкания провайдера на границах сегментов; отсутствие Sharpe/walk-forward/Monte-Carlo/подбора параметров/маржинальной модели/частичных закрытий; отсутствие приёмки на VPS; отсутствие заявлений о прибыльности). Дополнительно:
+
+10. **Снимок решения закрывает TOCTOU в пределах одного решения на баре**, а не поведение источника между барами: если провайдер держит состояние в замыкании и меняет его от бара к бару, это поведение стратегии (проверяется воспроизводимостью/сертификацией), а не гонка чтения.
+11. **Снимок не делает источник детерминированным**: геттер, возвращающий разные значения в разных ПРОГОНАХ, снимком не лечится — его ловят проверки воспроизводимости (`certifySignalAdapter`), а не `captureSignalDecision`.
+12. **Строгость классификации относится к ФОРМЕ контейнера**, а не к содержимому массива: элементы `Array` по-прежнему проверяются поштучно на баре (решение либо null), как и раньше.
+13. **Отказ `stage: "signals"` — новый элемент контракта.** Внешние потребители (например, проекция P2-C `mapBacktestFailure`), которые отображают неизвестные стадии в `provider`, не сломаются, но при интеграции стадию стоит пробросить явно.
+14. **Независимая проверка P2-A на VPS владельцем по-прежнему НЕ выполнена**: 1092 автоматические проверки приёмкой не являются. Статус этапа: **IMPLEMENTED / PENDING FINAL INDEPENDENT VERIFICATION**.
+15. **Прибыльность чего-либо по-прежнему НЕ заявляется** и этим этапом не проверяется: P2-A — семантика и измеряемость, а не сигнал и не доходность.
+
+**Files changed (один коммит; `git diff --numstat`, добавлено/удалено строк).** `lib/backtest/contract.ts` → 1415 строк (+251/−5), `lib/backtest/validate.ts` → 787 (+330/−90), `lib/backtest/engine.ts` → 857 (+98/−70), `lib/backtest/no-lookahead.ts` → 1053 (+62/−29), `lib/backtest/splits.ts` → 499 (+34/−30), `scripts/test-backtest-hardening.ts` → 3609 (+1117/−3), `PROJECT_CONTEXT.md` → 4005 (+94/−1: этот §45 и дополненный статус в roadmap §7). Всего 7 файлов, других изменений в коммите нет.
+
+**Deliverable.** ОДИН коммит hardening #2 с родителем ровно `f87d6f90a864ab60e9ce74e412f7259233011d8b` в отдельной sibling-ветке `arena/01a09406-svechnoy-suslik-p2a-hardening-2` (создана владельцем разрешением на continuation-ветку); ветка hardening #1 осталась на `f87d6f90`, основная arena-ветка — на `6d621e4` (P2-C), `main` не тронут. Force-push, amend и rebase не применялись. После коммита, push и отчёта — STOP.
+
+46. P2-B — DATA PLANE (12.09.2026): ЦЕПОЧКА, КАНОНИЧЕСКОЕ ПОКРЫТИЕ, ПРИЁМКА
+=====================================================================
+
+**Скоуп.** Только слой доставки исторических данных для P2-A: `lib/backtest/{adapter,coverage,data-plan,data-source,eligibility,gaps,intervals,timeframe,immutable}.ts` и CLI `scripts/backtest-data-plan.ts`. Никаких записей в БД, никаких workers, никаких новых зависимостей, никакой прибыльности.
+
+**Цепочка коммитов (sibling-ветки; `main` не тронут).**
+
+| Коммит | Содержание | Родитель |
+| --- | --- | --- |
+| `a0e94a1` | Первая реализация P2-B data plane | main-линия |
+| `aa85309` | P2-B hardening #1: requested-range coverage, безопасная пагинация, upstream-eligibility Smart Money, historical as-of, CLI SIMULATED / NO DB | `a0e94a1` |
+| `3234007` | P2-B hardening #2: каноническая сетка покрытия, V2-адверсариальные тесты, реальная граница `maxRows`, глубокая иммутабельность, честная формулировка no-lookahead | `aa85309` |
+| `15ffd8a` | P2-B hardening #3 (финальный узкий фикс): test-pin финальной ASC-защиты, уточнение классификации мутаций, контракт провайдера | `3234007` |
+
+**Аудит-цепочка и итоговый вердикт.** Независимый адверсариальный аудит `3234007` (read-only, из pristine-экспортов): идентичность/топология, NEW-1 каноническое покрытие (280 независимых проверок), NEW-2 V2-адверсариальные атаки, NEW-3 матрица `maxRows`, NEW-4 глубокая/вложенная иммутабельность с Date-aliasing в обе стороны, NEW-5 формулировка no-lookahead, mutation-пере-аудит (M6/M18/M19/M20 подтверждены эквивалентными; M23/M31 — только в рамках контракта провайдера) — вердикт **PASS WITH RISKS** (риски отнесены к точности заявлений/тестов, не к fail-open в коде). После hardening #3 независимая узкая проверка H2 на `15ffd8a` — **PASS** (test-pin убивает мутантов удаления финальной ASC: 399/402 и 400/402).
+
+**Ключевые принятые контракты P2-B.**
+
+1. **Каноническая сетка (не non-aligned-range fix).** Ожидаемые слоты — пересечение `[from, to)` с канонической сеткой таймфрейма (`openTime % D == 0`), а НЕ from-anchored `from + k·D`. Невыровненные границы канонизируются (`effectiveFrom = ceil(from / D)·D`), и это раскрывается в `requestedAlignment` (canonicalized), в aggregate (`requiresCanonicalWindowDisclosure`), в плане/отчёте и в CLI. Окно без канонических открытий — fail closed (`CanonicalWindowError`), а не «покрытие 0 %». Off-grid бары не считаются канонической занятостью и видны отдельно (`offGridBarsInRequestedRange`).
+2. **Пагинация.** Строгий ASC внутри страницы и финально, отказ на дубликаты, отсутствие прогресса курсора, over-return, чужой marketId/timeframe, `closed=false`, выход за `[from, to)`, malformed/non-finite строки; терминация ограничена `maxPages`.
+3. **`maxRows`.** Жёсткая граница успешного результата: проверка на ДОБАВЛЕНИЕ страницы (`already + page > maxRows` → fail closed), молчаливое усечение запрещено. Регресс аудита (maxRows=1/pageSize=5000 возвращал ~4000 строк) закрыт в V1 и V2.
+4. **Иммутабельность.** Все публичные структуры глубоко заморожены; строки и Date-поля копируются при публикации; мутация источника после вычисления и мутация результата потребителем не меняют выданные данные (JS-ограничение: `Object.freeze` не защищает `Date.setTime` собственной копии потребителя).
+5. **Финальная ASC-защита и контракт провайдера.** Во время пагинации V1/V2 удерживают provider-owned строки/Date до финального копирования; контракт провайдера — не мутировать возвращённые строки; финальная ASC-проверка — defense-in-depth против пост-фактум мутации уже принятых строк (запинено регрессией).
+6. **No-lookahead (не переоценивать).** Гарантия только структурная — context-channel (`SignalContext.barAt` + `visibleBars === index − firstVisibleIndex + 1`); контрфактическая проверка — ДИАГНОСТИКА с ограничениями; произвольный чит через замыкание/глобальную переменную недоказуемо предотвратим (в P2-A p2a-1.2.0 есть контракт адаптера и `certifySignalAdapter`).
+
+**Тесты.** P2-B набор `scripts/test-backtest-p2b.ts`: `aa85309` → 228/228; `3234007` → 395/395; `15ffd8a` → **402/402**. Интеграция с P2-A (см. §47) добавляет bridge- и boundary-регрессии.
+
+**Прибыльность.** НЕ заявляется и не может быть заявлена: P2-B — доставка честных исторических данных и метрики покрытия. Реальная БД, credentials, запись в БД, walk-forward и оптимизация — предмет отдельного одобрения владельца.
+
+**Статус.** **IMPLEMENTED / PENDING FINAL INDEPENDENT VERIFICATION.** Независимая проверка на VPS владельцем НЕ выполнена; автоматические тесты приёмкой не являются. P2-C не начат.
+
+47. P2AB INTEGRATION (12.09.2026): ФИНАЛЬНАЯ P2-A + ПРИНЯТЫЙ P2-B DATA PLANE
+========================================================================
+
+**Топология.** База интеграции — ровно `6f1977e44f10898b6bcfb3e99bfc3d1218db5840` (**финальная независимо принятая P2-A, контракт `p2a-1.2.0`**). Источник P2-B — ровно `15ffd8a120a991524e3049c0730e3869dca33e53` (**финальный code-level PASS**). Ветка `15ffd8a` происходит от старой sibling-линии P2-B (`aa85309`) и поэтому её дерево содержит СТАРЫЕ файлы P2-A (`p2a-1.0.0`); интеграция НЕ является merge/cherry-pick этой линии и не восстанавливает ни один старый P2-A файл. Выполнен ОДИН чистый коммит с единственным родителем ровно `6f1977e4` (не merge-commit).
+
+**Перенос (только net accepted P2-B data plane; новые файлы):** `lib/backtest/adapter.ts`, `coverage.ts`, `data-plan.ts`, `data-source.ts`, `eligibility.ts`, `gaps.ts`, `intervals.ts`, `timeframe.ts`, `immutable.ts`, `scripts/backtest-data-plan.ts`, `scripts/test-backtest-p2b.ts`.
+
+**Защищённое ядро P2-A не заменялось** (осталось версиями `6f1977e4` / `p2a-1.2.0`): `contract.ts`, `engine.ts`, `validate.ts`, `splits.ts`, `metrics.ts`, `costs.ts`, `serialize.ts`, `no-lookahead.ts`, `scripts/test-backtest-hardening.ts`.
+
+**Адаптации интеграции (узкие, без изменения финансовой семантики).**
+
+1. `scripts/test-backtest-engine.ts` — политика изоляции расширена узко: 8 файлов P2-A ядра сохранены строгими (только `./`, `node:crypto` лишь в `serialize.ts`), для P2-B data-plane файлов дополнительно разрешены существующие `../strategies/*` (eligibility) и `../smc/*` (типы). Скан запрещённых токенов (env/время/случайность/сеть/Prisma) не ослаблен и применяется ко ВСЕМ файлам.
+2. `PROJECT_CONTEXT.md` — ручной merge: сохранены §43–§45 (история P2-A p2a-1.2.0), НЕ скопированы устаревшие тексты sibling-дерева (статус «260 тестов», ранняя формулировка про сертификацию); добавлены статус P2-B в roadmap §7, §46 (P2-B) и этот §47.
+3. `scripts/test-backtest-p2b.ts` — добавлены две секции: **bridge-тест** (P2-B-данные → `validateBars`/`runBacktest` p2a-1.2.0 → `metadata.contractVersion === BACKTEST_CONTRACT_VERSION`, согласованность таймфрейма/сетки) и **boundary-регрессия D2/H1** (сигнал до границы, вход на/после границы, «отравленное» будущее → `assertDecisionInvariance` НЕ должен ложно сообщать lookahead). Прежние P2-B контракты не ослаблены.
+
+**D2/H1 (унаследованное замечание аудита P2-B) — проверено на неизменённой `6f1977e4`.** Сценарий: сигнал на баре `boundary − 1`, вход на баре `boundary`, «отравленное» будущее; в старой P2-A (`p2a-1.0.0`) движок записывал отказ по уровням входа с индексом СИГНАЛА, из-за чего префиксный фильтр `traceOf` ложно сообщал lookahead. Результат на `6f1977e4`: **НЕ воспроизводится — уже закрыто в p2a-1.2.0** причинно, а не косметически: движок больше НЕ порождает отказы, причина которых — бар входа (`RETIRED_REJECT_REASONS`: `entry-levels-breached-at-open`, `entry-fill-outside-levels`), а все оставшиеся записи (`invalid-levels`, `levels-on-wrong-side`, `position-open`, `no-next-bar`) определяются баром сигнала/геометрией окна. Батарея из 6 сценариев (включая позицию, пересекающую границу, и реальный context-чит как положительный контроль) — без ложных срабатываний. Латентный риск сохранён: `traceOf` по-прежнему фильтрует skipped/rejected по индексу сигнала; это корректно при текущей семантике, но при возврате причин, зависящих от бара входа, потребуется отдельный цикл фикса/аудита P2-A.
+
+**Тесты интеграции (независимо, в дереве с родителем `6f1977e4`).** P2-A engine + P2-A hardening + metrics + splits, полный P2-B набор, Smart Money eligibility, bridge/boundary-регрессии; `tsc --noEmit` и `npm run build` — предсуществующие отказы окружения (Prisma client не сгенерирован), НЕ приёмка. Точные числа — в отчёте интеграционного коммита.
+
+**Прибыльность.** НЕ заявляется. **VPS-верификация владельцем НЕ выполнена.** P2-C НЕ интегрирован.
+
+48. P2-C — ЭКСПЕРИМЕНТ И ОТЧЁТ (12.09.2026): ИНТЕГРАЦИЯ ПОВЕРХ ФИНАЛЬНОЙ P2AB
+===========================================================================
+
+**Топология.** База интеграции — ровно `f00e47da79cb118e467970a435f606d05894ae49` (финальная независимо принятая P2AB: hardening #2 изоляционного сканера; родитель `adc03fc`). Источник — sibling-коммит `6d621e475aa38a054460fe66af4a388e9afbfebe` («P2-C: фундамент эксперимента и отчёта», линия старой P2-A `096e13d`/`p2a-1.0.0`). Интеграция НЕ является merge/cherry-pick этой линии: перенесён ТОЛЬКО слой эксперимента/отчёта и адаптирован к `p2a-1.2.0`; ни один файл `lib/backtest` из sibling-дерева не восстановлен. Выполнен ОДИН коммит с единственным родителем ровно `f00e47d` (не merge-commit). §46/§47 сохранены как история; строка §47 «P2-C НЕ интегрирован» заменяется этим пунктом.
+
+**Новые пути (только слой эксперимента и его тесты).** `lib/experiment/contract.ts` (контракт `p2c-1.1.0`), `identity.ts` (идентичность варианта/субъекта), `run.ts` (прогон сегментов и контракт отказа), `report.ts` (проекция свидетельств, сравнение, текстовый отчёт), `selection.ts` (детерминированное ранжирование), `validate.ts` (сверки и приёмка поданных результатов); `scripts/test-experiment-contract.ts`, `scripts/test-experiment-report.ts`, `scripts/test-experiment-leakage.ts`, `scripts/test-experiment-hardening.ts`.
+
+**C0 — сверка эквити (исправление дефекта источника).** Источник требовал ТОЧНОГО равенства `finalEquity === initialEquity + totalNetPnl`; на hardened-P2-A это отвергало ПОДЛИННЫЕ результаты (накопление плавающей точки; baseline-набор leakage — 170/174). Принятая двойная проверка: (1) ТОЧНОЕ `finalEquity ===` последняя точка `equityCurve`; (2) ограниченная сверка `|finalEquity − (initialEquity + totalNetPnl)| <= 1e-9 * max(1, |initialEquity|)`. Допуск покрывает только накопление плавающей точки: значимая бухгалтерская ошибка (например, +1000) отвергается — негативные контроли в наборе.
+
+**C1/C2 — стадии отказа P2-A.** Экспортирована исчерпывающая карта `BACKTEST_FAILURE_STAGE_MAP` над объединением стадий P2-A: `config`→`invalid-config`, `adapter`→`adapter-failure`, `signals`→`signals-failure`, `bars`→`invalid-bars`, `provider`→`provider-failure`, `arithmetic`→`arithmetic-failure`. Молчаливого сведения к `provider-failure` нет; нетипизированная стадия даёт явный `segment`/`segment-failure`, а не «provider». Тексты ошибок P2-A переносятся дословно (проверено на реальном исключении провайдера и на переполнении арифметики при конечном входе). Слой идентичности P2-C отвергает несериализуемые контейнеры решений и adapter-объекты ЯВНО на уровне варианта (`variant`/`invalid-variant`) — до P2-A и не как provider-отказ. Контракт поднят до `p2c-1.1.0`.
+
+**C3 — нефинитные свидетельства (fail closed).** NaN/±Infinity в спроецированных метриках не попадают в ранжирование: вариант исключается с явной причиной `non-finite-evidence` (расширение `RankingExclusionReason`), не может стать рангом 0; при нефинитности всех вариантов ранжирование пусто.
+
+**C4 — глубокая неизменяемость.** Публичные выходы (VariantRecord, SegmentReport, EvidenceMetrics, EvidenceBlocks, ComparisonRow, ComparisonView, RankingRecord) замораживаются повторно используемым `deepFreeze` из `lib/backtest/immutable.ts`; попытки мутации не меняют ни значения, ни отпечатки.
+
+**C5 — проекция метрик.** Метрики P2-A проецируются ДОСЛОВНО (маркер `p2a-metrics-verbatim`), включая hardened-метрики `maxAdverseExcursionDrawdown`, `maxAdverseExcursionDrawdownPct`, `avgRActualFill`, `medianRActualFill`; пересчёта нет. Первичные `avgR`/`medianR` считаются по ПЛАНОВОМУ риску; `*ActualFill` — диагностика; семантика метрик P2-A не изменена.
+
+**C6 — границы честности.** В записи и отчёте публикуется непустой `EXPERIMENT_LIMITATIONS` (7 пунктов): OOS структурно исключён из входов выбора/ранжирования; SignalContext не содержит метки сегмента; это НЕ доказательство невозможности использовать замыкание/глобальное будущее; `assertDecisionInvariance` — контрфактическая диагностика, а не абсолютное доказательство; структурная гарантия — только по каналу контекста; отчёт не является заявлением о доходности; историческая реконструкция eligibility невозможна (текущие rank/quoteVolume не подставляются). Инвариант непустых ограничений проверяется на записи.
+
+**C7 — изоляция отпечатков OOS.** Изменение ТОЛЬКО OOS-результата меняет общий/отчётный отпечаток, но НЕ меняет выбор/ранжирование по TRAIN/VALIDATION; подмена только сохранённого отпечатка OOS-отчёта отвергается проверкой `report.resultFingerprint === fingerprintResult(result)` для поданных сегментных результатов.
+
+**Границы слоя (не заявляется).** P2-C не содержит: SMC→P2-A адаптера, политики SL/TP, runner'а прибыльности, исполнения экспериментов поверх БД; доступа к БД/сети/времени/случайности в `lib/experiment` нет. Прибыльность НЕ заявляется; синтетические фикстуры — только корректность. Финансовая семантика P2-A (`p2a-1.2.0`) и принятая семантика P2-B data plane не изменены.
+
+**Тесты.** P2-C: contract 212/212, report 225/225, leakage 174/174, hardening C0–C7 69/69. Регрессия: engine 415/415, hardening 567/567, P2-B 427/427, metrics 123/123, splits 108/108, Smart Money eligibility 96/96. `tsc --noEmit` — 29 предсуществующих ошибок (набор идентичен базе); `npm run build` в песочнице не проходит по предсуществующим причинам окружения (не приёмка). Мутационные контроли (вне дерева, каждая мутация убивает набор): точное равенство C0 → 68/69 (+ leakage 170/174); сведение adapter/signals/arithmetic к provider → 64/69; разрешение нефинитных в ранжирование → 62/69; отключение `deepFreeze` → 61/69; снятие проверки отпечатка отчёта → 68/69.
+
+**Статус.** **IMPLEMENTED / PENDING FINAL INDEPENDENT VERIFICATION.** Независимая VPS-проверка владельцем НЕ выполнена; автотесты приёмкой не являются. P2-C не исполняет эксперименты поверх БД, не пишет в БД и не заявляет доходность.
+
+49. P2-C HARDENING #1 (12.09.2026): НЕЗАВИСИМЫЙ АУДИТ `5cde552` — FAIL; ИСПРАВЛЕН OOS-ЗАВИСИМЫЙ ТАЙ-БРЕЙК ВЫБОРА
+=================================================================================================================
+
+**Повод.** Независимый состязательный аудит коммита `5cde552ec1191b79d9b04e2c37def7703924a3ef` (read-only, полный набор A–M) завершился вердиктом **FAIL**: блокер — при ТОЧНОМ равенстве критериев ранжирования изменение ТОЛЬКО OOS-части объявленного входа могло менять победителя, потому что тай-брейк полного порядка использовал полную `configurationId`, а для list-формы она включает отпечаток всего списка решений, включая решения OOS-окна. Дополнительно: `EXPERIMENT_LIMITATIONS` был изменяемым массивом; при `initialEquity=±Infinity` допуск сверки эквити становился бесконечным (в публичном пути недостижимо: конфиг отвергается, сериализатор бросает); отчёт с подменёнными метриками принимался при подлинном `resultFingerprint`; авторские наборы не ловили два мутанта (проводку сверки ограничений и ослабление точного равенства последней точки эквити).
+
+**Исправление (hardening #1; контракт `p2c-1.2.0`).**
+(а) Разделены ПОЛНАЯ идентичность и ВЫБОРНАЯ: `selectionKey` строится только из объявленных, известных ДО OOS входов (`SELECTION_KEY_INPUTS`: subjectFingerprint, label, paramsFingerprint, configFingerprint, `signalSource.kind`, для provider — `signalSourceId`); тай-брейк — `selectionKey`, при коллизии — `inputOrder`; полная `configurationId` остаётся для происхождения/дедупликации/отпечатков и при OOS-изменении объявленного входа меняется (ожидаемо).
+(б) Участие в ранжировании определяется сегментом САМОГО блока (добавлен `SegmentRecord.rejectionReason`), а не сводным статусом варианта: отказ только OOS-сегмента не исключает конфигурацию из TRAIN/VALIDATION-ранжирования и не может сменить победителя.
+(в) `EXPERIMENT_LIMITATIONS` заморожен; `assertLimitationsPresent` сверяет запись с неизменяемой канонической копией поэлементно (пусто/усечение/переписывание/дополнение/перестановка отвергаются).
+(г) Единая цепочка самопроверок `experimentInvariantErrors` экспортирована; тест прогоняет через неё запись с нарушенными ограничениями — пин ПРОВОДКИ, а не изолированного валидатора.
+(д) Точная сверка `finalEquity` с последней точкой `equityCurve` (допуск накопления — только для `initialEquity+totalNetPnl`) закреплена пинами 1e-12 и доли допуска.
+(е) Нефинитные входы бухгалтерии (initialEquity/finalEquity/totalNetPnl/точки equityCurve) — явный fail-closed, без опоры на вызвавшего.
+(ж) `SegmentReport` зафиксирован как детерминированная проекция результата: принятые извне отчёты сверяются не только по `resultFingerprint`, но и поэлементно с пересчитанной `projectSegmentReport`.
+
+**Тесты.** P2-C: contract 213/213, report 225/225, leakage 174/174, hardening (C0–C7 + FIX 1–5 + R2) 139/139; регрессия: engine 415/415, backtest-hardening 567/567, P2-B 427/427, metrics 123/123, splits 108/108, Smart Money eligibility 96/96; `tsc --noEmit` — 29 предсуществующих ошибок (набор идентичен базе). Мутационные контроли вне дерева (все убиты): возврат тай-брейка на полную `configurationId` → победитель вновь зависит от OOS-решений (устойчиво α, для режима flip80 — β); загрязнение выборного ключа OOS-отпечатком → 129/139; снятие заморозки ограничений → 135/139; удаление сверки ограничений из цепочки → 137/139; ослабление точного равенства до допуска → 136/139; снятие проверки нефинитности → 137/139; возврат сводного статуса в свидетельства → 137/139; удаление проекционной сверки отчёта → 136/139.
+
+**Статус.** **ОЖИДАЕТ ПОВТОРНОГО НЕЗАВИСИМОГО АУДИТА.** Приёмка не заявляется; VPS-верификация владельцем не выполнялась; прибыльность не заявляется; P2-C не пишет в БД. §48 сохранён как история (утверждения §48 о тай-брейке заменяются этим пунктом).
+
+50. P2-C HARDENING #2 (12.09.2026): СЕГМЕНТ-ЛОКАЛЬНАЯ ДОПУСТИМОСТЬ ВЫБОРА + END-TO-END ПИН ПРОВОДКИ
+=================================================================================================================
+
+**Повод.** Независимый повторный аудит коммита `16f1cc6d701212d1559298f926f82c9c0eca3721` (read-only) подтвердил, что блокер hardening #1 (OOS-зависимый тай-брейк выбора) закрыт, но обнаружил второй блокер: допустимость выбора всё ещё проверялась по СВОДНОМУ `variant.status === "evaluated"`. Вариант, оценённый на TRAIN и VALIDATION, но отказавший ТОЛЬКО на OOS, побеждал в TRAIN/VALIDATION-ранжировании, и `select-by-rank` завершался отказом уровня `stage="invariant"` («selection.selectedConfigurationId не соответствует ни одному оценённому варианту отчёта») — то есть исход эксперимента оставался OOS-зависимым. Дополнительно подтверждён пробел пина проводки: мутант, удалявший вызов `experimentInvariantErrors(record)` из `runExperiment`, выживал (139/139).
+
+**Исправление (hardening #2; контракт `p2c-1.2.0` — форма отчёта не изменилась, поэтому версия НЕ повышалась).**
+(а) `assertOosIsolation` проверяет выбор сегмент-локально: победитель присутствует в записи, совпадает с победителем СВОЕГО ранжирования, стадия ранжирования совпадает со стадией политики, а `segments[stage].status === "ok"` для стадии выбора (TRAIN или VALIDATION). Сводный `variant.status` в проверке допустимости выбора не участвует; OOS не читается.
+(б) OOS-отказ у победителя может оставлять сводный статус варианта `rejected` (происхождение, `rejection.segment="OOS"`, `segments.OOS.status="failed"`, ошибки OOS видны в записи и в отчёте сравнения), но НЕ отменяет выбор, сделанный до OOS, и не приводит к `stage="invariant"`.
+(в) `experimentInvariantErrors` получил монотонно-аддитивный внутренний шов `setExperimentInvariantProbe` (по умолчанию null): он способен только ДОБАВИТЬ ошибку инварианта и не может отключить/ослабить/заменить существующие проверки. Тест устанавливает шов, требующий фиксированную ошибку, и вызывает `runExperiment` на корректном входе: `ok=false, stage="invariant"` с маркером шва. Удаление/обход вызова цепочки в `runExperiment` убирает и шов — пин падает end-to-end.
+(г) Контракт (пункт 22, е–и) явно фиксирует: сводный статус = происхождение по всем сегментам; участие в ранжировании = статус сегмента ранжирования; допустимость выбора = сегмент стадии выбора, никогда не OOS-агрегат; `label` — объявленный НЕ финансовый вход выборного ключа (финансового смысла не несёт); `inputOrder` — документированный финальный fallback при коллизии выборных ключей; нефинитное свидетельство (включая диагностическое) консервативно исключает вариант из ранжирования.
+
+**Тесты.** P2-C: contract 213/213, report 225/225, leakage 174/174, hardening 160/160 (добавлены 21 регрессия: A/B-фикстура «оценён на TRAIN/VALIDATION, отказ только на OOS, побеждает точно», обе стадии выбора, инвариантность победителя/порядка/входов тай-брейка/rationale/свидетельств против эквивалентного OOS-успешного прогона, видимость OOS-отказа в происхождении и отчёте, смена только текста OOS-отказа, перестановка объявления, end-to-end пин проводки с аддитивными контролями). Регрессия: engine 415/415, backtest-hardening 567/567, P2-B 427/427, metrics 123/123, splits 108/108, Smart Money eligibility 96/96; `tsc --noEmit` — 29 предсуществующих ошибок (набор идентичен базе); `git diff --check` чисто. Мутационные контроли вне дерева (все убиты): возврат сводного статуса в допустимость выбора → 144/146 (2 FAIL, обе стадии); удаление вызова цепочки инвариантов из `runExperiment` → 159/160; возврат тай-брейка на полную `configurationId` → 158/160; возврат сводного статуса в свидетельства ранжирования → 154/160; ослабление точного равенства последней точки эквити до допуска → 157/160; снятие проверки нефинитной бухгалтерии → 158/160.
+
+**Статус.** **IMPLEMENTED / ОЖИДАЕТ НЕЗАВИСИМОГО ПОДТВЕРЖДЕНИЯ.** Приёмка не заявляется; VPS-верификация владельцем не выполнялась; прибыльность не заявляется; P2-C не пишет в БД; финансовая семантика P2-A и семантика P2-B data plane не изменены; иных тестовых швов в API нет; шов проводки — единственный и монотонно-аддитивный.
+
+51. P2-C HARDENING #3 (12.09.2026): УДАЛЁН ПРОДАКШН-ГЛОБАЛЬНЫЙ ТЕСТОВЫЙ ШОВ
+=================================================================================================================
+
+**Повод.** Независимый целевой повторный аудит `6dfc0603a1c6c80a33aec28a4d5a7b59b20884b8` (read-only) подтвердил: оба OOS-канала выбора закрыты (сегмент-локальная допустимость выбора и OOS-слепой тай-брейк), регрессии зелёные, — но вынес вердикт **PASS WITH RISKS** с единственной обязательной архитектурной правкой: введённый hardening #2 экспорт `setExperimentInvariantProbe` (`lib/experiment/run.ts`) хранил изменяемое модульное состояние и позволял влиять на несвязанные прогоны в том же процессе (аудит доказал: чужой эксперимент менял исход; уборка не автоматическая; бросок из колбэка не подавлялся; `runExperimentReport` затронут тем же состоянием).
+
+**Исправление (hardening #3).** (а) Продакшн-шов удалён полностью: нет экспорта, нет модульной переменной, нет рантайм-вызова, нет связанного поведения. (б) Пин M4b сохранён ТОЛЬКО тестом: `scripts/test-experiment-hardening.ts` читает исходник `lib/experiment/run.ts`, проверяет, что `runExperiment` вызывает `experimentInvariantErrors(record)` ровно один раз и отвергает запись при непустом результате (`stage="invariant"`), и что во всём слое нет probe-хуков; плюс обязательный негативный контроль — два несвязанных прогона подряд валидны, повторный отпечаток не зависит от промежуточного. Мутационный контроль вне дерева (удаление реального вызова) валит пин: 163/165.
+
+**Контракт.** Версия `p2c-1.2.0` НЕ повышалась: удалённый экспорт введён только в непринятом `6dfc060` и никогда не входил в отчётный контракт; после удаления набор экспортов всего слоя `lib/experiment` совпадает с H1 (`16f1cc6`).
+
+**Границы.** Семантика H1/H2 не менялась: сегмент-локальная допустимость выбора, OOS-слепой `selectionKey`, тай-брейк `selectionKey → inputOrder`, полная `configurationId` как происхождение, сегмент-локальные свидетельства, замороженные канонические ограничения, точная сверка последней точки эквити, нефинитные предохранители, детерминированная проекция `SegmentReport` (R2) — сохранены.
+
+**Тесты.** P2-C: contract 213/213, report 225/225, leakage 174/174, hardening 165/165 (было 162; −4 проверки шва, +7 проверок H3); регрессия: engine 415/415, backtest-hardening 567/567, P2-B 427/427, metrics 123/123, splits 108/108, Smart Money eligibility 96/96; `tsc --noEmit` — 29 предсуществующих ошибок (набор идентичен базе); `git diff --check` чисто. Мутации вне дерева убиты: удаление вызова цепочки из `runExperiment` → 163/165 (пин H3 падает); возврат сводного статуса в допустимость выбора → 147/151; возврат полного `configurationId` в тай-брейк → 163/165.
+
+**Статус.** **IMPLEMENTED / ОЖИДАЕТ НЕЗАВИСИМОГО ПОДТВЕРЖДЕНИЯ.** Приёмка не заявляется; VPS-верификация владельцем не выполнялась; прибыльность не заявляется; P2-C не пишет в БД.
+
+52. PRE-PNL CORE — BTC ONLY, 5m/15m/1h/4h/1d, BINGX EXCLUDED 1d, NO SIGNAL ENGINE (13.09.2026): HISTORICAL DATA PLANE, RAW SMC, DIFFERENTIAL, EXECUTION-POLICY, PRE-PNL RUNNER, SPLITS, ADMIN TRUTHFUL
+
+**Base:** 51eb129dea6a36ac077770d57859837769ece705 VPS-verified ACCEPTED (P2-A p2a-1.2.0, P2-B HARDENED, P2-C p2c-1.2.0) — production d6c573c DO NOT deploy, forbidden edf3732 NOT ancestor exit 1, NO SIGNAL ENGINE.
+**Branch:** arena/01a09726-core-pre-pnl from exact 51eb129, no accepted branches altered, no squash/amend/force-push, no lib/signals, no signal-worker, no Signal DB writes.
+
+**Scope A–H (safe pre-PnL, no signals):**
+A) Read-only historical PostgreSQL data plane on P2-B with canonical coverage diagnostics
+B) Owner-run READ ONLY NO DB WRITES NO PNL CLI
+C) Historical raw SMC observation preserving LONG/SHORT/NEUTRAL/CANNOT_EVALUATE plus facts/reasons/provenance (reuses production evaluateSmc, no second algorithm)
+D) Differential/property tests production vs historical same prefix different suffix = same observation, context-channel-only
+E) Generic execution-policy plumbing (ExecutionPolicyDefinition, fingerprint, Executability EXECUTABLE/NON_EXECUTABLE) without economic defaults (no SL anchor, no ATR, no k, no RR, no timeout)
+F) Deterministic pre-PnL runner refusing real PnL until policy approved (PRE_REGISTRATION_REQUIRED, only coverage/raw counts)
+G) TRAIN/VALIDATION/OOS plumbing using P2-C semantics OOS-blind
+H) Admin/backtests UI truthful readiness (no fake profitability), docs/runbooks
+
+**New files (no signals):**
+- lib/backtest/read-only-sql.ts — SELECT-only allowlist (SELECT/WITH allowed, INSERT/UPDATE/DELETE/UPSERT/CREATE/ALTER/DROP/TRUNCATE/LOCK/COPY/VACUUM + pg_advisory + FOR UPDATE/SHARE forbidden, Prisma allowlist, multi-statement rejection)
+- lib/backtest/historical-eligibility.ts — CANNOT_RECONSTRUCT_HISTORICAL_ELIGIBILITY, E1/E2/E3, 5 fields Asset.rank/Market.quoteVolume24h/enabled/status/listing, format report
+- lib/backtest/ohlcv-provenance.ts — audit lib/ohlcv/sync.ts upsert path, compute diagnostics rowsWithCreatedAt/UpdatedAt/diff, limitations, expected write files lib/ohlcv/sync.ts only, no new Date token (formatIsoUtc via utcDateFromMs)
+- lib/backtest/historical-data-plane.ts — V2 hardened pagination, canonical coverage requested-range, common timestamps/contiguous, participant feasibility, eligibility via isSmartMoneyExchangeEligible (BINGX 1d excluded), provenance optional, READ ONLY NO DB WRITES NO PNL
+- lib/backtest/smc-observation.ts — RawSmcObservation reuses production evaluateSmc, windowPolicy hardMinimum ~84 vs productionWindow 500 vs fetchCap 500 vs fidelity 500, computeCausalAsOf H+D, testCausalClockBoundary H+D-1ms/AT/After/H+2D, no wall-clock, batch causal prefix invariant, No SL/TP No PnL
+- lib/backtest/execution-policy.ts — ExecutionPolicyDefinition fingerprint, Executability EXECUTABLE/NON_EXECUTABLE reasons, forbiddenDefaults k=1/k=2/any k-grid/ATR SL/RR_min/timeout, no hidden defaults, no new Date token
+- lib/backtest/splits-readiness.ts — SplitReadiness TRAIN/VALIDATION only selection OOS final witness only, 90% threshold, no silent OOS shortening, readOnly/noPnl flags
+- lib/backtest/pre-pnl-runner.ts — PrePnlDiagnostics PRE_REGISTRATION_REQUIRED/READY_FOR_EXECUTION, truthful baseline SMC-Direction Baseline / EP-1, no PnL, no new Date token
+- scripts/backtest-historical-readonly.ts — owner-run READ ONLY NO DB WRITES NO PNL CLI, defensive SET TRANSACTION READ ONLY intent, fail-closed, timezone-less rejection, pageSize 1..5000, BINGX 1d policy, --smartMoney --smc --splits
+- scripts/test-backtest-data-plane.ts — Phase A 46/46
+- scripts/test-backtest-smc-observation.ts — Phase C 78/78 differential 5m/15m/1h/4h/1d, no-lookahead same prefix different suffix, BINGX 1d excluded
+- scripts/test-backtest-execution-policy.ts — Phase D 16/16 explicit required fields, NaN/Infinity rejection, no hidden defaults
+- scripts/test-backtest-pre-pnl.ts — Phase E/F 28/28 PRE_REGISTRATION_REQUIRED no netPnl/profitFactor OOS isolation TRAIN/VALIDATION only
+- scripts/test-backtest-full-pipeline.ts — 40/40 integration A+B+C+D+E+F, OOS isolation, TRAIN readiness not affected by OOS change
+- scripts/test-backtest-hardening-pre-pnl.ts — 47/47 no hidden defaults, no PnL leakage, no DB writes, no Signal Engine, admin UI checks PRE_REGISTRATION_REQUIRED/CANNOT_RECONSTRUCT/BINGX 1d
+- app/admin/backtests/page.tsx — truthful pre-PnL status, no fake profitability, PRE_REGISTRATION_REQUIRED, CANNOT_RECONSTRUCT, BINGX 1d
+- docs/backtest-pre-pnl-runbook.md — full runbook
+
+**Architecture decisions (same as previous pre-PnL but without signals):**
+- RawSmcObservation vs Executability separation: raw LONG/SHORT without SL/TP stays NON_EXECUTABLE not fake NEUTRAL/CANNOT_EVALUATE
+- Execution policy NOT approved: no structural SL anchor protectedLow/High, no ATR SL, no buffer/TP/k/RR_min/timeout/conflict defaults; APPROVED must have non-empty requiredEconomicFields
+- Quant cautions: SL/TP not in production SMC; structural close-based vs P2-A wick-based; k=1 rejected; TrendSuslik ATR not transferable; hardMinimumBars ~84 vs productionWindowBars vs fetch cap vs fidelity window 500 hypothesis; historical common-horizon causal clock H+D boundary not wall clock
+- Historical eligibility mutable fields: Asset.rank/Market.quoteVolume24h/enabled/status survivorship — CANNOT_RECONSTRUCT, E1/E2/E3 unresolved, do not choose
+- OHLCV PIT: lib/ohlcv/sync.ts updates existing candles, createdAt does not prove historical values, build revision diagnostics
+- Truthful baseline naming: SMC-Direction Baseline / EP-1 until execution/eligibility production-derived, not production SMC profitability
+- No-lookahead context-channel-only, not proof against closures/globals, causal prefixes, OOS never influences ranking
+- No Signal Engine: lib/signals absent, signal-worker absent, Signal DB writes absent, forbidden edf3732 not ancestor, ancestry check exit 1
+
+**Tests (all green, no DB, no PnL, no Signal Engine):**
+- P2-A: engine 439/439, hardening 567/567, metrics 123/123, splits 108/108
+- P2-B: 427/427
+- P2-C: contract 213/213, report 225/225, leakage 174/174, hardening 165/165
+- Smart Money eligibility: 96/96
+- New: data-plane 46/46, smc-observation 78/78, execution-policy 16/16, pre-pnl 28/28, full-pipeline 40/40, hardening-pre-pnl 47/47
+- tsc --noEmit --skipLibCheck 0 errors, build compiled successfully (Prisma stub baseline identical to 51eb129), git diff --check clean
+- No DB writes: grep INSERT/UPDATE/DELETE/UPSERT in lib/backtest only allowlist comments, read-only-sql.ts enforces SELECT-only
+- No PnL: grep netPnl/profitFactor/sharpe/winRate/expectancy in pre-pnl-runner absent
+- No Signal Engine: lib/signals absent, signal-worker absent, test-signal-engine absent, merge-base --is-ancestor edf3732 HEAD exit 1 verified
+- Owner-run CLI (uses existing env, no secrets): npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --smc --splits
+
+**Status:** IMPLEMENTED / PENDING INDEPENDENT ADVERSARIAL REVIEW — no PnL, no DB writes, no Signal Engine, BTC only 5m/15m/1h/4h/1d, BINGX excluded 1d, costs 5bps fee 2bps slippage, no profitability claims, VPS verification pending.
+
+**Next:** Owner must choose E1/E2/E3 for historical eligibility CANNOT_RECONSTRUCT, approve execution policy economic semantics (SL anchor, TP model, k/RR_min/buffer/timeout/conflict) — currently PRE_REGISTRATION_REQUIRED truthful baseline SMC-Direction Baseline / EP-1, until approved no real PnL only coverage/raw counts diagnostics, after approval integrate execution policy into P2-A runner with generic boundary include policy identity in fingerprints run TRAIN/VALIDATION/OOS OOS-blind report limitations no fake profitability, admin UI truthful, VPS verification read-only CLI owner-run.
+
+53. PRE-PNL CORE HARDENING — SELF-ADVERSARIAL AUDIT + FIXES (13.09.2026): READ-ONLY SQL, PRE-PNL STRUCTURAL PROOF, CLOCK, ELIGIBILITY, OWNER INSPECTION, CORE API, MUTATIONS
+
+**Base:** 51eb129 + §52 pre-PnL CORE (7c4c22a) — treat as own unaccepted author work, continue with NEW sequential commits from HEAD.
+**Branch:** arena/01a09726-core-pre-pnl continued — no rewrite/amend of first 10 commits, new commits only.
+
+**Self-adversarial audit findings (51eb129..7c4c22a):**
+- read-only-sql: previous regex used \bSELECT\b.*\bFOR\b.*\bUPDATE\b with dot not matching newline, missing SELECT INTO, missing MERGE/REPLACE/CALL/DO/PERFORM/EXECUTE/LISTEN/NOTIFY/UNLISTEN/REFRESH/ANALYZE/LOAD, missing nextval/setval/currval/lastval/pg_sleep/pg_notify/pg_cancel/terminate, comment /* INSERT */ handling via allowlist miss (fail-closed ok) but doc had */ inside block comment causing TS parse error (fixed), dollar-quoted $$INSERT$$ still caught but not explicitly tested, multi-statement heuristic split ; but not stripping dollar-quoted (fixed with stripDollarQuotedForSemicolonCheck).
+- pre-pnl-runner: no P2-A import, but no explicit structural proof test, no spy that P2-A not entered, raw LONG/SHORT preservation tested but not as separate hardening suite.
+- historical clock/window: boundaries H+D-1ms/AT/After/H+2D tested in smc-observation 78/78 but not as dedicated 46-case suite with rolling 84/500/expanding and future-suffix invariance explicit.
+- eligibility: 5 fields present, CANNOT_RECONSTRUCT, but no guard test ensuring no current-state silent use, no check that data-plane does not use rank as historical truth.
+- owner inspection: CLI produced data-plane/eligibility/provenance/splits but docs/examples contained DATABASE_URL=... secret pattern — must use existing env, never echo secrets.
+- core/api contract for visual agent: missing typed read-only boundary.
+
+**Fixes in new commits:**
+- baf16c8: remove DATABASE_URL secrets from docs/runbook/final-report/admin UI/CLI examples, owner-run uses existing configured env, never echo DATABASE_URL.
+- d6408f7: hardened read-only-sql.ts — positive allowlist SELECT/WITH, single statement, expanded forbidden list: INSERT/UPDATE/DELETE/MERGE/UPSERT/REPLACE/CREATE/ALTER/DROP/TRUNCATE/REINDEX/VACUUM/ANALYZE/CLUSTER/COPY/LOAD/LOCK/GRANT/REVOKE/SECURITY/COMMENT/TABLESPACE/OWNER/CALL/DO/PERFORM/EXECUTE/LISTEN/NOTIFY/UNLISTEN/REFRESH/SELECT INTO/FOR UPDATE/SHARE/NO KEY UPDATE/KEY SHARE/writable CTE pg_advisory/pg_try_advisory/pg_sleep/pg_notify/pg_cancel_backend/pg_terminate_backend/pg_reload_conf/nextval/setval/currval/lastval/pg_*() generic, multi-statement ;, dollar-quoted fail-closed, comments fail-closed, Prisma $executeRaw etc. Doc guarantee + limitations.
+- c3b08eb: core-api.ts — read-only typed contracts for visual agent, no DB writes, no Signal Engine, no PnL, owner command without secrets, truthful readiness response, re-exports safe types.
+- c1265b8: hardening tests 5 files — readonly 89/89, clock 46/46, eligibility 32/32, structural proof 19/19, mutation controls 21/21.
+- New: owner-inspection-readiness test 25/25.
+
+**SQL guarantee (documented in file):**
+Positive allowlist: must start with SELECT/WITH, single statement, no forbidden write/lock/side-effect tokens. Fail-closed on comments/dollar-quoted hiding. Limitations: syntactic guard not full parser, dollar-quoted and comments containing forbidden keywords rejected fail-closed, does not detect custom side-effecting functions but forbids known pg_* patterns. Exact list in READ_ONLY_SQL_ALLOWLIST_DOC.
+
+**Pre-PnL structural proof:**
+NO APPROVED EXECUTION POLICY → PRE_REGISTRATION_REQUIRED → STOP BEFORE P2-A economics. Proven by:
+- Source check: no runBacktest import, no netPnl/profitFactor/sharpe/winRate, contains PRE_REGISTRATION_REQUIRED, validateExecutionPolicyDefinition call before wrapWithExecutability call.
+- Runtime: wrapWithExecutability preserves raw LONG/SHORT, returns NON_EXECUTABLE NO_EXECUTION_POLICY, not mapped to NEUTRAL/CANNOT_EVALUATE.
+- runPrePnlDiagnostics with null policy returns status PRE_REGISTRATION_REQUIRED, executableCount 0, raw counts present, readOnly/noPnl true, P2-A not entered (spy flag).
+
+**Raw SMC guarantee:**
+raw direction and executability preserved separately: raw LONG + no policy => raw LONG visible + NON_EXECUTABLE/PRE_REGISTRATION_REQUIRED, raw SHORT similarly, never mapped to NEUTRAL/CANNOT_EVALUATE, no SL/TP invented.
+
+**Historical clock/window:**
+computeCausalAsOf H+D, testCausalClockBoundary exact: H+D-1ms BEFORE_CLOSE, H+D AT_CLOSE, H+D+1ms AFTER_CLOSE, H+2D AFTER_CLOSE, tested for 5m/15m/1h/4h/1d. WindowPolicy hardMinimum ~84 vs production 500 vs fetchCap 500 vs fidelity 500 vs ROLLING_500, description mentions 500 and rolling, no Date.now, no new Date() except via utcDateFromMs wrapper. Rolling window caps at 500, future suffix invariance: same prefix different suffix same direction+fingerprint.
+
+**Eligibility:**
+5 fields Asset.rank/Market.quoteVolume24h/enabled/status/listing, reconstructable false, CANNOT_RECONSTRUCT_HISTORICAL_ELIGIBILITY, E1 currentValueUsed true, E2 false, E3 CANNOT_RECONSTRUCT, canReportProfitability false always, limitations mention owner decision mutable current-state, data-plane references eligibility diagnostics not silent rank use, no process.env/Date.now/Math.random.
+
+**Owner inspection readiness:**
+CLI produces BTC markets/exchanges, timeframe coverage, earliest/latest CLOSED, counts, canonical slots expectedSlots aligned canonicalized, leading/internal/trailing missing, duplicates, off-grid, common intersection/horizon feasibility, revision diagnostics (createdAt/updatedAt), eligibility limitations, TRAIN/VALIDATION/OOS readiness (60/20/20 splits from requested range, commonTimestamps, OOS isolation no silent shortening). NO PNL, no secrets in command: npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --smc --splits uses existing env.
+
+**Core/API contract for visual agent:**
+lib/backtest/core-api.ts exports OwnerInspectionResult, CoreReadOnlyService, BacktestsReadinessApiResponse, buildBacktestsReadinessResponse, CORE_API_DOC, re-exports safe types, no DB writes, no Signal Engine, no PnL, no process.env/Date.now.
+
+**Mutation results:**
+- allow SQL write → killed by readonly 89/89
+- off-grid as canonical → killed by data-plane mentions off-grid detection + canonical
+- wall-clock Date.now → killed by smc-observation no Date.now + causal clock
+- current eligibility historically → killed by eligibility CANNOT_RECONSTRUCT + currentValueUsed tracking
+- raw LONG into NEUTRAL → killed by structural proof raw LONG preserved
+- bypass PRE_REGISTRATION_REQUIRED → killed by pre-pnl-runner contains PRE_REGISTRATION_REQUIRED + NO_EXECUTION_POLICY
+- enter P2-A without policy → killed by no runBacktest import + no PnL fields
+- contaminate OOS → killed by splits-readiness OOS isolation checks
+- hidden default k/SL/TP → killed by execution-policy forbiddenDefaults includes k and ATR/SL
+All 21 mutation controls killed.
+
+**Tests after hardening — ACTUAL COUNTS recomputed after final cleanup:**
+- P2-A engine 442/442, hardening 567/567, metrics 123/123, splits 108/108
+- P2-B 427/427
+- P2-C contract 213/213 report 225/225 leakage 174/174 hardening 165/165
+- eligibility 96/96
+- data-plane 46/46 smc-observation 78/78 execution-policy 16/16 pre-pnl 32/32 full-pipeline 40/40 hardening-pre-pnl 47/47
+- new hardening: readonly-sql 89/89 clock 46/46 eligibility 32/32 structural-proof 22/22 mutation 21/21 owner-inspection 25/25
+- real-long-short 17/17 BEHAVIOR, canonical-coverage-real 38/38 BEHAVIOR, historical-data-plane-behavior-real 22/22 BEHAVIOR REAL plane via fetchHistoricalDataPlane, no-pnl-output 11/11 CONTRACT REAL plane, economic-default-detection 12/12 CONTRACT top-level scope, core-api-immutability 14/14 CONTRACT, survivorship-fixtures 11/11 CONTRACT strict, mutations-m1-m11 20/20 classified BEHAVIOR/CONTRACT/SOURCE PIN
+- Changed files from base 51eb129: 36 files (git diff --name-only 51eb129..HEAD)
+- tsc --noEmit 0 errors (normal)
+- build compiled successfully then fails at page data collection @prisma/client not initialized — identical to base 51eb129, not introduced
+- git diff --check clean including trailing blank line fix
+- No DB writes, no PnL, no Signal Engine, no workers, no production deployment
+
+**Owner VPS command (no secrets):**
+```
+npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --smc --splits
+```
+Uses server's existing configured environment, fails closed if env missing, never echoes DATABASE_URL.
+
+**Unresolved owner decisions (still not chosen):**
+- E1/E2/E3 final methodology for historical eligibility CANNOT_RECONSTRUCT
+- Execution policy economic semantics SL anchor/buffer/TP model k/RR_min/timeout/conflict — currently PRE_REGISTRATION_REQUIRED truthful baseline SMC-Direction Baseline / EP-1
+- OHLCV PIT whether to store historical revisions or accept sync.ts upsert limitation
+
+**Status:** IMPLEMENTED / PENDING INDEPENDENT ADVERSARIAL REVIEW — NO REAL DB ACCESS / NO DB WRITES / NO REAL PNL / NO WORKERS / NO SIGNAL ENGINE / NO PRODUCTION DEPLOYMENT.

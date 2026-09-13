@@ -10,23 +10,25 @@
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.3",
     "@prisma/client": "^6.16.1",
+    "@types/pako": "^2.0.4",
     "bcryptjs": "^3.0.3",
+    "dotenv": "^16.6.1",
     "lightweight-charts": "^5.2.1",
     "lucide-react": "^0.544.0",
     "next": "^15.5.2",
     "next-auth": "^5.0.0-beta.32",
+    "pako": "^3.0.2",
+    "pg": "^8.11.3",
     "prisma": "^6.16.1",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1",
-    "pg": "^8.11.3",
-    "dotenv": "^16.6.1"
+    "react-dom": "^19.1.1"
   },
   "devDependencies": {
     "@types/node": "^22.18.1",
+    "@types/pg": "^8.10.9",
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",
     "tsx": "^4.23.13",
-    "typescript": "^5.9.2",
-    "@types/pg": "^8.10.9"
+    "typescript": "^5.9.2"
   }
 }

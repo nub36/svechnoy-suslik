@@ -9,6 +9,7 @@ export type OhlcvWorkerOptions = {
   limit: number;
   requestDelayMs: number;
   symbol?: string;
+  concurrency?: number;
 };
 
 export const DEFAULT_OHLCV_OPTIONS: OhlcvWorkerOptions = {
