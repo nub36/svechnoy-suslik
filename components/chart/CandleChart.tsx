@@ -102,7 +102,12 @@ import {
  *  - ручной уход назад в историю сохраняется при подгрузке старых
  *    свечей (shiftLogicalRange), fitContent/scrollToRealTime при
  *    mergeOlder не вызываются; переключение индикаторов не
- *    пересоздаёт график и не перезапрашивает свечи.
+ *    пересоздаёт график и не перезапрашивает свечи;
+ *  - статусы error/empty — оверлей внутри обёртки графика: контейнер
+ *    никогда не размонтируется поддеревом статуса, поэтому график
+ *    переживает ошибку загрузки и «Повторить» без пересоздания;
+ *    «Повторить» перезапускает всю цепочку данных (список активов →
+ *    рынки → свечи), а не только запрос свечей.
  */
 
 type SymbolInfo = {
@@ -570,6 +575,19 @@ export default function CandleChart({
     useState(false);
   const [historyError, setHistoryError] =
     useState(false);
+
+  // «Повторить» на ошибке перезапускает ВСЮ цепочку
+  // (список активов → рынки → свечи): если упал список или рынки,
+  // одного перезапроса свечей мало — символ/биржа могли ещё ни разу
+  // не определиться, и loadCandles вернётся по guard'у, оставив
+  // вечный «Загрузка…». Счётчик входит в зависимости всех трёх
+  // эффектов загрузки.
+  const [reloadNonce, setReloadNonce] =
+    useState(0);
+
+  const retryDataChain = useCallback(() => {
+    setReloadNonce((n) => n + 1);
+  }, []);
 
   // метаданные статусной строки: сколько свечей загружено,
   // время последней закрытой (для freshness)
@@ -1628,7 +1646,7 @@ export default function CandleChart({
     return () => {
       cancelled = true;
     };
-  }, [initialSymbol]);
+  }, [initialSymbol, reloadNonce]);
 
   /* ---------- загрузка рынков выбранного актива ---------- */
 
@@ -1731,7 +1749,8 @@ export default function CandleChart({
     };
     // timeframe сознательно не в зависимостях:
     // таймфрейм выбирается только при смене актива
-  }, [symbol]);
+    // reloadNonce — перезапуск всей цепочки кнопкой «Повторить»
+  }, [symbol, reloadNonce]);
 
   /* ---------- загрузка свечей ---------- */
 
@@ -1832,7 +1851,8 @@ export default function CandleChart({
       exchange,
       timeframe,
       applyData,
-      applyChartTheme
+      applyChartTheme,
+      reloadNonce
     ]
   );
 
@@ -2493,26 +2513,24 @@ export default function CandleChart({
         </fieldset>
       </div>
 
-      {status === "error" ? (
-        <div className="chartStatus">
-          <p>⚠ {errorMessage}</p>
+      /*
+       * КОНТЕЙНЕР ГРАФИКА НИКОГДА НЕ РАЗМОНТИРУЕТСЯ СТАТУСАМИ.
 
-          <button
-            className="chip"
-            onClick={() => {
-              setStatus("loading-data");
-              void loadCandles();
-            }}
-          >
-            Повторить
-          </button>
-        </div>
-      ) : status === "empty" ? (
-        <div className="chartStatus">
-          <p>{errorMessage}</p>
-        </div>
-      ) : (
-        /*
+       * lightweight-charts создаётся ОДИН раз (эффект создания графика
+       * не зависит от symbol/exchange/timeframe/status) и привязан к
+       * DOM-узлу containerRef. Если error/empty подменяют весь блок
+       * графика собственным поддеревом, React пересоздаёт и
+       * containerRef-div: живой chart остаётся привязанным к
+       * выброшенному (detached) узлу, а после успешного «Повторить»
+       * на новом div рисовать нечем — пустая область до перезагрузки
+       * страницы. Поэтому статусы error/empty — оверлей ВНУТРИ
+       * chartWrap, обёртка и контейнер смонтированы всегда.
+       */
+      <div
+        ref={wrapRef}
+        className="chartWrap"
+      >
+        {/*
           НА ОБЁРТКЕ НАМЕРЕННО НЕТ React-обработчика двойного клика.
 
           Двойной клик по правой ценовой шкале библиотека обрабатывает
@@ -2525,22 +2543,24 @@ export default function CandleChart({
           уезжала к последним барам, а только что выставленный drag'ом
           вертикальный масштаб уничтожался (setAutoScale(true) по всем
           панелям). Полный сброс — только кнопка «Сбросить масштаб».
-        */
+        */}
         <div
-          ref={wrapRef}
-          className="chartWrap"
-        >
-          <div
-            ref={containerRef}
-            className="chartContainer"
-          />
+          ref={containerRef}
+          className="chartContainer"
+        />
 
-          <div
-            ref={legendRef}
-            className="chartLegend"
-          />
+        <div
+          ref={legendRef}
+          className="chartLegend"
+        />
 
-          {dataMeta && (
+        {/* dataMeta принадлежит ПОСЛЕДНЕМУ УСПЕШНОМУ окну: во время
+            ошибки/пустоты показывать счётчики прежнего рынка — значит
+            врать о текущем выборе; строка возвращается вместе с
+            успешными данными. */}
+        {dataMeta &&
+          (status === "ok" ||
+            status === "loading-data") && (
             <div className="chartDataStatus muted">
               <span className="chartStatusMarket">
                 {exchange && selectedMarket
@@ -2588,28 +2608,45 @@ export default function CandleChart({
             </div>
           )}
 
-          {loading && (
-            <div className="chartOverlay">
-              Загрузка…
-            </div>
-          )}
+        {loading && (
+          <div className="chartOverlay">
+            Загрузка…
+          </div>
+        )}
 
-          {historyLoading && (
-            <div className="chartHistoryLoader">
-              Загрузка истории…
-            </div>
-          )}
+        {historyLoading && (
+          <div className="chartHistoryLoader">
+            Загрузка истории…
+          </div>
+        )}
 
-          <button
-            type="button"
-            className="chip chartResetScale"
-            title="Вернуть масштаб по умолчанию"
-            onClick={resetChartScale}
-          >
-            Сбросить масштаб
-          </button>
-        </div>
-      )}
+        <button
+          type="button"
+          className="chip chartResetScale"
+          title="Вернуть масштаб по умолчанию"
+          onClick={resetChartScale}
+        >
+          Сбросить масштаб
+        </button>
+
+        {status === "error" ? (
+          <div className="chartStatus chartStatusOverlay">
+            <p>⚠ {errorMessage}</p>
+
+            <button
+              className="chip"
+              onClick={retryDataChain}
+            >
+              Повторить
+            </button>
+          </div>
+        ) : status === "empty" ? (
+          <div className="chartStatus chartStatusOverlay">
+            <p>{errorMessage}</p>
+          </div>
+        ) : null}
+      </div>
+
 
       {/* P1-C: read-only панель Smart Money. Рендерится независимо от
           статуса свечей (ошибка свечей не прячет Smart Money, ошибка
@@ -2631,9 +2668,12 @@ export default function CandleChart({
           горизонтальный свайп — движение по истории,
           колесо мыши или щипок — масштаб, драг по оси
           времени или по ценовой шкале — масштаб оси,
-          двойной клик по оси и кнопка «Сбросить
-          масштаб» — возврат к авто-масштабу и последним
-          закрытым барам; прокрутка влево подгружает
+          двойной клик по ценовой шкале — только
+          возврат цены к авто-масштабу, двойной клик
+          по оси времени — масштаб времени; полный
+          возврат (авто-масштаб и последние закрытые
+          бары) — кнопкой «Сбросить масштаб»;
+          прокрутка влево подгружает
           более старую историю, текущий вид при этом
           сохраняется
           {historyEnded

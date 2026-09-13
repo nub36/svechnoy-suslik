@@ -871,8 +871,7 @@ export function verticalScaleModePolicy(
       clamps: [],
       restoredBy: [
         "двойной клик по ценовой шкале (handleScale.axisDoubleClickReset.price)",
-        "кнопка «Сбросить масштаб»",
-        "двойной клик по графику"
+        "кнопка «Сбросить масштаб»"
       ]
     };
   }

@@ -613,6 +613,69 @@ ok(
   "chart: кнопка «Сбросить масштаб» осталась"
 );
 
+/* ---------- инвариант монтирования контейнера (регрессия: пустой
+   график после error/empty → «Повторить») ----------
+ *
+ * График создаётся ОДИН раз и привязан к DOM-узлу containerRef. Если
+ * статус error/empty подменяет блок графика СВОИМ поддеревом
+ * (`status === "error" ? <chartStatus/> : <chartWrap/>…`), React
+ * выбрасывает containerRef-div вместе с обёрткой, а живой chart
+ * остаётся висеть на detached-узле: после «Повторить» пользователь
+ * видит пустую область до перезагрузки страницы. Статус теперь —
+ * оверлей ВНУТРИ всегда смонтированной chartWrap.
+ */
+eq(
+  (chartCode.match(/ref=\{containerRef\}/g) ?? []).length,
+  1,
+  "chart: containerRef используется ровно один раз — единственный узел контейнера"
+);
+{
+  const beforeContainer = chartCode.slice(
+    0,
+    chartCode.indexOf("ref={containerRef}")
+  );
+
+  ok(
+    !/status === "error" \?/.test(beforeContainer) &&
+      !/status === "empty" \?/.test(beforeContainer),
+    "chart: контейнер НЕ в else-ветке тернарника статуса — chartWrap смонтирована всегда"
+  );
+}
+ok(
+  /className="chartStatus chartStatusOverlay"/.test(chartCode),
+  "chart: error/empty — оверлей .chartStatusOverlay внутри обёртки"
+);
+ok(
+  CSS_SRC.includes(".chartStatusOverlay") &&
+    CSS_SRC.includes("position: absolute"),
+  "css: .chartStatusOverlay описан (абсолютный оверлей поверх контейнера)"
+);
+ok(
+  /dataMeta &&\s*\(status === "ok" \|\|\s*status === "loading-data"\) &&/.test(
+    chartCode
+  ),
+  "chart: строка dataMeta (счётчики прежнего рынка) скрыта при error/empty — без stale-цифр"
+);
+
+/* ---------- «Повторить» перезапускает всю цепочку загрузки ---------- */
+
+ok(
+  /setReloadNonce\(/.test(chartCode),
+  "chart: retry-хэндер не просто setStatus+loadCandles, а поднимает счётчик перезагрузки"
+);
+ok(
+  /\[initialSymbol, reloadNonce\]/.test(chartCode),
+  "chart: список активов перезапрашивается по «Повторить» (иначе вечный «Загрузка…» после list-ошибки)"
+);
+ok(
+  /\[symbol, reloadNonce\]/.test(chartCode),
+  "chart: рынки перезапрашиваются по «Повторить»"
+);
+ok(
+  /applyChartTheme,\s*reloadNonce\s*\]/.test(chartCode),
+  "chart: запрос свечей перезапрашивается по «Повторить» даже при неизменных symbol/exchange/timeframe"
+);
+
 /* ================================================================ */
 /* 4. Smart Money P1-C не сломан                                     */
 /* ================================================================ */
@@ -1297,8 +1360,12 @@ for (const paneHeightPx of [0, 60, 120, 240, 400, 800]) {
   );
   eq(
     manual.restoredBy.length,
-    3,
-    "policy MANUAL: auto-scale возвращается двойным кликом по шкале, кнопкой сброса и двойным кликом по графику"
+    2,
+    "policy MANUAL: auto-scale возвращается ровно двумя штатными действиями — двойным кликом по ценовой шкале и кнопкой сброса (обработчика двойного клика по графику НЕТ — см. замок на onDoubleClick)"
+  );
+  ok(
+    !manual.restoredBy.some((r) => r.includes("двойной клик по графику")),
+    "policy MANUAL: не обещает возврат авто-масштаба двойным кликом по plot — такого жеста нет с 0d4b652"
   );
   ok(
     manual.restoredBy.some((r) => r.includes("axisDoubleClickReset.price")),

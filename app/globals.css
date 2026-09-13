@@ -1244,6 +1244,22 @@ td:nth-child(2) {
   padding: 16px;
 }
 
+/*
+ * Оверлей статуса для error/empty ВНУТРИ .chartWrap: контейнер графика
+ * при ошибке НЕ размонтируется (lightweight-charts привязан к своему
+ * DOM-узлу — подмена поддеревом оставляла пустую область после
+ * «Повторить»). Фон почти непрозрачный, чтобы не показывать свечи
+ * прежнего рынка как будто это текущий выбор.
+ */
+.chartStatusOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  min-height: 0;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+}
+
 .chartNote {
   margin-top: 10px;
   font-size: 12px;
