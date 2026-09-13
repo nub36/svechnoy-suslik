@@ -72,7 +72,8 @@ export default function LoginPage() {
         </h1>
 
         <p className="muted authIntro">
-          Избранное, персональные сигналы и настройки стратегий.
+          Аккаунт нужен для админ-панели. Анализ рынка,
+          графики и стратегии доступны и без входа.
         </p>
 
         <div className="oauthComing">
