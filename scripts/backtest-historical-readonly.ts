@@ -1,12 +1,14 @@
 /**
- * Owner-run READ-ONLY inspection CLI — BTC ONLY, NO DB WRITES, NO PNL, NO SECRETS.
+ * Owner-run READ-ONLY inspection CLI — BTC ONLY, NO DB WRITES.
+ * Phase G: supports Execution Policy Registry EP-1/EP-2/EP-3 with real PnL runner.
  *
- * Prominently states: READ ONLY, NO DB WRITES, NO PNL, BTC ONLY.
+ * Prominently states: READ ONLY, NO DB WRITES, BTC ONLY, REAL PNL ONLY WHEN APPROVED.
  * Owner executes on VPS using server's existing configured env — do NOT paste secrets, never echo DATABASE_URL.
  * CLI errors must fail closed. Do not hide incomplete coverage. No misleading 100% coverage on non-aligned ranges.
  *
  * Usage (VPS — uses existing env, no secrets):
  *   npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney
+ *   npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --executionPolicy EP-2 --approve
  *
  * This script:
  * - Connects via Prisma with capability-restricted surface (read-only)
@@ -15,7 +17,8 @@
  * - Fetches CLOSED candles via P2-B hardened pagination (read-only)
  * - Computes coverage, common timestamps, contiguous ranges, participant feasibility, createdAt/updatedAt diagnostics, eligibility limitations
  * - Optionally evaluates raw SMC observations (if --smc flag)
- * - NEVER calculates PnL, NEVER writes DB, NEVER starts workers
+ * - Optionally runs Real PnL Runner with EP-1/EP-2/EP-3 when --executionPolicy supplied, truthful: EP-1 0 trades baseline, EP-2/EP-3 DRAFT blocked PRE_REGISTRATION_REQUIRED, --approve simulates owner approval
+ * - NEVER writes DB, NEVER starts workers
  * - BTC-only: --asset must be BTC, otherwise fail-closed (pre-registered scope)
  */
 
@@ -27,9 +30,21 @@ import { computeOhlcvProvenanceDiagnostics, formatOhlcvProvenanceReport } from "
 import { assertReadOnlyDeps } from "../lib/backtest/data-source";
 import type { BacktestDataDepsV2, BacktestMarketRow } from "../lib/backtest/data-source";
 import type { BacktestCandleRow } from "../lib/backtest/adapter";
+import {
+  getPolicyById as getRegistryPolicyById,
+  listPolicies as listRegistryPolicies,
+  EXECUTION_POLICY_REGISTRY_DOC,
+} from "../lib/backtest/execution-policy-registry";
+import {
+  runRealPnlDiagnostics,
+  formatRealPnlReport,
+  approvePolicy,
+} from "../lib/backtest/real-pnl-runner";
+import { defaultSmcScoringConfig } from "../lib/smc/config";
+import type { SmcRawCandle } from "../lib/smc/types";
 
-console.log("=== READ ONLY — NO DB WRITES — NO PNL — BTC ONLY ===");
-console.log("This CLI is OWNER-RUN read-only inspection, never writes DB, never calculates profitability, BTC only");
+console.log("=== READ ONLY — NO DB WRITES — BTC ONLY — REAL PNL ONLY WHEN APPROVED POLICY ===");
+console.log("This CLI is OWNER-RUN read-only inspection, never writes DB, BTC only, real PnL only when execution policy APPROVED");
 console.log("");
 
 function fail(msg: string): never {
@@ -49,6 +64,8 @@ function parseArgs() {
   let splits = false;
   let help = false;
   let pageSize = 1000;
+  let executionPolicyId: string | null = null;
+  let approve = false;
 
   for (let i = 0; i < raw.length; i++) {
     const a = raw[i];
@@ -79,6 +96,13 @@ function parseArgs() {
       if (!Number.isInteger(n) || n <= 0 || n > 5000) fail(`--pageSize must be integer 1..5000, got ${v}`);
       pageSize = n;
       i++;
+    } else if (a === "--executionPolicy" || a === "--execution-policy" || a === "--ep") {
+      const v = raw[i + 1];
+      if (!v || v.startsWith("-")) fail("Missing value for --executionPolicy");
+      executionPolicyId = v;
+      i++;
+    } else if (a === "--approve") {
+      approve = true;
     } else if (a === "--smartMoney" || a === "--smart-money") {
       smartMoney = true;
     } else if (a === "--smc") {
@@ -92,15 +116,15 @@ function parseArgs() {
     }
   }
 
-  return { asset, timeframe, from, to, smartMoney, smc, splits, help, pageSize };
+  return { asset, timeframe, from, to, smartMoney, smc, splits, help, pageSize, executionPolicyId, approve };
 }
 
 function printHelp() {
   console.log(`
-Owner-run READ-ONLY historical data inspection CLI — NO DB WRITES — NO PNL — BTC ONLY
+Owner-run READ-ONLY historical data inspection CLI — NO DB WRITES — BTC ONLY — REAL PNL ONLY WHEN APPROVED
 
 Usage (uses server's existing env, no secrets, never echo DATABASE_URL):
-  npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 [--smartMoney] [--smc] [--splits]
+  npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 [--smartMoney] [--smc] [--splits] [--executionPolicy EP-2 --approve]
 
 Options:
   --asset <symbol>       Asset symbol (default BTC) — BTC only, fail-closed if != BTC (pre-registered scope)
@@ -108,22 +132,27 @@ Options:
   --from <ISO>           From timestamp ISO (e.g. 2024-01-01T00:00:00Z or YYYY-MM-DD)
   --to <ISO>             To timestamp ISO, must be > from
   --pageSize <n>         Page size 1..5000 (default 1000)
+  --executionPolicy <id> Execution policy registry id EP-1/EP-2/EP-3 — Phase G real PnL runner, truthful baseline EP-1 0 trades, EP-2/EP-3 DRAFT blocked until APPROVED
+  --approve              Simulate owner approval of DRAFT policy EP-2/EP-3 via approvePolicy utility — deterministic, no DB writes, for inspection only
   --smartMoney           Apply Smart Money eligibility (BINGX 1d excluded — timeless policy only)
-  --smc                  Also evaluate raw SMC observations (no SL/TP, no PnL)
+  --smc                  Also evaluate raw SMC observations (no SL/TP, no PnL unless executionPolicy APPROVED)
   --splits               Also evaluate TRAIN/VALIDATION/OOS readiness (OOS isolation, no silent shortening)
   --help, -h             Show help
 
 Safety (truthful, audited):
   - READ ONLY by capability-restricted Prisma surface: asset.findUnique, market.findMany (all markets for BTC, reporting current enabled/status as diagnostics), candle.findMany (CLOSED-only), $disconnect. No create/update/upsert/delete, no $executeRaw, no raw SQL.
   - read-only-sql.ts is static/test defense (SELECT/WITH allowlist) — not runtime CLI transaction enforcement. CLI does NOT execute SET TRANSACTION READ ONLY to avoid DB writes.
-  - NO DB WRITES, NO PNL: never calculates profit/loss/winRate
+  - NO DB WRITES, real PnL only when execution policy APPROVED with explicit requiredEconomicFields, policy identity in fingerprint, costs 5bps fee 2bps slippage
   - Fail-closed on invalid inputs (including --asset != BTC), non-aligned ranges reported explicitly, never misleading 100% coverage
   - TRAIN/VALIDATION/OOS: OOS does not influence selection, selection stages TRAIN/VALIDATION only, OOS final witness only
   - CURRENT_STATE_SURVIVORSHIP_LIMITATION: current enabled/status reported as diagnostic, not treated as historical truth; all markets queried, timeless BINGX-1d applied separately
+  - Execution Policy Registry: ${JSON.stringify(EXECUTION_POLICY_REGISTRY_DOC.policies.map((p: any) => `${p.id}:${p.status}`))} — EP-1 APPROVED baselineMode truthful no SL/TP NON_EXECUTABLE 0 trades, EP-2/EP-3 DRAFT explicit examples owner must approve
 
 Examples (no secrets, uses existing env):
   npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney
   npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1d --from 2024-01-01 --to 2024-03-01 --smartMoney --smc --splits
+  npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --executionPolicy EP-1
+  npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --executionPolicy EP-2 --approve --smc
 `);
 }
 
@@ -132,7 +161,7 @@ function parseDateStrict(s: string, label: string): Date {
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     iso = `${s}T00:00:00Z`;
   }
-  if (s.includes("T") && !/[Z]$/.test(s) && !/[+-]\d{2}:?\\d{2}$/.test(s) && !/[+-]\d{2}$/.test(s)) {
+  if (s.includes("T") && !/[Z]$/.test(s) && !/[+-]\d{2}:?\d{2}$/.test(s) && !/[+-]\d{2}$/.test(s)) {
     fail(`${label} '${s}' is timezone-less ambiguous datetime — require Z or offset or date-only YYYY-MM-DD`);
   }
   const d = new Date(iso);
@@ -158,6 +187,13 @@ async function main() {
     fail(`Unknown timeframe '${args.timeframe}'. Supported: ${CANONICAL_TIMEFRAMES.join(", ")}`);
   }
 
+  if (args.executionPolicyId) {
+    const allowed = listRegistryPolicies().map((p) => p.id);
+    if (!allowed.includes(args.executionPolicyId)) {
+      fail(`--executionPolicy must be one of ${allowed.join(", ")}, got ${args.executionPolicyId}`);
+    }
+  }
+
   const fromDate = parseDateStrict(args.from, "--from");
   const toDate = parseDateStrict(args.to, "--to");
 
@@ -165,7 +201,9 @@ async function main() {
     fail(`--from must be < --to, got from=${fromDate.toISOString()} to=${toDate.toISOString()}`);
   }
 
-  console.log(`Asset: ${args.asset} Timeframe: ${args.timeframe} From: ${fromDate.toISOString()} To: ${toDate.toISOString()} SmartMoney: ${args.smartMoney} SMC: ${args.smc} PageSize: ${args.pageSize}`);
+  console.log(`Asset: ${args.asset} Timeframe: ${args.timeframe} From: ${fromDate.toISOString()} To: ${toDate.toISOString()} SmartMoney: ${args.smartMoney} SMC: ${args.smc} PageSize: ${args.pageSize} ExecutionPolicy: ${args.executionPolicyId ?? "none"} Approve: ${args.approve}`);
+  console.log("");
+  console.log(`Registry: ${listRegistryPolicies().map((p) => `${p.id}(${p.status})`).join(", ")} — EP-1 APPROVED baseline truthful, EP-2/EP-3 DRAFT blocked until APPROVED`);
   console.log("");
 
   const prisma = new PrismaClient();
@@ -358,7 +396,7 @@ async function main() {
     }
 
     if (args.smc) {
-      console.log("\n=== Raw SMC Observations (no SL/TP, no PnL) ===");
+      console.log("\n=== Raw SMC Observations (no SL/TP unless APPROVED policy, truthful) ===");
       console.log("SMC evaluation reuses production evaluateSmc, no second algorithm");
       const firstMarket = markets[0];
       if (firstMarket) {
@@ -373,7 +411,7 @@ async function main() {
 
         console.log(`Fetched ${candles.length} candles for market ${firstMarket.id} ${firstMarket.exchange} for SMC demo`);
         console.log("SMC config must be loaded from Strategy table (id=2) — not evaluated in this demo to avoid hidden defaults");
-        console.log("Raw observations would preserve LONG/SHORT/NEUTRAL/CANNOT_EVALUATE with provenance, no SL/TP");
+        console.log("Raw observations would preserve LONG/SHORT/NEUTRAL/CANNOT_EVALUATE with provenance, no SL/TP until APPROVED policy");
       }
     }
 
@@ -398,8 +436,92 @@ async function main() {
       console.log("OOS does not influence selection — TRAIN/VALIDATION only, OOS final witness only");
     }
 
-    console.log("\n=== READ ONLY — NO DB WRITES — NO PNL — BTC ONLY — CLI completed successfully ===");
-    console.log("No profitability calculated, no workers started, no Prisma migration, no secrets echoed");
+    // Phase G: Real PnL Runner with execution policy registry
+    if (args.executionPolicyId) {
+      console.log(`\n=== Real PnL Runner — Execution Policy ${args.executionPolicyId} — READ ONLY — ${args.approve ? "APPROVED via --approve" : "DRAFT check"} ===`);
+      let policy = getRegistryPolicyById(args.executionPolicyId);
+      if (!policy) {
+        fail(`Registry policy ${args.executionPolicyId} not found`);
+      }
+      console.log(`Policy: id=${policy.id} version=${policy.version} status=${policy.status} fingerprint=${policy.fingerprint}`);
+      console.log(`Required fields: ${policy.requiredEconomicFields.join(", ")} config: ${JSON.stringify(policy.config)}`);
+
+      if (args.approve && policy.status !== "APPROVED") {
+        console.log(`--approve supplied: simulating owner approval of ${policy.id} via approvePolicy utility (deterministic, no DB writes)`);
+        policy = approvePolicy(policy);
+        console.log(`After approval: status=${policy.status} approvedAt=${policy.approvedAt}`);
+      }
+
+      // Fetch candles for real PnL — need all candles per market map
+      const allCandlesPerMarket = new Map<number, SmcRawCandle[]>();
+      for (const m of markets.slice(0, 3)) { // limit to 3 markets for performance
+        const rows = await deps.findCandlesPage({
+          marketId: m.id,
+          timeframe: args.timeframe,
+          from: fromDate,
+          to: toDate,
+          cursorOpenTime: null,
+          take: 5000,
+        });
+        const raw: SmcRawCandle[] = (rows as any[]).map((r: any) => ({
+          openTime: r.openTime,
+          open: r.open,
+          high: r.high,
+          low: r.low,
+          close: r.close,
+          closed: true,
+        }));
+        allCandlesPerMarket.set(m.id, raw);
+      }
+
+      const decisionBarsMs = report.commonTimestamps.slice(0, 200); // use common timestamps as decision bars
+
+      // Load SMC config from DB Strategy id=2 if available, else default
+      let smcConfig;
+      try {
+        const strat = await (prisma as any).strategy.findUnique({ where: { id: 2 }, select: { paramsJson: true } });
+        if (strat?.paramsJson?.smc) {
+          smcConfig = strat.paramsJson.smc;
+        } else {
+          smcConfig = defaultSmcScoringConfig(args.timeframe as any);
+        }
+      } catch {
+        smcConfig = defaultSmcScoringConfig(args.timeframe as any);
+      }
+
+      const diag = runRealPnlDiagnostics({
+        assetSymbol: args.asset,
+        timeframe: args.timeframe as any,
+        from: fromDate,
+        to: toDate,
+        markets,
+        allCandlesPerMarket,
+        decisionBarsMs,
+        smcConfig,
+        executionPolicy: policy,
+        backtestConfig: {
+          sameBarPolicy: "pessimistic",
+          timeoutBars: (policy.config as any).timeoutBars ?? null,
+        } as any,
+      });
+
+      console.log("\n" + formatRealPnlReport(diag));
+
+      if (diag.status === "PRE_REGISTRATION_REQUIRED") {
+        console.log(`\nPRE_REGISTRATION_REQUIRED: policy ${args.executionPolicyId} not APPROVED — no real PnL calculated, truthful baseline. Use --approve to simulate owner approval for inspection.`);
+      } else if (diag.status === "READY_FOR_EXECUTION") {
+        console.log(`\nREADY_FOR_EXECUTION: policy ${diag.policyId} APPROVED — real trades ${diag.tradesCount}, raw LONG ${diag.rawLongCount} SHORT ${diag.rawShortCount}, policy identity in fingerprint ${diag.policyFingerprint}`);
+      }
+    } else {
+      console.log("\n=== Execution Policy Registry — available policies (no --executionPolicy supplied, no real PnL) ===");
+      for (const p of listRegistryPolicies()) {
+        console.log(`- ${p.id} v${p.version} status=${p.status} fingerprint=${p.fingerprint.slice(0, 48)}... required=${p.requiredEconomicFields.join(",")}`);
+      }
+      console.log("Supply --executionPolicy EP-1/EP-2/EP-3 to run Real PnL Runner (EP-1 0 trades baseline truthful, EP-2/EP-3 DRAFT blocked until APPROVED, use --approve to simulate approval)");
+    }
+
+    console.log("\n=== READ ONLY — NO DB WRITES — BTC ONLY — CLI completed successfully ===");
+    console.log("No workers started, no Prisma migration, no secrets echoed, costs 5bps fee 2bps slippage, policy identity in fingerprint");
   } catch (e) {
     console.error("\nCLI failed (fail-closed):", (e as Error).message);
     console.error((e as Error).stack);

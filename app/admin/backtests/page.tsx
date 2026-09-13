@@ -94,13 +94,26 @@ export default async function AdminBacktestsPage() {
           </div>
 
           <div className="adminCard">
-            <h3>Phase D — Execution Policy Registry — EP-1 APPROVED Baseline / EP-2 EP-3 DRAFT — IMPLEMENTED</h3>
+            <h3>Phase D — Execution Policy Registry — EP-1 APPROVED Baseline / EP-2 EP-3 DRAFT — IMPLEMENTED 37/37</h3>
             <ul>
               <li>Registry EP-1/EP-2/EP-3: all explicit, no hidden defaults, HONEST SCOPE top-level only, no new Date()/Date.now()/random/env</li>
               <li>EP-1 SMC-Direction Baseline APPROVED: baselineMode explicit, no SL/TP, NON_EXECUTABLE truthful, fingerprint includes id|version|requiredFields|config, costs 5bps fee 2bps slippage</li>
               <li>EP-2 Structural Anchor DRAFT EXAMPLE: requiredEconomicFields [stopLoss, takeProfit, slAnchor, tpModel, buffer, rrMin, timeoutBars] explicit, owner must approve real values, NOT production SMC</li>
               <li>EP-3 Generic Boundary DRAFT: [stopLoss, takeProfit, slAnchor, tpModel, k, atrSlMultiplier, rrMin, timeoutBars] explicit, policy identity in fingerprint, TRAIN/VALIDATION only selection OOS final witness, OOS-blind</li>
-              <li>Validation: findUndeclaredEconomicFields top-level only, validateNoHiddenEconomicDefaults fails closed when unresolved, mutation {`{atrSlMultiplier,k,rrMin,timeoutBars}`} must fail — 12/12</li>
+              <li>Validation: findUndeclaredEconomicFields top-level only, validateNoHiddenEconomicDefaults fails closed when unresolved, mutation {`{atrSlMultiplier,k,rrMin,timeoutBars}`} must fail — 12/12, registry 37/37</li>
+            </ul>
+          </div>
+
+          <div className="adminCard">
+            <h3>Phase G — Real PnL Runner — EP-1 0 trades truthful / EP-2 EP-3 APPROVED yields real trades — IMPLEMENTED 26/26</h3>
+            <ul>
+              <li>Integrates Execution Policy Registry with P2-A engine: computeLevels stopLoss/takeProfit%+buffer, reference price = bar.close, LONG SL=ref*(1-stopLoss-buffer) TP=ref*(1+takeProfit) SHORT opposite</li>
+              <li>Truthful: EP-1 APPROVED baselineMode but 0 trades (no SL/TP) — SMC-Direction Baseline, NON_EXECUTABLE until real policy, EP-2/EP-3 DRAFT blocked PRE_REGISTRATION_REQUIRED, APPROVED via approvePolicy utility yields real trades with metrics equityCurve</li>
+              <li>Policy identity in fingerprint: label policyId|direction|factsFingerprint, backtestInput fees bps:5 fixed:0 slippage bps:2 kind:bps value:2, sameBar pessimistic, warmup 84, timeoutBars from policy</li>
+              <li>Status READY_FOR_EXECUTION / PRE_REGISTRATION_REQUIRED / INVALID_POLICY / INSUFFICIENT_DATA / EXECUTION_FAILED, formatRealPnlReport includes limitations CANNOT_RECONSTRUCT_HISTORICAL_ELIGIBILITY OHLCV PIT OOS-blind</li>
+              <li>Pre-PnL Runner updated: exposes registryPolicies fingerprint count 3 approved 1, executionPolicyRegistryId EP-1/EP-2/EP-3, truthfulBaselineName includes fingerprint</li>
+              <li>CLI backtest-historical-readonly.ts now supports --executionPolicy EP-1/EP-2/EP-3 --approve: EP-1 0 trades baseline, EP-2 DRAFT PRE_REGISTRATION_REQUIRED, --approve simulates owner approval deterministic no DB writes, real PnL report with trades/metrics</li>
+              <li>No DB writes, no workers, no Signal Engine, BTC only 5m/15m/1h/4h/1d BINGX excluded 1d, readOnly true</li>
             </ul>
           </div>
 
