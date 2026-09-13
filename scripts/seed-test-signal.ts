@@ -1,6 +1,9 @@
 /**
  * Seed test signal for BTC — for demo when strategy gives NEUTRAL
- * Creates a real LONG signal so /signals page shows data
+ * PHASE 2C: signalSource=SEEDED, not LIVE_FORWARD, to avoid polluting live stats
+ * Live stats must WHERE signalSource=LIVE_FORWARD only
+ * Legacy seeded ID1/ID2 are NOT live — they remain SEEDED or LEGACY after migration
+ * This script should NOT be run in production without owner approval, and even then creates SEEDED only
  */
 
 import "dotenv/config";
@@ -9,7 +12,8 @@ import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log("=== SEED TEST SIGNAL BTC — for /signals demo ===");
+  console.log("=== SEED TEST SIGNAL BTC — PHASE 2C SEEDED, not LIVE_FORWARD ===");
+  console.log("This script creates SEEDED signals, which are excluded from live stats WHERE signalSource=LIVE_FORWARD");
 
   const strategy = await prisma.strategy.findFirst({
     where: { slug: "trend-suslik" },
@@ -29,7 +33,6 @@ async function main() {
     process.exit(1);
   }
 
-  // Get last price from IndicatorSnapshot
   const lastSnap = await prisma.indicatorSnapshot.findFirst({
     where: { timeframe: "1h" },
     orderBy: { candleTime: "desc" },
@@ -50,8 +53,10 @@ async function main() {
       takeProfit2: entry + atr * 2.5,
       takeProfit3: entry + atr * 4,
       status: "ACTIVE",
-      reason: "Тестовый сигнал BTC LONG — демо для /signals, trend-suslik v1, 5/5 бирж, ATR 350, entry по последней закрытой свече 11:00 UTC, для проверки что страница сигналов работает после деплоя 3001→3000",
+      reason: "Тестовый сигнал BTC LONG — демо для /signals, SEEDED not LIVE_FORWARD, excluded from live stats",
       strategyId: strategy.id,
+      signalSource: "SEEDED" as const,
+      signalCandleTime: new Date(Date.now() - 60 * 60 * 1000), // 1h ago, for unique constraint
     },
     {
       symbol: "BTC",
@@ -64,8 +69,10 @@ async function main() {
       takeProfit2: entry - atr * 2.5,
       takeProfit3: entry - atr * 4,
       status: "ACTIVE",
-      reason: "Тестовый сигнал BTC SHORT — демо, проверка /signals и /coin/BTC, после включения стратегии",
+      reason: "Тестовый сигнал BTC SHORT — демо, SEEDED not LIVE_FORWARD",
       strategyId: strategy.id,
+      signalSource: "SEEDED" as const,
+      signalCandleTime: new Date(Date.now() - 2 * 60 * 60 * 1000), // 2h ago
     },
   ];
 
@@ -76,29 +83,39 @@ async function main() {
         timeframe: data.timeframe,
         direction: data.direction,
         strategyId: data.strategyId,
+        signalSource: "SEEDED",
         status: "ACTIVE",
       },
       orderBy: { createdAt: "desc" },
     });
 
     if (existing) {
-      console.log(`Signal ${data.direction} already exists id=${existing.id} — skipping`);
+      console.log(`Signal ${data.direction} SEEDED already exists id=${existing.id} source=${(existing as any).signalSource} — skipping`);
       continue;
     }
 
-    const created = await prisma.signal.create({ data });
-    console.log(`Created signal id=${created.id} ${created.direction} ${created.symbol} ${created.timeframe} entry=${created.entry.toFixed(2)} SL=${created.stopLoss?.toFixed(2)} TP1=${created.takeProfit1?.toFixed(2)} score=${created.score}`);
+    // In real run, would create — but we guard to not accidentally run in production
+    console.log(`Would create SEEDED signal ${data.direction} ${data.symbol} ${data.timeframe} entry=${data.entry.toFixed(2)} SL=${data.stopLoss?.toFixed(2)} TP1=${data.takeProfit1?.toFixed(2)} score=${data.score} source=${data.signalSource} candleTime=${data.signalCandleTime.toISOString()}`);
+    // Uncomment to actually create in local dev:
+    // const created = await prisma.signal.create({ data });
+    // console.log(`Created signal id=${created.id} ${created.direction} source=${(created as any).signalSource}`);
+    console.log(`DRY — not creating, set RUN_SEED=true to actually insert`);
+    if (process.env.RUN_SEED === "true") {
+      const created = await prisma.signal.create({ data: data as any });
+      console.log(`Created signal id=${created.id} ${created.direction} ${created.symbol} ${created.timeframe} entry=${created.entry} source=${(created as any).signalSource}`);
+    }
   }
 
   const count = await prisma.signal.count();
   console.log(`\nTotal signals: ${count}`);
   const all = await prisma.signal.findMany({ orderBy: { createdAt: "desc" }, take: 10, include: { strategy: true } });
   for (const s of all) {
-    console.log(`  id=${s.id} ${s.symbol} ${s.timeframe} ${s.direction} score=${s.score} entry=${s.entry} strategy=${s.strategy.slug} status=${s.status} ${s.createdAt.toISOString()}`);
+    console.log(`  id=${s.id} ${s.symbol} ${s.timeframe} ${s.direction} score=${s.score} entry=${s.entry} strategy=${s.strategy.slug} status=${s.status} source=${(s as any).signalSource} candleTime=${(s as any).signalCandleTime?.toISOString() ?? "NULL"} ${s.createdAt.toISOString()}`);
   }
 
   await prisma.$disconnect();
-  console.log("\n=== DONE — check http://89.125.24.50:3000/signals ===");
+  console.log("\n=== DONE — SEEDED signals excluded from live stats WHERE signalSource=LIVE_FORWARD ===");
+  console.log("=== Legacy ID1/ID2 should be LEGACY after PHASE 2C migration, not LIVE_FORWARD ===");
 }
 
 main().catch(e => { console.error(e); process.exit(1); });

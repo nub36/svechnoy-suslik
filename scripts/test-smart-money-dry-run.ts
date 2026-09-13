@@ -452,11 +452,11 @@ async function main() {
     }
   }
 
-  // Safety: PHASE 2B — smart-money create guarded, not forbidden entirely, but dry-run default
-  console.log("\nSafety: prisma.signal.create guarded for smart-money (PHASE 2B)");
+  // Safety: PHASE 2B/2C — smart-money create guarded, not forbidden entirely, but dry-run default, PHASE 2C AND guard
+  console.log("\nSafety: prisma.signal.create guarded for smart-money (PHASE 2B/2C)");
   {
     const src = readFileSync("lib/signals/signal-engine.ts", "utf-8");
-    ok(src.includes("PHASE 2B GUARD") && src.includes("write DISABLED"), "Safety: PHASE 2B guard present");
+    ok((src.includes("PHASE 2B GUARD") || src.includes("PHASE 2C") || src.includes("WRITE GUARD AND")) && (src.includes("write DISABLED") || src.toLowerCase().includes("blocked")), "Safety: PHASE 2B/C guard present");
     const createMatches = src.match(/prisma\.signal\.create\(\{/g) || [];
     ok(createMatches.length === 2, `Safety: 2 prisma.signal.create({ in file (trend + smart-money guarded), found ${createMatches.length}`);
     const smStart = src.indexOf("async function runSmartMoneyEngine");

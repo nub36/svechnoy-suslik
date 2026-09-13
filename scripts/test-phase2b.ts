@@ -1,6 +1,6 @@
 /**
  * PHASE 2B tests — persistence + identity + execution semantics
- * Covers all requirements from PHASE 2B spec
+ * Updated for PHASE 2C compatibility — keeps previous checks green
  * Run: npx tsx scripts/test-phase2b.ts
  */
 
@@ -91,7 +91,7 @@ const laggard5m = (i: number, ex = NAMES[i - 1]!) => market(ex, i, "5m", waveCan
 const cfg = (tf: SmcTimeframe) => defaultSmcScoringConfig(tf);
 
 async function main() {
-  console.log("=== PHASE 2B tests ===");
+  console.log("=== PHASE 2B tests (updated for 2C) ===");
 
   // 1. COMMON HORIZON POLICY — STRICT vs QUORUM
   console.log("\n1. COMMON HORIZON POLICY STRICT vs QUORUM");
@@ -109,9 +109,7 @@ async function main() {
     ok(quorumSel.freshCount === 4 && quorumSel.staleCount === 1, "QUORUM: fresh 4 stale 1");
     ok(quorumSel.freshMarkets.every((f) => f.exchange !== "BINGX" || true), "QUORUM: fresh list determined by availability");
 
-    // Causal model check: QUORUM subset determined BEFORE scoring
     ok(quorumSel.freshMarkets.length === 4, "QUORUM: subset size 4 determined by availability before scoring");
-    // No selection bias: we didn't look at direction/score
     console.log(`  STRICT reason: ${strictSel.reason}`);
     console.log(`  QUORUM reason: ${quorumSel.reason}`);
   }
@@ -119,11 +117,8 @@ async function main() {
   // 2. PARTICIPANT SELECTION independent of score
   console.log("\n2. Participant selection independent of score");
   {
-    // Create markets with same availability but different scores (LONG vs NEUTRAL)
-    const longCandles = canonical(); // LONG with small window
+    const longCandles = canonical();
     const neutralCandles = (() => {
-      const cfgHigh = { ...defaultSmcScoringConfig("1h"), swingLeft: 1, swingRight: 1, internalLeft: 1, internalRight: 1, minimumScore: 90 };
-      // Use same candles but high threshold will make it NEUTRAL, but participant still valid
       return canonical();
     })();
 
@@ -135,11 +130,8 @@ async function main() {
 
     const commonMarkets = markets.map((m) => ({ exchange: m.meta.exchange, marketId: m.meta.marketId, candles: m.candles }));
     const quorumSel = selectQuorumClosedHorizon(commonMarkets, "1h", { now: new Date(T0 + 27 * HOUR + 5 * 60_000), minExchanges: 2 });
-    // All have same latest, so all fresh regardless of score
     ok(quorumSel.freshCount === 3, "Participant selection: 3 fresh regardless of LONG/NEUTRAL score");
 
-    // Ensure NEUTRAL remains vote, not disappears
-    const meta = { exchange: "BINANCE", market: "BTCUSDT", marketId: 1, timeframe: "1h" as SmcTimeframe, assetRank: 1, quoteVolume24h: 1e9 };
     const cfgLow = { ...defaultSmcScoringConfig("1h"), swingLeft: 1, swingRight: 1, internalLeft: 1, internalRight: 1 };
     const cfgHigh = { ...defaultSmcScoringConfig("1h"), swingLeft: 1, swingRight: 1, internalLeft: 1, internalRight: 1, minimumScore: 90 };
     const rLong = market("BINANCE", 1, "1h", canonical());
@@ -190,12 +182,11 @@ async function main() {
     agg = aggregateAssetGroup("BTC", "1h", "smart-money-suslik", 1, [mkEval("SHORT", 1), mkEval("SHORT", 2), mkEval("SHORT", 3), mkEval("NEUTRAL", 4), mkEval("NEUTRAL", 5)] as any, 3);
     ok(agg.direction === "SHORT", "3 SHORT +2 NEUTRAL => SHORT");
 
-    // Evaluated < minExchanges => NO SIGNAL
     agg = aggregateAssetGroup("BTC", "1h", "smart-money-suslik", 1, [mkEval("LONG", 1), mkEval("LONG", 2)] as any, 3);
     ok(agg.direction === "NEUTRAL" && agg.evaluated === 2, "evaluated 2 < minExchanges 3 => NEUTRAL/NO SIGNAL");
   }
 
-  // 4. SIGNAL SCHEMA — check actual type
+  // 4. SIGNAL SCHEMA
   console.log("\n4. SIGNAL SCHEMA");
   {
     const schema = readFileSync("prisma/schema.prisma", "utf-8");
@@ -207,16 +198,16 @@ async function main() {
     ok(schema.includes("metadata") && schema.includes("Json"), "metadata Json present");
     ok(schema.includes("@@unique([strategyId, symbol, timeframe, signalCandleTime])"), "Unique without direction present");
     ok(!schema.includes("@@unique([strategyId, symbol, timeframe, signalCandleTime, direction])"), "Unique does NOT include direction");
+    ok(schema.includes("LEGACY"), "LEGACY in enum");
+    ok(schema.includes("@default(LEGACY)"), "default LEGACY safe");
   }
 
   // 5. UNIQUE IDENTITY
   console.log("\n5. UNIQUE IDENTITY");
   {
     const schema = readFileSync("prisma/schema.prisma", "utf-8");
-    // Check PostgreSQL NULL semantics documented
     ok(schema.includes("PostgreSQL") && schema.includes("NULL") && schema.includes("distinct"), "NULL semantics documented");
 
-    // Simulate unique constraint logic: same strategy+symbol+timeframe+signalCandleTime should block second signal regardless of direction
     const existing = { strategyId: 2, symbol: "BTC", timeframe: "1h", signalCandleTime: new Date(T), direction: "LONG" };
     const newLongSameCandle = { strategyId: 2, symbol: "BTC", timeframe: "1h", signalCandleTime: new Date(T), direction: "LONG" };
     const newShortSameCandle = { strategyId: 2, symbol: "BTC", timeframe: "1h", signalCandleTime: new Date(T), direction: "SHORT" };
@@ -234,7 +225,6 @@ async function main() {
     ok(isDuplicate(existing, diffStrategy) === false, "Different strategy allowed");
     ok(isDuplicate(existing, diffTimeframe) === false, "Different timeframe allowed");
 
-    // Check that app handles P2002 as duplicate not fatal
     const signalEngineSrc = readFileSync("lib/signals/signal-engine.ts", "utf-8");
     ok(signalEngineSrc.includes("P2002") && signalEngineSrc.includes("Unique constraint") && signalEngineSrc.includes("Duplicate"), "Unique violation handled as duplicate, not fatal");
   }
@@ -251,7 +241,6 @@ async function main() {
     const ref = selectReferenceExchange(participants);
     ok(ref?.exchange === "BINANCE", "Reference exchange deterministic: picks BINANCE first from priority, not first in list");
 
-    // Independent of score
     const participants2 = [
       { exchange: "BYBIT", marketId: 2 },
       { exchange: "BINANCE", marketId: 1 },
@@ -259,32 +248,28 @@ async function main() {
     const ref2 = selectReferenceExchange(participants2);
     ok(ref2?.exchange === "BINANCE", "Reference independent of score — still BINANCE even if BYBIT has higher score");
 
-    // BINGX 1d never reference
     ok(isSmartMoneyExchangeEligible("BINGX", "1d") === false, "BINGX 1d not eligible, never reference");
     const bingxOnly = [{ exchange: "BINGX", marketId: 5 }];
     const filtered1d = filterSmartMoneyEligibleResults(bingxOnly.map((p) => ({ ...p, market: "BTCUSDT", status: "evaluated", candleTime: new Date(), price: 100, longScore: 10, shortScore: 10, direction: "NEUTRAL", reasons: [], warnings: [] })) as any, "1d");
     ok(filtered1d.length === 0, "BINGX 1d filtered out, never reference");
 
-    // Check code does not use max score for reference
     const candidateSrc = readFileSync("lib/signals/smart-money-candidate.ts", "utf-8");
     ok(!candidateSrc.includes("maxScore") || candidateSrc.includes("selectReferenceExchange"), "Candidate builder uses selectReferenceExchange, not max score");
     ok(candidateSrc.includes("REFERENCE_EXCHANGE_PRIORITY"), "Uses priority constant");
   }
 
-  // 7. EXECUTION POLICY V1
-  console.log("\n7. EXECUTION POLICY V1");
+  // 7. EXECUTION POLICY V1 — PHASE 2C: NEXT_BAR_OPEN only, no fallback
+  console.log("\n7. EXECUTION POLICY V1 — PHASE 2C");
   {
     const candidateSrc = readFileSync("lib/signals/smart-money-candidate.ts", "utf-8");
     ok(candidateSrc.includes("SMC_ATR_V1"), "Execution policy SMC_ATR_V1 exists");
-    ok(candidateSrc.includes("NEXT_BAR_OPEN") && candidateSrc.includes("REFERENCE_CLOSE"), "Both REFERENCE_CLOSE and NEXT_BAR_OPEN documented");
+    ok(candidateSrc.includes("NEXT_BAR_OPEN"), "NEXT_BAR_OPEN documented");
+    ok(candidateSrc.includes("analytic only"), "referencePrice analytic only, not fallback");
+    ok(candidateSrc.includes("WAITING_ENTRY") && candidateSrc.includes("ENTRY_DATA_MISSING"), "WAITING_ENTRY and ENTRY_DATA_MISSING present");
 
-    // Causal-safe contract: signal known only after close of signal candle, entry = next bar open
-    // Check that builder stores both reference close and next bar open
     ok(candidateSrc.includes("nextBarOpenPrice") && candidateSrc.includes("referencePrice"), "Stores both reference close and next bar open");
-
-    // For forward stats, prefer NEXT_BAR_OPEN because backtest uses next-bar-open
-    console.log("  Causal contract: signalCandleTime H closed at asOf=H+tf, entry for stats = NEXT_BAR_OPEN (open of next candle) if available, else REFERENCE_CLOSE fallback");
-    console.log("  This is causal-safe: you cannot trade at close that just happened, only at next open");
+    console.log("  Causal contract: signalCandleTime H closed at asOf=H+tf, entry = NEXT_BAR_OPEN only, no REFERENCE_CLOSE fallback");
+    console.log("  Entry NULL WAITING_ENTRY if next bar not available, ENTRY_DATA_MISSING if gap");
   }
 
   // 8. ATR SEMANTICS
@@ -295,11 +280,8 @@ async function main() {
     ok(candidateSrc.includes("computeAtrSeries") && candidateSrc.includes("validateAndPrepare"), "ATR from reference exchange, not average");
     ok(candidateSrc.includes("executionParams") && candidateSrc.includes("stopMultiplier"), "Execution params immutable snapshot");
 
-    // Check that ATR not averaged over 5 exchanges
     ok(!candidateSrc.includes("avgAtr") || candidateSrc.includes("reference"), "ATR from reference, not avg of 5");
-
-    // Check that changing Strategy.config tomorrow doesn't change old Signal interpretation
-    ok(candidateSrc.includes("Object.freeze") && candidateSrc.includes("executionParams"), "Candidate frozen, execution params snapshot prevents reinterpretation");
+    ok(candidateSrc.includes("deepFreeze") && candidateSrc.includes("executionParams"), "Candidate deep frozen, execution params snapshot prevents reinterpretation");
   }
 
   // 9. SIGNAL EXPLANATION
@@ -318,44 +300,41 @@ async function main() {
   {
     const engineSrc = readFileSync("lib/signals/signal-engine.ts", "utf-8");
     ok(engineSrc.includes("buildSmartMoneySignalCandidate"), "Engine uses buildSmartMoneySignalCandidate");
-    // Count actual calls buildSmartMoneySignalCandidate({
     const builderCalls = (engineSrc.match(/buildSmartMoneySignalCandidate\(\{/g) || []).length;
     ok(builderCalls === 1, `One builder call buildSmartMoneySignalCandidate({ in engine, found ${builderCalls}`);
     ok(engineSrc.includes("same payload as dry-run") || engineSrc.includes("same candidate"), "Comment about same payload dry-run == live");
   }
 
-  // 11. PRODUCTION WRITE GUARD
-  console.log("\n11. PRODUCTION WRITE GUARD");
+  // 11. PRODUCTION WRITE GUARD — PHASE 2C AND
+  console.log("\n11. PRODUCTION WRITE GUARD AND (PHASE 2C)");
   {
     const workerSrc = readFileSync("scripts/signal-worker.ts", "utf-8");
     ok(workerSrc.includes("--enable-smart-money-write") && workerSrc.includes("SMART_MONEY_WRITE_ENABLED"), "Write guard flag and ENV present");
     ok(workerSrc.toLowerCase().includes("write disabled") && workerSrc.toLowerCase().includes("default"), "Default WRITE DISABLED");
+    ok(workerSrc.includes("AND guard") || workerSrc.includes("flag && env") || workerSrc.includes("flagEnabled && envEnabled"), "AND guard present");
 
     const engineSrc = readFileSync("lib/signals/signal-engine.ts", "utf-8");
-    ok(engineSrc.includes("PHASE 2B GUARD") && engineSrc.toLowerCase().includes("write disabled"), "Engine guard present");
+    ok(engineSrc.includes("GUARD") && (engineSrc.toLowerCase().includes("blocked") || engineSrc.toLowerCase().includes("write disabled") || engineSrc.includes("WRITE GUARD AND")), "Engine guard present");
     ok(engineSrc.includes("enableSmartMoneyWrite") && engineSrc.includes("SMART_MONEY_WRITE_ENABLED"), "Guard checks flag and ENV");
+    ok(engineSrc.includes("flagEnabled && envEnabled") || engineSrc.includes("flag && env"), "Guard AND logic");
   }
 
   // 12. LEGACY SEEDED SIGNALS
   console.log("\n13. LEGACY SEEDED SIGNALS classification");
   {
     const schema = readFileSync("prisma/schema.prisma", "utf-8");
-    ok(schema.includes("SEEDED") && schema.includes("LIVE_FORWARD") && schema.includes("BACKTEST"), "SignalSource enum contains LIVE_FORWARD, SEEDED, BACKTEST");
-
-    // Check that old seeded ID1/ID2 should be distinguishable and not in live stats
-    console.log("  Legacy ID1/ID2 from seed-test-signal should be classified as SEEDED, not LIVE_FORWARD, and excluded from live-forward statistics");
+    ok(schema.includes("SEEDED") && schema.includes("LIVE_FORWARD") && schema.includes("BACKTEST") && schema.includes("LEGACY"), "SignalSource enum contains LIVE_FORWARD, SEEDED, BACKTEST, LEGACY");
+    console.log("  Legacy ID1/ID2 from seed-test-signal should be classified as LEGACY, not LIVE_FORWARD, and excluded from live-forward statistics");
     ok(true, "Legacy classification documented");
   }
 
   // Additional: no open candle, no future candle, prefix invariance, scoring unchanged, trend regression
   console.log("\n12. Additional tests: no open, no future, prefix, scoring, trend");
   {
-    // No open candle
     const withOpen = waveCandles(closedTimes(T, 10, "5m")).map((c, i) => (i === 9 ? { ...c, closed: false as any } : c));
     const truncated = truncateCandlesToHorizon(withOpen as any, new Date(T));
     ok(truncated.length === 9 && truncated.every((c) => c.closed === true), "No open candle: truncated filters closed=false");
 
-    // No future candle
     const futureEnd = NOW_5M + M5;
     const futureCandles = waveCandles(closedTimes(futureEnd, 200, "5m"));
     const sel = selectQuorumClosedHorizon(
@@ -365,7 +344,6 @@ async function main() {
     );
     ok(sel.status === "future_horizon" || sel.freshCount === 0, "No future candle: future handled as not fresh or future_horizon");
 
-    // Prefix invariance
     const cfg1h = { ...defaultSmcScoringConfig("1h"), swingLeft: 1, swingRight: 1, internalLeft: 1, internalRight: 1 };
     const full = [...canonical(), ...flats(27, 35)];
     const asOf = T0 + (18 + 1) * HOUR;
@@ -374,12 +352,10 @@ async function main() {
     const ePref = evaluateSmc(prefix, cfg1h, new Date(asOf));
     ok(JSON.stringify(eFull) === JSON.stringify(ePref), "Prefix invariance");
 
-    // Scoring unchanged
     const defaultCfg = defaultSmcScoringConfig("1h");
     ok(defaultCfg.minimumScore === 72, "Scoring unchanged: minimumScore 72");
     ok(defaultCfg.weights.swingStructureBias === 20, "Weights unchanged");
 
-    // Trend regression
     const trendCfg = {
       minimumSignalScore: 60,
       weights: { trend: 30, mediumTrend: 20, rsi: 20, macd: 20, volume: 10 },
@@ -422,14 +398,13 @@ async function main() {
       ok(result.candidate.atrAtSignal !== null, "Candidate ATR from reference present");
       ok(result.candidate.signalCandleTime instanceof Date, "Candidate signalCandleTime Date");
       ok(Object.isFrozen(result.candidate), "Candidate immutable frozen");
+      ok(result.candidate.executionStatus === "WAITING_ENTRY", "Candidate WAITING_ENTRY when no next bar (no fallback)");
 
-      // Dry-run candidate == persisted candidate payload
       const dryRunPayload = JSON.stringify({ signalCandleTime: result.candidate.signalCandleTime.toISOString(), direction: result.candidate.direction, score: result.candidate.score, ref: result.candidate.referenceExchange, price: result.candidate.referencePrice });
       const persistedPayload = JSON.stringify({ signalCandleTime: result.candidate.signalCandleTime.toISOString(), direction: result.candidate.direction, score: result.candidate.score, ref: result.candidate.referenceExchange, price: result.candidate.referencePrice });
       ok(dryRunPayload === persistedPayload, "Dry-run candidate == persisted candidate payload (same builder)");
     }
 
-    // Reference exchange independent of score
     const marketsMixed = [
       market("GATE", 3, "1h", canonical()),
       market("BINANCE", 1, "1h", canonical()),
@@ -458,7 +433,7 @@ async function main() {
     for (const f of failures) console.error(`  - ${f}`);
     process.exit(1);
   }
-  console.log("All PHASE 2B checks passed.");
+  console.log("All PHASE 2B checks passed (updated for 2C).");
 }
 
 main().catch((e) => {

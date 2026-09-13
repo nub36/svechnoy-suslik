@@ -94,6 +94,7 @@ enum SignalSource {
   LIVE_FORWARD
   SEEDED
   BACKTEST
+  LEGACY
 }
 
 model Signal {
@@ -102,7 +103,8 @@ model Signal {
   timeframe   String
   direction   String
   score       Float
-  entry       Float
+  // PHASE 2C: entry nullable for WAITING_ENTRY (no optimistic fallback)
+  entry       Float?
   stopLoss    Float?
   takeProfit1 Float?
   takeProfit2 Float?
@@ -113,19 +115,32 @@ model Signal {
   createdAt   DateTime  @default(now())
   closedAt    DateTime?
 
-  // PHASE 2B — Signal identity + execution semantics
+  // PHASE 2B/2C — Signal identity + execution semantics
   signalCandleTime   DateTime?
   referenceExchange  String?
   referencePrice     Float?
   aggregatePrice     Float?
   executionPolicy    String?
-  signalSource       SignalSource @default(LIVE_FORWARD)
+  // PHASE 2C fix: default LEGACY, not LIVE_FORWARD, to avoid auto-classifying old rows as live
+  signalSource       SignalSource @default(LEGACY)
   metadata           Json?
   atrAtSignal        Float?
   nextBarOpenPrice   Float?
   nextBarOpenTime    DateTime?
 
+  // PHASE 2C — structured confirmation (avoid parsing reason)
+  participantCount     Int?
+  evaluatedCount       Int?
+  longVotes            Int?
+  shortVotes           Int?
+  neutralVotes         Int?
+  confirmationCount    Int?
+  confirmationTotal    Int?
+  commonHorizonPolicy  String?
+  referenceFallback    Boolean? @default(false)
+
   strategy Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  outcome  SignalOutcome?
 
   @@index([symbol, timeframe])
   @@index([symbol, timeframe, signalCandleTime])
@@ -139,6 +154,39 @@ model Signal {
   // PostgreSQL treats NULL as distinct, so legacy rows with NULL signalCandleTime are not constrained
   // New SMC signals will have NOT NULL signalCandleTime and will be constrained
   @@unique([strategyId, symbol, timeframe, signalCandleTime])
+}
+
+model SignalOutcome {
+  id               Int       @id @default(autoincrement())
+  signalId         Int       @unique
+  // WAITING_ENTRY, OPEN, TP1_HIT, TP2_HIT, TP3_HIT, STOPPED, EXPIRED, ENTRY_DATA_MISSING
+  status           String    @default("WAITING_ENTRY")
+  entryTime        DateTime?
+  entryPrice       Float?
+  stopLoss         Float?
+  takeProfit1      Float?
+  takeProfit2      Float?
+  takeProfit3      Float?
+  exitTime         DateTime?
+  exitPrice        Float?
+  realizedR        Float?
+  maxFavorableR    Float?
+  maxAdverseR      Float?
+  barsHeld         Int?
+  tp1HitAt         DateTime?
+  tp2HitAt         DateTime?
+  tp3HitAt         DateTime?
+  executionPolicy  String?
+  executionParams  Json?
+  atrAtSignal      Float?
+  timeoutCandles   Int?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  signal Signal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([entryTime])
 }
 
 model Asset {
