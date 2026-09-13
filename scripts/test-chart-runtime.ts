@@ -333,9 +333,13 @@ async function main(): Promise<void> {
 
   const panes = chart.panes();
 
-  panes[0].setStretchFactor(4);
-  panes[1].setStretchFactor(1.6);
-  panes[2].setStretchFactor(1.6);
+  // Те же стартовые веса, что у компонента (paneStretchFactors
+  //(true, true) → 3 : 1 : 1).
+  const initialStretch = ux.paneStretchFactors(true, true);
+
+  panes[0].setStretchFactor(initialStretch.main);
+  panes[1].setStretchFactor(initialStretch.rsi);
+  panes[2].setStretchFactor(initialStretch.macd);
 
   candle.setData(candles);
   chart.timeScale().fitContent();
@@ -884,6 +888,110 @@ async function main(): Promise<void> {
     ok(
       Math.abs(afterTimeDbl.barSpacing - beforeTimeDbl.barSpacing) > 1e-6,
       `time: двойной клик по оси времени сбрасывает масштаб ВРЕМЕНИ (${beforeTimeDbl.barSpacing.toFixed(3)} → ${afterTimeDbl.barSpacing.toFixed(3)})`
+    );
+  }
+
+  console.log("\n=== 10. Высота главной панели: комбинации индикаторов ===");
+
+  {
+    /*
+     * Тот же путь, что у компонента: видимость серии — штатным
+     * applyOptions, доли панелей — штатным setStretchFactor из
+     * paneStretchFactors (lib/chart/chart-ux.ts). Проверяются
+     * ФАКТИЧЕСКИЕ высоты панелей после layout: свечная панель
+     * доминирует при любом наборе, пустые панели скрытых
+     * индикаторов не съедают высоту, NaN/отрицательных высот нет.
+     */
+    const applyCombo = (showRsi: boolean, showMacd: boolean): void => {
+      rsi.applyOptions({ visible: showRsi });
+      macd.applyOptions({ visible: showMacd });
+
+      const f = ux.paneStretchFactors(showRsi, showMacd);
+      const ps = chart.panes();
+
+      ps[0].setStretchFactor(f.main);
+      ps[1].setStretchFactor(f.rsi);
+      ps[2].setStretchFactor(f.macd);
+
+      dom.flushFrames();
+    };
+
+    const shareOfMain = (): number => {
+      const ps = chart.panes();
+      const totalH = ps.reduce((s, p) => s + p.getHeight(), 0);
+
+      return totalH > 0 ? (ps[0].getHeight() / totalH) * 100 : 0;
+    };
+
+    applyCombo(true, true);
+
+    const both = shareOfMain();
+
+    ok(
+      both >= 58 && both <= 68,
+      `combo RSI+MACD: главная панель ${both.toFixed(1)}% (цель ~60%)`
+    );
+    ok(
+      chart.panes()[1].getHeight() >= 30 && chart.panes()[2].getHeight() >= 30,
+      "combo RSI+MACD: оба индикатора читаемы (≥30px)"
+    );
+
+    applyCombo(true, false);
+
+    const rsiOnly = shareOfMain();
+
+    ok(
+      rsiOnly >= 72 && rsiOnly <= 79,
+      `combo RSI-only: главная панель ${rsiOnly.toFixed(1)}% (цель ~75%)`
+    );
+    ok(
+      chart.panes()[2].getHeight() <= 4,
+      `combo RSI-only: панель MACD сжата в минимум (${String(chart.panes()[2].getHeight())}px) и не съедает высоту`
+    );
+
+    applyCombo(false, true);
+
+    const macdOnly = shareOfMain();
+
+    ok(
+      macdOnly >= 72 && macdOnly <= 79,
+      `combo MACD-only: главная панель ${macdOnly.toFixed(1)}% (цель ~75%)`
+    );
+    ok(
+      chart.panes()[1].getHeight() <= 4,
+      `combo MACD-only: панель RSI сжата в минимум (${String(chart.panes()[1].getHeight())}px)`
+    );
+
+    applyCombo(false, false);
+
+    const none = shareOfMain();
+
+    ok(
+      none >= 96,
+      `combo без индикаторов: главная панель ${none.toFixed(1)}% (вся высота)`
+    );
+    ok(
+      chart.panes().every((p) => Number.isFinite(p.getHeight()) && p.getHeight() >= 0),
+      "combo: весовая схема не даёт NaN/отрицательных высот (totalStretch > 0 инвариантен)"
+    );
+
+    /* Возврат к включённым по умолчанию — как на реальном mount. */
+    applyCombo(true, true);
+
+    eq(
+      ux.mainPaneSharePct(ux.paneStretchFactors(true, true)),
+      60,
+      "helper: 3:1:1 → доля главной панели ровно 60%"
+    );
+    eq(
+      ux.mainPaneSharePct(ux.paneStretchFactors(true, false)),
+      75,
+      "helper: 3:1:0 → 75%"
+    );
+    eq(
+      ux.mainPaneSharePct(ux.paneStretchFactors(false, false)),
+      100,
+      "helper: 3:0:0 → 100%"
     );
   }
 

@@ -886,3 +886,59 @@ export function verticalScaleModePolicy(
     restoredBy: []
   };
 }
+
+/* ------------------------------------------------------------------ */
+/* 5. Высота главной панели: комбинации индикаторов                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Базовые веса панелей для штатного IPaneApi.setStretchFactor.
+ *
+ * Индикатор ВКЛЮЧЁН весит 1, главная панель всегда 3: при RSI+MACD
+ * свечам достаётся 60% площади, при одном индикаторе — 75%.
+ * СКРЫТЫЙ индикатор весит 0: виджет-панель библиотеки сжимается до
+ * своего минимума (Math.max(height, 2) в _private__adjustSizeImpl),
+ * пустые полосы по 20% НЕ съедает. Деление на totalStretch безопасно,
+ * потому что вес главной панели — константа 3 > 0.
+ */
+export const MAIN_PANE_STRETCH = 3;
+
+export const INDICATOR_PANE_STRETCH = 1;
+
+export interface PaneStretchSet {
+  main: number;
+  rsi: number;
+  macd: number;
+}
+
+/**
+ * Штатные пропорции панелей по текущей видимости индикаторов:
+ *  RSI+MACD   → 3 : 1 : 1   (главная ≈ 60%)
+ *  только один → 3 : 1 : 0  (главная ≈ 75%)
+ *  ни одного  → 3 : 0 : 0   (главная ≈ вся высота)
+ *
+ * Это НЕ собственная «физика» высот: единственный источник —
+ * setStretchFactor библиотеки, разделители панелей по-прежнему
+ * двигаются пользователем (enableResize).
+ */
+export function paneStretchFactors(
+  showRsi: boolean,
+  showMacd: boolean
+): PaneStretchSet {
+  return {
+    main: MAIN_PANE_STRETCH,
+    rsi: showRsi ? INDICATOR_PANE_STRETCH : 0,
+    macd: showMacd ? INDICATOR_PANE_STRETCH : 0
+  };
+}
+
+/** Доля главной панели в процентах (для инвариантов/тестов). */
+export function mainPaneSharePct(set: PaneStretchSet): number {
+  const total = set.main + set.rsi + set.macd;
+
+  if (!Number.isFinite(total) || total <= 0) {
+    return 0;
+  }
+
+  return (set.main / total) * 100;
+}

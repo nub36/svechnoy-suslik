@@ -23,6 +23,8 @@ import {
   AUTOSCALE_SPAN_PAD_RATIO,
   LEGEND_BOTTOM_GAP_PX,
   LEGEND_RIGHT_GAP_PX,
+  MAIN_PANE_STRETCH,
+  INDICATOR_PANE_STRETCH,
   SUSLIK_HANDLE_SCALE,
   SUSLIK_HANDLE_SCROLL,
   SUSLIK_KINETIC_SCROLL,
@@ -33,6 +35,8 @@ import {
   chartGestureBindings,
   createMainPaneAutoscaleProvider,
   legendSpace,
+  mainPaneSharePct,
+  paneStretchFactors,
   priceScaleBand,
   projectAutoscaleExtremes,
   shiftLogicalRange,
@@ -581,7 +585,7 @@ ok(
 /* ---------- RSI/MACD панели не сломаны ---------- */
 
 ok(/chart\.panes\(\)/.test(chartCode), "chart: панели RSI/MACD по-прежнему настраиваются");
-eq((chartCode.match(/setStretchFactor\(/g) ?? []).length, 3, "chart: stretch-факторы трёх панелей сохранены");
+eq((chartCode.match(/setStretchFactor\(/g) ?? []).length, 6, "chart: stretch-факторы проставляются штатно в двух местах (creation + applyVisibility) по три панели");
 ok(/title: "RSI 14"[\s\S]{0,40}?,\s*1\s*\)/.test(chartCode), "chart: RSI остаётся в отдельной панели 1");
 ok(/title: "MACD"[\s\S]{0,40}?,\s*2\s*\)/.test(chartCode), "chart: MACD остаётся в панели 2");
 ok(/title: "сигнал"[\s\S]{0,40}?,\s*2\s*\)/.test(chartCode), "chart: сигнальная линия MACD — в панели 2");
@@ -1722,32 +1726,83 @@ ok(
 );
 /*
  * Высота ГЛАВНОЙ панели — целевое поведение после chart height fix:
- * свечи получают не менее 60% площади трёх панелей (3:1:1), RSI/MACD —
- * равные меньшие доли. Прежний литеральный пин setStretchFactor(4)
- * закрыт этим же фиксом по решению владельца; проверляется семантика
- * пропорций, а не конкретная четвёрка.
+ * числа живут в общем хелпере lib/chart/chart-ux.ts (paneStretchFactors),
+ * компонент передаёт их штатному setStretchFactor. Литеральные пины
+ * (4/1.6, затем 3/1/1) сняты осознанно: проверяется источник весов и
+ * семантика комбинаций, а не цифры в JSX-эффекте.
  */
+ok(
+  /const stretch = paneStretchFactors\(true, true\);/.test(chartCode),
+  "chart: стартовые пропорции задаются общим хелпером (mount: RSI+MACD включены)"
+);
 {
-  const stretches = [
-    ...chartCode.matchAll(/setStretchFactor\((\d+(?:\.\d+)?)\)/g)
-  ].map((m) => Number(m[1]));
+  const applyVis = stripComments(
+    extractBetween(
+      CHART_SRC,
+      "const applyVisibility = useCallback(",
+      "const applyVisibilityRef",
+      "applyVisibility CandleChart"
+    )
+  );
 
-  eq(stretches.length, 3, "chart: три stretch-фактора (свечи, RSI, MACD)");
   ok(
-    stretches[0] > stretches[1] && stretches[0] > stretches[2],
-    "chart: основная панель (свечи) имеет наибольшую долю высоты"
+    /const stretch = paneStretchFactors\(showRsi, showMacd\);/.test(applyVis),
+    "chart: applyVisibility пересчитывает веса панелей по ВИДИМОСТИ индикаторов"
   );
   eq(
-    stretches[1],
-    stretches[2],
-    "chart: панели RSI и MACD симметричны между собой"
+    (applyVis.match(/setStretchFactor\(stretch\.(main|rsi|macd)\)/g) ?? []).length,
+    3,
+    "chart: в applyVisibility ровно три штатных setStretchFactor (main/rsi/macd)"
   );
   ok(
-    stretches[0] / (stretches[0] + stretches[1] + stretches[2]) >= 0.6 - 1e-9,
-    `chart: доле свечей ≥ 60% площади (факт ${(
-      (stretches[0] / (stretches[0] + stretches[1] + stretches[2])) *
-      100
-    ).toFixed(1)}%)`
+    chartCode.includes("paneStretchFactors(true, true)") &&
+      applyVis.includes("paneStretchFactors(showRsi, showMacd)"),
+    "chart: оба места (creation + visibility) берут веса из одного хелпера"
+  );
+}
+
+/* ---------- paneStretchFactors: чистые комбинации высот ---------- */
+{
+  const both = paneStretchFactors(true, true);
+  const rsiOnly = paneStretchFactors(true, false);
+  const macdOnly = paneStretchFactors(false, true);
+  const none = paneStretchFactors(false, false);
+
+  eq(
+    MAIN_PANE_STRETCH,
+    3,
+    "stretch: вес главной панели — константа 3 (>0: totalStretch никогда не 0)"
+  );
+  eq(
+    INDICATOR_PANE_STRETCH,
+    1,
+    "stretch: вес видимого индикатора — 1 (панель читаема, но подчинена)"
+  );
+
+  eq(both.rsi, INDICATOR_PANE_STRETCH, "stretch RSI+MACD: видимые индикаторы равноправны");
+  eq(both.macd, INDICATOR_PANE_STRETCH, "stretch RSI+MACD: симметрия RSI/MACD");
+  eq(rsiOnly.macd, 0, "stretch RSI-only: скрытый MACD получает вес 0 (панель сжимается в минимум)");
+  eq(macdOnly.rsi, 0, "stretch MACD-only: скрытый RSI получает вес 0");
+  eq(none.rsi, 0, "stretch без индикаторов: RSI вес 0");
+  eq(none.macd, 0, "stretch без индикаторов: MACD вес 0");
+
+  eq(mainPaneSharePct(both), 60, "share: 3:1:1 → главная панель 60%");
+  eq(mainPaneSharePct(rsiOnly), 75, "share: 3:1:0 → 75%");
+  eq(mainPaneSharePct(macdOnly), 75, "share: 3:0:1 → 75%");
+  eq(mainPaneSharePct(none), 100, "share: 3:0:0 → 100%");
+  ok(
+    [both, rsiOnly, macdOnly, none].every(
+      (f) =>
+        f.main > f.rsi &&
+        f.main > f.macd &&
+        mainPaneSharePct(f) >= 60 - 1e-9
+    ),
+    "share: главная панель доминирует (≥60%) в ЛЮБОЙ комбинации индикаторов"
+  );
+  ok(
+    mainPaneSharePct({ main: 0, rsi: 0, macd: 0 }) === 0 &&
+      Number.isFinite(mainPaneSharePct({ main: 0, rsi: 0, macd: 0 })),
+    "share: вырожденный набор весов не даёт NaN/Infinity (защита от 0/0)"
   );
 }
 

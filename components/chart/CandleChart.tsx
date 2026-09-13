@@ -49,6 +49,7 @@ import {
   SUSLIK_TIME_SCALE_NAVIGATION,
   createMainPaneAutoscaleProvider,
   legendSpace,
+  paneStretchFactors,
   shiftLogicalRange
 } from "@/lib/chart/chart-ux";
 import {
@@ -1198,6 +1199,32 @@ export default function CandleChart({
   );
 
   const applyVisibility = useCallback(() => {
+    /*
+     * Видимость индикаторов управляет и ВЫСОТОЙ ПАНЕЛЕЙ (штатным
+     * setStretchFactor, см. paneStretchFactors в lib/chart/chart-ux.ts):
+     * свечная панель всегда доминирует (60% при RSI+MACD, 75% при одном
+     * индикаторе, почти вся высота без них); скрытые RSI/MACD сжимаются
+     * библиотекой в минимальную полосу и НЕ отъедают 20%+20%.
+     */
+    const chart = chartRef.current;
+
+    if (chart) {
+      try {
+        const panes = chart.panes();
+
+        if (panes.length >= 3) {
+          const stretch = paneStretchFactors(showRsi, showMacd);
+
+          panes[0].setStretchFactor(stretch.main);
+          panes[1].setStretchFactor(stretch.rsi);
+          panes[2].setStretchFactor(stretch.macd);
+        }
+      } catch {
+        // Панели ещё не готовы (график пересоздаётся) — пропорции
+        // применит эффект создания графика при следующем тике видимости.
+      }
+    }
+
     volumeSeriesRef.current?.applyOptions({
       visible: showVolume
     });
@@ -1475,15 +1502,15 @@ export default function CandleChart({
       const panes = chart.panes();
 
       if (panes.length >= 3) {
-        // Пропорции по высоте: ГЛАВНАЯ панель (свечи) получает 60%
-        // площади трёх панелей (3 : 1 : 1). С прежним 4 : 1.6 : 1.6 при
-        // контейнере 360..560px на свечи оставалось ~311px — главный
-        // контент выглядел сплющенным относительно индикаторов.
-        // Разделители панелей пользователь двигает сам (enableResize),
-        // пересчёт геометрии идёт штатной подпиской sizeChange.
-        panes[0].setStretchFactor(3);
-        panes[1].setStretchFactor(1);
-        panes[2].setStretchFactor(1);
+        // Стартовые пропорции — тем же общим хелпером (на mount
+        // RSI и MACD включены): главная панель получает 60%.
+        // Дальше их переставляет applyVisibility при каждом
+        // включении/выключении индикаторов (paneStretchFactors).
+        const stretch = paneStretchFactors(true, true);
+
+        panes[0].setStretchFactor(stretch.main);
+        panes[1].setStretchFactor(stretch.rsi);
+        panes[2].setStretchFactor(stretch.macd);
       }
     } catch {
       // пропорции панелей не критичны
