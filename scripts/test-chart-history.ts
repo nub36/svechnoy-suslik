@@ -223,8 +223,12 @@ ok(
   resolveSymbolFromList("BTC", [
     { symbol: "ETH" },
     { symbol: "SOL" }
-  ]) === "ETH",
-  "symbol: предпочтительного нет в списке — первый из списка"
+  ]) === null,
+  "symbol: явного актива нет в списке — null (без тихого fallback на первый/BTC)"
+);
+ok(
+  resolveSymbolFromList("PEPE", [{ symbol: "BTC" }]) === null,
+  "symbol: неизвестный /coin/<SYMBOL> не подменяется BTC (правило владельца)"
 );
 ok(
   resolveSymbolFromList("BTC", []) === null,

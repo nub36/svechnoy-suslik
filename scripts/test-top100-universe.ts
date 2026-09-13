@@ -221,6 +221,23 @@ console.log("\n=== 2. Гарды исходников: главная стран
   check(!table.includes("{i + 1}"), "таблица: № строки вместо ранга (i+1) устранён");
 }
 
+{
+  /* Пункт 4 вселенной: навигация ≠ наличие данных, тиxой подмены BTC нет. */
+  const history = read("lib/chart/history.ts");
+
+  check(
+    history.includes("тихая подмена") &&
+      !/return list\[0\]\?\.symbol \?\? null;\n\}/.test(
+        history.replace(/if \(preferred === null[\s\S]*?\n\}/, "")
+      ),
+    "history: resolveSymbolFromList больше не возвращает «первый» для явного символа"
+  );
+
+  const chart = read("components/chart/CandleChart.tsx");
+
+  check(chart.includes("нет в списке"), "chart: неизвестный актив показан в селекторе явно");
+}
+
 console.log("\n=== 3. Защищённые «500» не тронуты ===");
 
 {

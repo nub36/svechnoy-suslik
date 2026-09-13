@@ -2362,6 +2362,15 @@ export default function CandleChart({
               }
             }}
           >
+            {/* Актив из URL может отсутствовать в списке —
+                показываем это честно, а не «тихо» выбираем первый. */}
+            {symbol &&
+            !symbols.some((item) => item.symbol === symbol) ? (
+              <option value={symbol}>
+                {symbol} · нет в списке
+              </option>
+            ) : null}
+
             {symbols.length === 0 ? (
               <option value="">
                 {symbolsFailed

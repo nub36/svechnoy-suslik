@@ -137,22 +137,26 @@ export type ChartStatus =
 
 /**
  * Выбор символа после загрузки списка активов:
- * предпочитаемый (URL/страница) остаётся, если реально
- * есть в списке; иначе первый из списка; пустой список
- * НЕ сбрасывает уже выбранный символ (точка B ревью).
+ * - предпочитаемый (URL/страница) остаётся, только если реально
+ *   есть в списке;
+ * - ЯВНО запрошенного актива нет в списке → null: тихая подмена
+ *   на первый из списка (обычно BTC) запрещена — страница /coin/<X>
+ *   должна честно остаться на X и показать «нет рынков/данных»,
+ *   а не рисовать график другого актива;
+ * - без предпочитаемого (главная) — первый из списка;
+ * - пустой список НЕ сбрасывает уже выбранный символ (точка B ревью).
  */
 export function resolveSymbolFromList(
   preferred: string | null | undefined,
   list: readonly { symbol: string }[]
 ): string | null {
-  if (
-    preferred &&
-    list.some((item) => item.symbol === preferred)
-  ) {
-    return preferred;
+  if (preferred === null || preferred === undefined) {
+    return list[0]?.symbol ?? null;
   }
 
-  return list[0]?.symbol ?? null;
+  return list.some((item) => item.symbol === preferred)
+    ? preferred
+    : null;
 }
 
 /**
