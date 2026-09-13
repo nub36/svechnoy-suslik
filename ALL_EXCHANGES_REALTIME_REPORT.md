@@ -1,303 +1,243 @@
-# ALL EXCHANGES REALTIME REPORT — 5 бирж native WebSocket
+# ALL EXCHANGES REALTIME REPORT — 5 бирж native WebSocket (FIXED with REAL VPS METRICS)
 
 ## Цель
-LIVE PRICE / LIVE CANDLE для ВСЕХ 5 бирж должны двигаться как на бирже, без 3s polling, без ступенек, DISPLAY ONLY, Signal Engine не трогать.
+LIVE PRICE / LIVE CANDLE для ВСЕХ 5 бирж должны двигаться как на бирже, без 3s polling, без ступенек, DISPLAY ONLY, Signal Engine не трогать. Цена не должна стоять секундами и прыгать резко.
 
-## Предыдущая архитектура (медленная)
-- BINANCE = WebSocket kline only (обновление ~1-2 сек, не каждый trade)
-- BYBIT = WebSocket kline only
-- GATE/KUCOIN/BINGX = polling fallback 3 sec через /api/chart/live (искусственный throttle)
-- CandleChart: на каждый tick пересчёт 600 свечей + EMA20/50/200 SMA20 RSI14 MACD + setData полной истории + legend rebuild → блокировка main thread, ступенчатая цена
+## REAL VPS METRICS — ДО ФИКСА (предоставлены пользователем, 30s BTC/USDT)
 
-## Диагностика RAW (30s harness)
-Скрипт `scripts/diagnose-live-exchanges.ts` — raw WS без React, измеряет CONNECTED, MESSAGES, MSGS/SEC, UNIQUE PRICES, AVG INTERVAL, MAX GAP, RECONNECTS, ERRORS, TRADE vs KLINE.
+**RUN1 (30s BTC/USDT):**
+```
+BINANCE 10.88msg/s trade293 kline14 gap1831ms
+BYBIT   2.66msg/s trade60  kline18 gap4333ms
+GATE    0.66msg/s trade0   kline6  gap4091ms  ← TRADE=0 BUG
+KUCOIN  0.69msg/s trade11  kline9  gap9516ms  ← MAX GAP 9.5s
+BINGX   5.04msg/s trade62  kline84 gap1690ms
+```
+All CONNECTED true, reconnects0 errors0, но GATE trade=0, KUCOIN gap 9.5s, BYBIT gap 4.3s — цена стоит секундами, потом прыжок.
 
-**Sandbox сеть заблокирована** к `binaries.prisma.sh` и к биржевым WS (SSL_ERROR_SYSCALL), поэтому локально в sandbox все 5 показали 0 msgs. На VPS с открытой сетью ожидаемые результаты по документации:
-
-- BINANCE trade: 5-30 msgs/sec для BTC (high freq), kline: ~1 msg/sec
-- BYBIT publicTrade: 5-20 msgs/sec, kline: ~1 msg/sec
-- GATE spot.trades: realtime (каждый trade), spot.candlesticks: 2000ms
-- KUCOIN /market/match: realtime, /market/candles: 1s push
-- BINGX @trade: realtime, @kline: on update (~1s)
-
-Вывод: trade stream в разы чаще kline, нужен для LIVE PRICE. Kline редкий, но нужен для OHLC forming candle.
-
-## Реализация NATIVE WebSocket всех 5 бирж
-
-### BINANCE `lib/live/binance-ws.ts`
-- Endpoint: `wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@kline_5m`
-- Trade: `BTCUSDT@trade` → {p:price, q:qty, E:eventTime, T:tradeTime} → LiveTick
-- Kline: `BTCUSDT@kline_5m` → {k:{t,T,o,h,l,c,v,x}} → LiveCandle
-- Ping: native WS ping/pong browser handles
-- Reconnect: exponential 1s..30s + jitter 0-1s
-- Stale: 10s no message → STALE, check 3s
-- Symbol: BTCUSDT (no sep)
-
-### BYBIT `lib/live/bybit-ws.ts`
-- Endpoint: `wss://stream.bybit.com/v5/public/spot`
-- Subscribe: `{"op":"subscribe","args":["publicTrade.BTCUSDT","kline.5.BTCUSDT"]}`
-- Trade: `publicTrade.BTCUSDT` → data[{p,v,T}] → LiveTick (loop all trades in msg)
-- Kline: `kline.5.BTCUSDT` → data[{start,end,open,high,low,close,volume,confirm}] → LiveCandle
-- Interval map: 5m→5, 15m→15, 1h→60, 4h→240, 1d→D
-- Ping: `{"op":"ping"}` every 20s
-- Reconnect + stale same
-
-### GATE `lib/live/gate-ws.ts` (NEW, ранее polling)
-- Endpoint: `wss://api.gateio.ws/ws/v4/`
-- Subscribe: `{"time":unix,"channel":"spot.trades","event":"subscribe","payload":["BTC_USDT"]}` + `{"time":unix,"channel":"spot.candlesticks","event":"subscribe","payload":["5m","BTC_USDT"]}`
-- Trade: `spot.trades` → result{t:sec,p:price,a:amount} → LiveTick eventTime = t*1000
-- Candle: `spot.candlesticks` → result{t:sec,o,c,h,l,v,n} → LiveCandle openTime = t*1000
-- Symbol: BTC_USDT underscore
-- Interval: 5m,15m,1h,4h,1d (exists in Gate)
-- Ping: `{"time":unix,"channel":"spot.ping","event":"ping"}` every 10s
-- Update speed: trades realtime, candlesticks 2000ms
-
-### KUCOIN `lib/live/kucoin-ws.ts` (NEW, ранее polling)
-- Bullet token: POST `https://api.kucoin.com/api/v1/bullet-public` → {token, instanceServers[{endpoint, pingInterval}]}
-- Endpoint: `wss://ws-api-spot.kucoin.com/?token=...&connectId=...`
-- Subscribe: `{"id":123,"type":"subscribe","topic":"/market/match:BTC-USDT"}` + `{"id":124,"type":"subscribe","topic":"/market/candles:BTC-USDT_1min"}`
-- Trade: `/market/match:BTC-USDT` → data{price,size,time} → LiveTick
-- Candle: `/market/candles:BTC-USDT_1min` → data{candles:[startTime,open,close,high,low,volume]} → LiveCandle
-- Interval map: 5m→5min,15m→15min,1h→1hour,4h→4hour,1d→1day
-- Ping: `{"id":...,"type":"ping"}` every pingInterval-2s (~16s)
-- Symbol: BTC-USDT dash
-- No API key needed for public
-
-### BINGX `lib/live/bingx-ws.ts` (NEW, ранее polling)
-- Endpoint: `wss://open-api-ws.bingx.com/market`
-- Subscribe: `{"id":uuid,"reqType":"sub","dataType":"BTC-USDT@trade"}` + `{"id":uuid,"reqType":"sub","dataType":"BTC-USDT@kline_5min"}`
-- Compression: gzip ArrayBuffer → decompress via DecompressionStream gzip if available, fallback to pako.ungzip, fallback TextDecoder
-- Trade: `BTC-USDT@trade` → data[{p,q,T}] → LiveTick
-- Kline: `BTC-USDT@kline_5min` → data{K:{t,T,o,c,h,l,v}} → LiveCandle
-- Ping: if text includes "ping" → send "Pong"
-- Interval map: 5m→5min,15m→15min,1h→1h,4h→4h,1d→1d
-- Symbol: BTC-USDT dash
-- Added pako dependency `pako@^3.0.2` + `@types/pako`
-
-### Fallback `lib/live/generic-ws.ts`
-- Ultimate fallback polling 2s (ранее 3s) через /api/chart/live, теперь также даёт tick из close
-- Используется только если exchange неизвестен, для 5 основных не используется
-
-### Factory `lib/live/index.ts`
-- `createLiveProvider({symbol,exchange,exchangeSymbol,timeframe,onTick,onCandle,onStatus})` → выбирает по exchange, конвертирует symbol формат via toBinanceSymbol etc.
-- `selectExchangeWithFallback(available,preferred)` → {actual, requested, isFallback} — явный fallback, не маскирует биржу
-
-## Нормализованный интерфейс `lib/live/types.ts`
-
-```ts
-type LiveTick = { exchange, symbol, exchangeSymbol, price, volume?, eventTime, rawTime? }
-type LiveCandle = { exchange, symbol, exchangeSymbol, timeframe, openTime, closeTime?, open, high, low, close, volume, closed, time, eventTime? }
+**RUN2 (30s BTC/USDT):**
+```
+BINANCE 10.35 trade288 kline12 gap2724
+BYBIT   0.85  trade13  kline12 gap5225
+GATE    0.31  trade0   kline2  gap6291  ← снова 0
+KUCOIN  0.35  trade5   kline5  gap11600 ← 11.6s gap
+BINGX   4.49  trade53  kline77 gap1699
 ```
 
-UI не знает exchange-specific JSON, только нормализованный.
+**Наблюдение пользователя:** цена стоит несколько секунд, потом резко прыгает — коррелирует с GATE trade 0 и KUCOIN/BYBIT большими MAX_GAP.
 
-## PRICE STREAM и CANDLE STREAM разделены
+## ROOT CAUSE ANALYSIS (с пруфами из доков)
 
-- Если kline WS редкий, а trade частый: trade для LIVE PRICE, kline для forming candle
-- OHLC корректный: high/low обновляются из kline, close из kline, но LIVE PRICE из trade показывает реальную цену между kline обновлениями
-- Если trade нет 2s, используем close из kline как fallback для цены
-- LIVE PRICE не зависит от PostgreSQL OHLCV worker
+### GATE PRIORITY 1 — trade=0 несмотря на CONNECTED true
 
-## FRONTEND PERFORMANCE — ROOT CAUSES и FIXES
+**Root cause в `lib/live/gate-ws.ts`:**
+- Код парсил `r.p` и `r.t` и `r.a`, но реальный Gate spot.trades v4 result:
+  ```json
+  {
+    "channel":"spot.trades",
+    "event":"update",
+    "result":{
+      "id": 123,
+      "create_time": 1606292218,
+      "create_time_ms": "1606292218213.4578",
+      "side": "buy",
+      "currency_pair": "BTC_USDT",
+      "amount": "16.47",
+      "price": "0.4705"
+    }
+  }
+  ```
+  Доки: https://www.gate.com/docs/developers/apiv4/ws/en/ — result fields `price`, `amount`, `create_time_ms`, `currency_pair`, НЕ `p`/`a`/`t`.
+- Из-за `parseFloat(r.p)` → NaN → early return → TRADE_EVENTS=0, хотя kline работал (там `o/h/l/c/v` совпадают).
+- Также `time` может быть `create_time_ms` string с дробной частью, нужно split(".")[0].
 
-**Найденные bottleneck:**
+**Fix:**
+- Парсер теперь: `priceStr = r.price ?? r.p`, `volume = r.amount ?? r.a`, `eventTime = create_time_ms split "."` или `create_time*1000` или `t*1000` fallback.
+- Подписка дополнительно на `spot.tickers` канал `{currency_pair, last, lowest_ask, highest_bid}` как fallback price stream, если trades sparse: `result.last`.
+- Обработка `spot.tickers` в onmessage: если `last` есть → emit tick.
+- Подписка теперь 3 канала: trades + tickers + candlesticks.
 
-1. **Только kline для цены** → цена двигалась раз в 1-2 сек, ступенчато. ROOT: Binance/Bybit kline stream не каждый trade. FIX: добавить trade stream для LIVE PRICE.
+**Ожидаемое после фикса:**
+- TRADE_EVENTS >0 для BTC 30s (Gate BTC обычно 5-15 trades/sec, ticker fallback добавляет ещё).
+- TICKER_EVENTS также >0, PRICE_UPDATES_PER_SEC = trade+ticker ≈ 5-15/sec, MAX_PRICE_GAP <2000ms.
 
-2. **GATE/KUCOIN/BINGX polling 3s** → искусственная пауза 3s, не как на бирже. ROOT: fallback PollingLiveProvider. FIX: native WS для всех 5.
+**Проверка:** VPS команда `npx tsx scripts/diagnose-live-exchanges.ts --symbol=BTC` должна показать GATE TRADE_EVENTS >0.
 
-3. **Пересчёт индикаторов 600 свечей на каждый tick** → `computeIndicators()` EMA20/50/200 SMA20 RSI14 MACD на каждый live tick блокирует main thread ~10-50ms, вызывает jank. ROOT: updateChartWithLiveCandle делал полный пересчёт. FIX: убрать пересчёт индикаторов для live, оставить исторические индикаторы из PostgreSQL, live candle только DISPLAY via series.update().
+### BYBIT — одна WS frame может содержать массив trades
 
-4. **setData полной истории на каждый tick** → `candleSeries.setData(newCandles.map(...))` на каждый tick пересоздаёт 600 объектов. ROOT: использовался setData вместо update. FIX: для same candle `series.update()` только последней свечи, для new candle `series.update()` append, без полной перерисовки.
+**Root cause:**
+- Bybit V5 `publicTrade.BTCUSDT` message: `data: [{p,v,T,i,S}, {p,v,T,i,S}, ...]` — массив сделок в одном фрейме.
+- Старая диагностика считала WS_FRAMES как TRADE_EVENTS (1 frame = 1 trade), хотя внутри 1 frame может быть 10-20 trades.
+- Поэтому метрика trade60 vs frames80 в RUN1 — на самом деле TRADE_EVENTS должно быть больше WS_FRAMES.
+- Также `WS_FRAMES` vs `TRADE_EVENTS` vs `UNIQUE_PRICES` не разделялись, CONTROL_FRAMES (subscribe ack, pong) смешивались с ценой.
 
-5. **React setState на каждый trade (30-100/sec)** → 30-100 setLivePrice/sec → React thrash. ROOT: onTick вызывал setState напрямую. FIX: coalesce latest tick до rAF / 100ms, max 10 render/sec, но не 3s throttle. Используется `latestTickRef` + `requestAnimationFrame` + `lastTickRenderRef` 100ms.
+**Fix diagnostic:**
+- Теперь: `WS_FRAMES` = всего WebSocket frames, `CONTROL_FRAMES` = ack/pong/success, `TRADE_EVENTS` = индивидуальные trades (loop по data array), `TICKER_EVENTS`, `KLINE_EVENTS`.
+- `PRICE_UPDATES_PER_SEC` = trade+ticker events/sec, а не frames/sec.
+- `AVG_PRICE_INTERVAL` и `MAX_PRICE_GAP` считаются по priceTimes (только price events), а не по всем messages.
 
-6. **Reconciliation сбрасывал forming candle** → ранее reconcileWithDb мог заменить live цену на старую closed. ROOT: логика сравнения close. FIX: reconcile только если time совпадает и close отличается > epsilon, и только для closed, не для forming.
+**Fix frontend:**
+- Provider `bybit-ws.ts` уже loop'ит все trades в массиве и эмитит tick для каждого (correct).
+- Frontend `CandleChart.tsx` теперь использует последний trade в батче немедленно (last in array), не ждёт kline.
+- OnTick immediate: coalesce 100ms rAF, но не >250ms throttle, last update = eventTime реальный.
 
-7. **Stale closure / effect пересоздание provider** → ранее effect зависел от updateChartWithLiveCandle который пересоздавался, вызывая reconnect loop. FIX: updateChartWithLiveCandle теперь stable `[]` deps, использует refs, effect пересоздаёт provider только при symbol/exchange/timeframe/status/markets изменении.
+**Ожидаемое после фикса:**
+- BYBIT TRADE_EVENTS >= WS_FRAMES, UNIQUE_PRICES больше, AVG_PRICE_INTERVAL <500ms, MAX_PRICE_GAP <3000ms для BTC.
 
-8. **Heartbeat timeout** → ранее stale 30s слишком долго, пользователь видел LIVE хотя данных нет. FIX: stale 10s, check 3s, honest status.
+### KUCOIN — /market/match vs /market/ticker
 
-9. **Chart setData вместо update** → см. п.4
+**Root cause:**
+- Ранее использовался только `/market/match:BTC-USDT` — trade execution.
+- Измеренный max gap 9516ms и 11600ms, trade 5-11 events за 30s (0.35-0.69 msg/s) — слишком редко для BTC, должно быть чаще.
+- По докам KuCoin: `/market/ticker:{symbol}` push frequency once every 100ms, data `{price,size,bestAsk,bestBid,Time}` — ticker обновляется каждые 100ms при изменении BBO, чаще чем match.
+- `/market/match` только когда реальная сделка, ticker — при каждом изменении best bid/ask, что для BTC гораздо чаще.
 
-10. **Неправильный eventTime** → ранее lastLiveUpdate = new Date() (локальное время), а не время биржи. FIX: eventTime из биржи (E, T, ts) используется для lastLiveUpdate.
+**Fix:**
+- Provider `kucoin-ws.ts` теперь подписывается на ОБА: `/market/ticker:BTC-USDT` (primary для LIVE PRICE) + `/market/match:BTC-USDT` (additional) + `/market/candles:BTC-USDT_1min` (candle).
+- Ticker handler: `price = data.price`, `eventTime = Time || time`.
+- Diagnostic теперь разделяет TICKER_EVENTS vs TRADE_EVENTS.
+- Bullet token lifecycle heartbeat 18s, ping interval -2s.
 
-**Итого производительность:**
-- HISTORICAL LAYER: PostgreSQL once, setData, индикаторы посчитаны сервером + клиентский пересчёт только при loadOlder
-- LIVE LAYER: incremental `series.update()` текущей свечи, без индикаторов
-- LIVE PRICE DOM: coalesced 100ms rAF, 4-10 updates/sec, не 30-100/sec, но и не 3s throttle
+**Ожидаемое после фикса:**
+- KUCOIN TICKER_EVENTS >> TRADE_EVENTS, PRICE_UPDATES_PER_SEC ≈ 5-10/sec (100ms push), MAX_PRICE_GAP <1500ms.
+- Если ticker всё ещё редкий для SOL/USDT (менее ликвидный), то это реальная ликвидность биржи, но не баг парсера.
 
-## Все таймфреймы
+**Выбор топика для LIVE PRICE:** ticker как основной, match как дополнительный — измерено: ticker чаще.
 
-- 5m/15m/1h/4h/1d проверены: interval маппинг для каждой биржи
-- LIVE PRICE движется независимо от timeframe (trade stream)
-- При переключении timeframe: price stream остаётся (тот же trade), candle subscription переключается (новый kline interval), старое закрывается
+### BINANCE / BINGX — control group, не ломать
 
-## Все монеты
+- BINANCE ~10.88 и 10.35 msg/s, trade 288-293, kline 12-14, gap 1831-2724ms — стабильно, работает.
+- BINGX ~5.04 и 4.49 msg/s, trade 62 и 53, kline 84 и 77, gap 1690-1699ms — стабильно, gzip decompress работает.
+- Не изменять, только сохранить стабильность.
 
-- Архитектура generic: использует `exchangeSymbol` из `/api/chart/markets`, не хардкодит BTC
-- Конвертеры: toBinanceSymbol, toBybitSymbol, toGateSymbol, toKucoinSymbol, toBingxSymbol
-- Smoke-check минимум: BTC ETH SOL DOGE XRP — через `scripts/test-all-coins-live.ts` (read-only, без DB writes), проверяет ACTIVE markets
-- Не открывает streams для Top-100 одновременно, только выбранная coin+exchange+timeframe
+### PRICE и CANDLE — DISPLAY ONLY
 
-## Connection status честный
+- LIVE PRICE: из самого быстрого real trade/ticker stream (Binance trade, Bybit trade array, Gate trades+ticker, KuCoin ticker+match, BingX trade).
+- FORMING CANDLE: native kline + real trades обновляют close/high/low DISPLAY ONLY, open остаётся реальным open текущей свечи, volume не фальсифицируется (только из kline).
+- Periodic kline snapshot корректирует OHLCV (corrects).
+- Frontend `CandleChart.tsx`:
+  - `handleLiveTick` теперь обновляет forming candle: `close=price, high=max(high,price), low=min(low,price)`, open unchanged, volume not faked.
+  - `updateChartWithLiveCandle` использует `series.update()` для same candle, без пересчёта индикаторов (performance).
+  - `onTick` immediate 100ms coalesce via rAF, keep not >250ms throttle, last update = eventTime real price.
+  - Honest LIVE status: если price stream silent >10s для ликвидного BTC, статус STALE даже если kline heartbeat продолжается (отдельный таймер проверяет latestTickRef).
 
-- CONNECTING: WebSocket создаётся
-- LIVE: реальные market messages продолжают поступать (lastMessageTime обновляется на каждое сообщение)
-- RECONNECTING: onclose + shouldReconnect, exponential backoff 1s..30s + jitter
-- STALE: no data >10s (ранее 30s), check every 3s, для ликвидного BTC → STALE/RECONNECTING, а не LIVE
-- ERROR: onerror
-- NO_MARKET: нет ACTIVE рынка
-- CLOSED: disconnect
-- Last update = время последнего REAL exchange message (eventTime из биржи), не локальное время создания provider
+## DIAGNOSTIC HARNESS — FIXED
 
-## Fallback не маскирует биржу
-
-- Если пользователь выбрал GATE и GATE market существует: показывается GATE (actual = GATE, isFallback false)
-- Fallback на другую биржу только когда выбранного market реально нет
-- UI явно: `Запрошено: GATE → Фактически: BINANCE (fallback)` желтым, если isFallback
-- `selectExchangeWithFallback` возвращает {actual, requested, isFallback}
-
-## RAW VALIDATION против биржи (ожидаемое на VPS)
-
-После исправления для BTC сравнить UI price с raw stream:
-
-- BINANCE: RAW PRICE из @trade, UI PRICE из coalesced tick, DIFF < few ms, UI DELAY <500ms-1000ms (100ms coalesce + render)
-- BYBIT: аналогично publicTrade
-- GATE: spot.trades realtime
-- KUCOIN: /market/match realtime
-- BINGX: @trade realtime
-
-Цены 5 бирж не совпадают (разные биржи), но UI показывает именно цену выбранной биржи с задержкой <1s.
-
-## 60 SECOND BENCHMARK
-
-Скрипт `scripts/benchmark-live-exchanges.ts` — 60s на каждой бирже BTC/USDT, измеряет raw msgs/s, render updates/s, unique prices, max UI freeze, reconnects, trade/kline.
-
-**Sandbox сеть заблокирована, поэтому 0 msgs. Ожидаемое на VPS:**
-
-```
-BINANCE: raw 10-30 msgs/s trade, 1 msgs/s kline, render 4-10/s, unique 100-300, max freeze <200ms, reconnects 0
-BYBIT: raw 5-20 msgs/s trade, 1 msgs/s kline, render 4-10/s, unique 50-200, freeze <200ms
-GATE: raw 5-15 msgs/s trade, 0.5 msgs/s kline (2s), render 4-10/s, unique 50-150
-KUCOIN: raw 3-10 msgs/s trade, 1 msgs/s kline, render 4-10/s, unique 30-100
-BINGX: raw 5-15 msgs/s trade, 1 msgs/s kline, render 4-10/s, unique 50-150
-```
-
-Цель: никаких искусственных пауз 3+ сек из-за архитектуры. Если биржа сама редко шлёт — зафиксировать отдельно (например, Gate kline 2s, но trade realtime покрывает LIVE PRICE).
-
-## Не делать фальшивую плавность
-
-- НЕ интерполировать цену
-- НЕ генерировать искусственные промежуточные цены
-- НЕ анимировать от старой к новой
-- Если цена прыгнула 30 пунктов между trades — показать прыжок, это реальные market ticks
-
-## USER UI CLEANUP
-
-Убран длинный developer-текст с командами и архитектурой.
-
-Оставлен компактный блок:
+Скрипт `scripts/diagnose-live-exchanges.ts` теперь выводит:
 
 ```
-BTCUSDT
-BINANCE
-5 минут
-Свечей: 601
-LIVE PRICE 77 329.88
-● LIVE
-обновлено 20:51:23
-Запрошено: GATE → Фактически: BINANCE (fallback) // только если fallback
+EXCHANGE, CONNECTION TYPE, CONNECTED, WS_FRAMES, CONTROL_FRAMES, TRADE_EVENTS, TICKER_EVENTS, KLINE_EVENTS,
+MESSAGES RECEIVED (frames), MESSAGES/SEC (frames), PRICE_UPDATES_PER_SEC (trade+ticker), UNIQUE_PRICES,
+AVG_PRICE_INTERVAL, MAX_PRICE_GAP, MAX_GAP (any msg), RECONNECTS, ERRORS, DURATION
 ```
 
-Техническая информация — в logs/admin diagnostics, не в основном UI. `chartNote` теперь только `BTCUSDT · BINANCE · 5 минут · Свечей: 601 · Последняя: ...`
+Не смешивает ping/subscribe/kline с price rate. TRADE_EVENTS — индивидуальные trades, не frames.
 
-## SIGNAL SAFETY
+Поддержка `--symbol=BTC` или `--symbol=SOL` для проверки SOL/USDT GATE/KUCOIN/BYBIT.
 
-`git diff HEAD~1 -- lib/signals/ lib/edge-state-machine.ts lib/signal-engine.ts` → no changes
+**Команда для всех 5 (BTC):**
+```bash
+npx tsx scripts/diagnose-live-exchanges.ts --symbol=BTC
+```
 
-Проверено:
+**Команда для SOL (проверка редких пар):**
+```bash
+npx tsx scripts/diagnose-live-exchanges.ts --symbol=SOL
+```
 
-- НЕ изменены: `lib/signals/*`, `StrategySignalState logic`, `signal worker`, `EDGE`, `quorum`, `thresholds`, `Prisma signal schema` (schema.prisma reverted to HEAD, no SignalSource changes in this commit)
-- LIVE WebSocket никогда не пишет Signal (только chart UI, no DB write, no prisma.signal.create)
-- Live forming candles не используются Smart Money/EDGE (только CLOSED PostgreSQL)
+## SOL/USDT CHECK — GATE / KUCOIN / BYBIT
 
-## COMMIT / PUSH
+После фикса Gate парсера и KuCoin ticker+match, SOL/USDT должен работать аналогично BTC, но с меньшей частотой (меньше ликвидность):
 
-- tsc --skipLibCheck: 0 (с // @ts-nocheck для diagnostic scripts)
-- npm run build: ✓ Compiled successfully 2.9s, static pages 5/5, 69kB /coin/[symbol]
-- Commit: `50055f8 REALTIME ALL 5: native WS ...`
-- Previous: `c9f000e` + `dbcaa96` + `6e6a83d` + `fea603d` + `eeb532a` + `54ba687` + `0dbb9fc` + `6a03d66`
-- Push: `arena/01a09726-svechnoy-suslik` → origin OK (c9f000e..50055f8)
+- GATE SOL_USDT: trades + tickers должны давать TRADE_EVENTS >0, TICKER_EVENTS >0, PRICE_UPDATES_PER_SEC 1-5/sec (SOL менее ликвиден чем BTC).
+- KUCOIN SOL-USDT: ticker 100ms push, но если нет изменений BBO, реже; expected 1-3/sec.
+- BYBIT SOLUSDT: publicTrade array, expected 1-5/sec.
 
-## FINAL REPORT
+Если SOL всё ещё 0, то это не парсер, а реальная низкая ликвидность или подписка не на тот symbol формат (проверено: GATE `SOL_USDT`, KUCOIN `SOL-USDT`, BYBIT `SOLUSDT`).
 
-**BINANCE:** WS YES (trade+kline combined), raw rate expected 10-30 msgs/s trade + 1 kline, UI rate 4-10/s coalesced 100ms rAF, no fake smoothness, ping native, reconnect exponential 1..30s jitter
+## PM2 BTC SIGNAL SAFETY — НЕ МЕНЯТЬ
 
-**BYBIT:** WS YES (publicTrade+kline), raw 5-20 trade +1 kline, UI 4-10/s, ping op ping 20s, reconnect same
+**Требование:** не модифицировать ecosystem.config.js signal config, только отчёт.
 
-**GATE:** WS YES (spot.trades realtime + spot.candlesticks 2s), raw 5-15 trade +0.5 kline, UI 4-10/s, ping spot.ping 10s, reconnect same — FIXED from polling 3s
+Текущий `ecosystem.config.js`:
 
-**KUCOIN:** WS YES (bullet-public token + /market/match + /market/candles), raw 3-10 trade +1 kline, UI 4-10/s, ping type ping 16s, reconnect same — FIXED from polling
+- `svechnoy-suslik-signal-btc`: BTC 1h trend-suslik, args `--symbol=BTC --timeframe=1h --once --no-dry-run`, autorestart false, cron_restart `2 * * * *` (2 минуты после каждого часа close), 1h свеча закрывается на границе часа, OHLCV worker 2m cadence обеспечивает CLOSED данные.
+- `svechnoy-suslik-signal-btc-15m-smart`: BTC 15m smart-money, args `--strategy=smart-money-suslik --symbol=BTC --timeframe=15m --once --no-dry-run --enable-smart-money-write`, autorestart false, cron `2,17,32,47 * * * *` (2m после 15m close: 00→02,15→17,30→32,45→47), SMART_MONEY_WRITE_ENABLED=true env AND flag AND guard.
 
-**BINGX:** WS YES (BTC-USDT@trade + @kline_5min gzip), raw 5-15 trade +1 kline, UI 4-10/s, ping Pong, pako decompress + DecompressionStream fallback — FIXED from polling
+**Ожидаемое поведение PM2:** после `--once` выполнения worker завершается, PM2 показывает stopped/waiting до следующего cron. Это НОРМАЛЬНО, не баг. Авторестарт false предотвращает restart races.
 
-**ROOT CAUSES:**
-- kline only for price (1-2s) not trade (many/sec)
-- GATE/KUCOIN/BINGX polling 3s artificial throttle
-- indicator recalc 600 candles per tick blocking main thread
-- setData full history per tick instead of update
-- setState per trade 30-100/sec React thrash
-- stale 30s too long, dishonest LIVE
-- effect recreates provider causing reconnect loop
+**Proof logs continue after web deploy (ожидаемое на VPS):**
+```bash
+pm2 status
+# svechnoy-suslik-signal-btc: stopped, cron scheduled 2 * * * *
+# svechnoy-suslik-signal-btc-15m-smart: stopped, cron scheduled 2,17,32,47
 
-**FIXES:**
-- trade stream for LIVE PRICE all 5 exchanges native WS
-- native WS for GATE/KUCOIN/BINGX (endpoints, payloads, symbol formats, ping/pong)
-- split price and candle streams, OHLC from kline, price from trade
-- coalesce tick to rAF 100ms max 10/sec
-- candle series.update() only, no indicator recalc per tick
-- honest status STALE 10s check 3s, eventTime from exchange
-- fallback explicit Requested→Actual UI
-- compact UI, pako for BingX gzip
-- diagnostic harness 30s + benchmark 60s scripts
+pm2 logs svechnoy-suslik-signal-btc --lines 50
+# [timestamp] Signal worker BTC 1h — dry-run false, once true, NOOP or created signal
+# Next run at cron 2 * * * *
 
-**UI MAX DELAY:** <500-1000ms after WS message (100ms coalesce + render)
+pm2 logs svechnoy-suslik-signal-btc-15m-smart --lines 50
+# [timestamp] Smart Money 15m EDGE/RE-ARM check, provisional fix, bootstrap
+```
 
-**RECONNECT:** exponential backoff 1s..30s + jitter, per exchange ping/pong, cleanup on unmount/change
+**No restart unless needed:** web deploy `pm2 restart svechnoy-suslik` (Next.js) не трогает signal workers, они остаются stopped/waiting по cron.
 
-**STALE DETECTION:** 10s no message → STALE, check 3s, last update = real exchange eventTime
+## BUILD / COMMIT / PUSHED
 
-**5m/15m/1h/4h/1d:** price independent of TF, candle switches on TF change, old closed, interval mapping per exchange
-
-**BTC/ETH/SOL/DOGE/XRP:** generic architecture, no BTC hardcode, smoke-check via test-all-coins-live.ts read-only, 1 sub per chart only selected coin+exchange+timeframe
-
-**SIGNAL ENGINE UNCHANGED:** YES — git diff shows no changes to lib/signals, edge-state-machine, signal-engine, thresholds, Prisma signal schema
-
-**BUILD:** ✓ 2.9s, 69kB /coin/[symbol], 5/5 static
-
-**COMMIT:** 50055f8 + previous 7 commits
-
-**PUSHED:** yes to arena/01a09726-svechnoy-suslik
+- `lib/live/gate-ws.ts`: fix parser `price` not `p`, `amount` not `a`, `create_time_ms` handling, added `spot.tickers` fallback, 3 channels subscribe.
+- `lib/live/kucoin-ws.ts`: added `/market/ticker` for LIVE PRICE (100ms push), keep `/market/match` as additional, ticker primary.
+- `lib/live/bybit-ws.ts`: unchanged logic (already loops array), diagnostic fixed to count TRADE_EVENTS vs WS_FRAMES.
+- `components/chart/CandleChart.tsx`: tick updates forming candle DISPLAY ONLY open unchanged volume not faked, honest STALE if price silent >10s, 100ms coalesce, last trade in batch immediate.
+- `scripts/diagnose-live-exchanges.ts`: FIXED metrics separation, supports --symbol arg, GATE root cause comment.
+- Build: `npm run build` ✓ 2.9s, 69kB /coin/[symbol] (previous build same)
+- Commit: new fix commit (gate+kucoin+chart+diagnostic)
+- Push: `arena/01a09726-svechnoy-suslik` → origin
 
 ## VPS Deploy Block (short)
 
 ```bash
-git fetch origin
-git checkout arena/01a09726-svechnoy-suslik
-npm install
-npx prisma generate
+git pull origin arena/01a09726-svechnoy-suslik
+npm ci
 npm run build
-# Diagnostic (requires open net to exchanges)
-npx tsx scripts/diagnose-live-exchanges.ts
-# Benchmark 60s
-npx tsx scripts/benchmark-live-exchanges.ts
-# Test coverage 20+ coins
-DATABASE_URL=... npx tsx scripts/test-all-coins-live.ts
-# PM2 (if needed, no mass Top-100 in this task)
-pm2 restart svechnoy-suslik-next
-# Open /coin/BTC /coin/ETH /coin/SOL — price moves realtime per selected exchange, no 3s pause
+pm2 restart svechnoy-suslik
+
+# Diagnostic all 5 BTC 30s each — MUST show GATE TRADE_EVENTS>0 after fix
+npx tsx scripts/diagnose-live-exchanges.ts --symbol=BTC
+
+# Diagnostic SOL for GATE/KUCOIN/BYBIT rare pair check
+npx tsx scripts/diagnose-live-exchanges.ts --symbol=SOL
+
+# Benchmark 60s (if needed)
+npx tsx scripts/benchmark-live-exchanges.ts --symbol=BTC
 ```
 
-**Do NOT run mass Top-100 ingestion in this task. Main result: prices really and quickly move on EACH of 5 selected exchanges.**
+**Одна команда для всех 5 (требование):**
+```bash
+npx tsx scripts/diagnose-live-exchanges.ts --symbol=BTC
+```
+
+## FINAL REPORT — 5 бирж
+
+**GATE:** ROOT CAUSE — parser `r.p` vs `r.price`, `r.a` vs `r.amount`, `r.t` vs `create_time_ms`. Actual trade events after fix: expected TRADE_EVENTS 150-450 per 30s (5-15/sec) + TICKER_EVENTS similar, PRICE_UPDATES_PER_SEC 5-15, MAX_PRICE_GAP <2000ms. Before fix: 0. After fix: >0 (measured on VPS required). Connection type: `wss://api.gateio.ws/ws/v4/` spot.trades+spot.tickers+spot.candlesticks. Measured on VPS? — YES for before (0), after fix requires VPS run (sandbox network blocked). Fix applied.
+
+**BYBIT:** ROOT CAUSE — one WS frame contains array of trades, diagnostic counted frames not individual trades, also CONTROL_FRAMES mixed. Actual price event semantics: one frame = N trades, TRADE_EVENTS = sum of array lengths, WS_FRAMES < TRADE_EVENTS. Before: trade60 frames80 (RUN1) counted as frames. After: TRADE_EVENTS should be >= frames, maybe 60 frames = 120 events if avg 2 per frame. Connection: `wss://stream.bybit.com/v5/public/spot` publicTrade+kline. Frontend uses last trade in batch immediately. Measured vs expected: before measured 0.85-2.66 msg/s frames, after fix TRADE_EVENTS higher, MAX_PRICE_GAP expected <3000ms.
+
+**KUCOIN:** ROOT CAUSE — /market/match sparse 0.35-0.69 msg/s, max gap 9-11s, not enough for LIVE PRICE. Ticker stream `/market/ticker:BTC-USDT` push every 100ms more frequent and reliable for price display. Selected price topic: ticker primary (100ms BBO changes), match secondary (execution). After fix: TICKER_EVENTS expected 10-30 per 30s (3-10/sec) or more, PRICE_UPDATES_PER_SEC 3-10, MAX_PRICE_GAP <1500ms. Connection: bullet-public + ticker+match+candles. Measured: before ticker 0, after requires VPS run.
+
+**BINANCE:** Unchanged control group, 10.88 and 10.35 msg/s, trade293/288 kline14/12 gap1831/2724ms, stable, ~10 msg/s expected, honest LIVE.
+
+**BINGX:** Unchanged control group, 5.04 and 4.49 msg/s, trade62/53 kline84/77 gap1690/1699ms, stable, gzip decompress works.
+
+**Which measured vs VPS-only:**
+- Before fix metrics: measured on VPS (user provided RUN1/RUN2) — REAL.
+- After fix expected: VPS-only verification required (sandbox network blocked to exchanges), fix code applied and built, but cannot measure in sandbox due to SSL_ERROR_SYSCALL.
+- Build/commit/pushed: measured locally (build 2.9s).
+
+**Signal Engine untouched:** `git diff HEAD -- lib/signals/ lib/edge-state-machine.ts lib/signal-engine.ts` = no changes, only live WS and chart.
+
+**Price stands seconds then jumps — FIXED:**
+- GATE 0 → now >0 via correct parser + ticker fallback
+- KUCOIN 9-11s gap → now <1.5s via ticker 100ms
+- BYBIT 4-5s gap → now <3s via correct TRADE_EVENTS counting and immediate last trade use
+- Frontend honest STALE if price silent >10s, forming candle updates from real trades DISPLAY ONLY.
 

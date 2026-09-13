@@ -63,12 +63,21 @@ export class GateLiveProvider {
       const now = Math.floor(Date.now() / 1000);
       const interval = timeframeToGateInterval(this.opts.timeframe);
 
-      // Subscribe to trades (realtime) and candlesticks (2s)
+      // Subscribe to trades (realtime), tickers (price), and candlesticks (2s)
+      // Trade stream is primary for LIVE PRICE, tickers as fallback if trades sparse
       try {
         this.ws!.send(
           JSON.stringify({
             time: now,
             channel: "spot.trades",
+            event: "subscribe",
+            payload: [this.opts.exchangeSymbol],
+          })
+        );
+        this.ws!.send(
+          JSON.stringify({
+            time: now,
+            channel: "spot.tickers",
             event: "subscribe",
             payload: [this.opts.exchangeSymbol],
           })
@@ -93,21 +102,53 @@ export class GateLiveProvider {
         const msg = JSON.parse(event.data);
         this.lastMessageTime = Date.now();
 
-        // Trades: {time, channel:"spot.trades", event:"update", result:{t:sec, p:price, a:amount, ...}}
+        // Trades: {time, channel:"spot.trades", event:"update", result:{id, create_time, create_time_ms, side, currency_pair, amount, price}}
+        // Docs example: result.price not result.p
         if (msg.channel === "spot.trades" && msg.result) {
           const r = msg.result;
-          const price = parseFloat(r.p);
+          // Gate trade result uses price field, not p, and amount not a
+          const priceStr = r.price ?? r.p;
+          const price = parseFloat(priceStr);
           if (!Number.isFinite(price)) return;
-          const eventTime = r.t ? Number(r.t) * 1000 : Date.now();
+          // create_time_ms like "1606292218213.4578" — parse int part
+          let eventTime: number;
+          if (r.create_time_ms) {
+            const msPart = String(r.create_time_ms).split(".")[0];
+            eventTime = Number(msPart);
+            if (!Number.isFinite(eventTime)) eventTime = Date.now();
+          } else if (r.create_time) {
+            eventTime = Number(r.create_time) * 1000;
+          } else if (r.t) {
+            eventTime = Number(r.t) * 1000;
+          } else {
+            eventTime = Date.now();
+          }
           if (this.opts.onTick) {
             const tick: LiveTick = {
               exchange: "GATE",
               symbol: this.opts.symbol,
               exchangeSymbol: this.opts.exchangeSymbol,
               price,
-              volume: parseFloat(r.a) || undefined,
+              volume: parseFloat(r.amount ?? r.a) || undefined,
               eventTime,
               rawTime: eventTime,
+            };
+            this.opts.onTick(tick);
+          }
+          this.opts.onStatus("LIVE");
+        }
+        // Tickers: {channel:"spot.tickers", result:{currency_pair, last, ...}} — fallback price if trades sparse
+        else if (msg.channel === "spot.tickers" && msg.result) {
+          const r = msg.result;
+          const price = parseFloat(r.last ?? r.price);
+          if (!Number.isFinite(price)) return;
+          if (this.opts.onTick) {
+            const tick: LiveTick = {
+              exchange: "GATE",
+              symbol: this.opts.symbol,
+              exchangeSymbol: this.opts.exchangeSymbol,
+              price,
+              eventTime: Date.now(),
             };
             this.opts.onTick(tick);
           }

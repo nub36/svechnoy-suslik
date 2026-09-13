@@ -110,6 +110,10 @@ export class KucoinLiveProvider {
       this.lastMessageTime = Date.now();
 
       const interval = timeframeToKucoinInterval(this.opts.timeframe);
+      // For LIVE PRICE: ticker pushes every 100ms (price, best bid/ask) — more frequent than match
+      // For trades: match gives execution, but ticker is better for price display
+      // Use both: ticker for price, match as additional, candles for OHLC
+      const tickerTopic = `/market/ticker:${this.opts.exchangeSymbol}`;
       const matchTopic = `/market/match:${this.opts.exchangeSymbol}`;
       const candleTopic = `/market/candles:${this.opts.exchangeSymbol}_${interval}`;
 
@@ -119,7 +123,7 @@ export class KucoinLiveProvider {
           JSON.stringify({
             id: idBase,
             type: "subscribe",
-            topic: matchTopic,
+            topic: tickerTopic,
             privateChannel: false,
             response: true,
           })
@@ -127,6 +131,15 @@ export class KucoinLiveProvider {
         this.ws!.send(
           JSON.stringify({
             id: idBase + 1,
+            type: "subscribe",
+            topic: matchTopic,
+            privateChannel: false,
+            response: true,
+          })
+        );
+        this.ws!.send(
+          JSON.stringify({
+            id: idBase + 2,
             type: "subscribe",
             topic: candleTopic,
             privateChannel: false,
@@ -151,13 +164,30 @@ export class KucoinLiveProvider {
 
         if (msg.type === "message") {
           const topic: string = msg.topic || "";
-          const subject: string = msg.subject || "";
           const data = msg.data;
 
           if (!data) return;
 
+          // Ticker: /market/ticker:BTC-USDT, data {price, size, bestAsk, bestBid, Time} — push every 100ms, best for LIVE PRICE
+          if (topic.startsWith("/market/ticker:")) {
+            const price = parseFloat(data.price);
+            if (!Number.isFinite(price)) return;
+            if (this.opts.onTick) {
+              const tick: LiveTick = {
+                exchange: "KUCOIN",
+                symbol: this.opts.symbol,
+                exchangeSymbol: this.opts.exchangeSymbol,
+                price,
+                volume: parseFloat(data.size) || undefined,
+                eventTime: Number(data.Time || data.time) || Date.now(),
+                rawTime: Number(data.Time || data.time),
+              };
+              this.opts.onTick(tick);
+            }
+            this.opts.onStatus("LIVE");
+          }
           // Match (trade): topic /market/match:BTC-USDT, data {symbol, price, size, time}
-          if (topic.startsWith("/market/match:")) {
+          else if (topic.startsWith("/market/match:")) {
             const price = parseFloat(data.price);
             if (!Number.isFinite(price)) return;
             if (this.opts.onTick) {

@@ -2018,9 +2018,30 @@ export default function CandleChart({
   }, [symbol, exchange, timeframe, status, updateChartWithLiveCandle]);
 
   // Tick handler with coalescing to avoid React thrash on 30-100 trades/sec
+  // Also updates forming candle DISPLAY ONLY: close=price, high=max(high,price), low=min(low,price), open stays real
   const handleLiveTick = useCallback((price: number, eventTime: number) => {
     latestTickRef.current = { price, eventTime };
     tickCountRef.current++;
+
+    // Update forming candle from real trade/ticker price — DISPLAY ONLY
+    // Open stays real open of current candle, volume not falsified (only from kline)
+    try {
+      const existing = rawCandlesRef.current;
+      if (existing.length > 0) {
+        const last = existing[existing.length - 1];
+        const newHigh = Math.max(last.high, price);
+        const newLow = Math.min(last.low, price);
+        if (newHigh !== last.high || newLow !== last.low || last.close !== price) {
+          updateChartWithLiveCandle({
+            time: last.time,
+            open: last.open,
+            high: newHigh,
+            low: newLow,
+            close: price,
+          });
+        }
+      }
+    } catch {}
 
     const now = Date.now();
     // Coalesce to max ~10/sec (100ms) but allow immediate first
@@ -2044,7 +2065,21 @@ export default function CandleChart({
     setLivePrice(price);
     setLastLiveUpdate(new Date(eventTime));
     lastTickRenderRef.current = now;
-  }, []);
+  }, [updateChartWithLiveCandle]);
+
+  // Honest LIVE status: if price stream silent >10s for liquid BTC, show STALE even if kline heartbeat continues
+  // Price stream is primary for LIVE PRICE, kline alone not enough for fresh price
+  useEffect(() => {
+    if (liveStatus !== "LIVE") return;
+    const timer = setInterval(() => {
+      const latest = latestTickRef.current;
+      if (!latest) return;
+      if (Date.now() - latest.eventTime > 10000) {
+        setLiveStatus("STALE");
+      }
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [liveStatus]);
 
   // Start live WebSocket when chart ok, close old on change/unmount
   useEffect(() => {
