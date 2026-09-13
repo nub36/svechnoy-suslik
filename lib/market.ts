@@ -1,3 +1,6 @@
+import { buildTopUniverseCoins } from "@/lib/market-universe";
+import { TOP_UNIVERSE_SIZE } from "@/lib/universe";
+
 export type Coin = {
   id: string;
   symbol: string;
@@ -7,10 +10,17 @@ export type Coin = {
   market_cap: number;
   total_volume: number;
   price_change_percentage_24h: number;
+  market_cap_rank: number;
 };
 
 /**
  * Рыночные данные CoinGecko (кэш 60 секунд).
+ *
+ * Universe: Топ-100 по капитализации (единственный источник истины —
+ * lib/universe.ts). Порядок и состав строит buildTopUniverseCoins:
+ * детерминированная сортировка по market_cap_rank, дедупликация по
+ * символу, без рангов вне 1..100 — та же вселенная, что у /api/search,
+ * /api/chart/markets и /admin/data.
  *
  * ВАЖНО: при недоступности источника возвращается
  * пустой список, а НЕ демо-данные: показывать
@@ -19,31 +29,25 @@ export type Coin = {
  * «Нет данных».
  */
 export async function getTopCoins(
-  limit = 500
+  limit = TOP_UNIVERSE_SIZE
 ): Promise<Coin[]> {
   try {
-    const pages = Math.ceil(
-      Math.min(limit, 500) / 250
+    /* Одна страница: пагинация вселенной Top-100 не нужна;
+       per_page ограничен 250 на стороне API. */
+    const perPage = Math.min(Math.max(1, Math.trunc(limit)), 250);
+
+    const res = await fetch(
+      `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${String(perPage)}&page=1&sparkline=false&price_change_percentage=24h`,
+      { next: { revalidate: 60 } }
     );
 
-    const result: Coin[] = [];
-
-    for (let page = 1; page <= pages; page++) {
-      const res = await fetch(
-        `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=${page}&sparkline=false&price_change_percentage=24h`,
-        { next: { revalidate: 60 } }
+    if (!res.ok) {
+      throw new Error(
+        "Источник рынка временно недоступен"
       );
-
-      if (!res.ok) {
-        throw new Error(
-          "Источник рынка временно недоступен"
-        );
-      }
-
-      result.push(...(await res.json()));
     }
 
-    return result.slice(0, limit);
+    return buildTopUniverseCoins(await res.json(), limit) as Coin[];
   } catch {
     return [];
   }

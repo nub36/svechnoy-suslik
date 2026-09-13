@@ -3,9 +3,9 @@ import { getTopCoins } from "@/lib/market";
 /**
  * Сводка на главной: реальные данные.
  *
- - Капитализация Top-500 — ВНЕШНЯЯ метрика CoinGecko
-   (кэш 60 c); это НЕ основной universe проекта
-   (universe — Top-100, lib/universe.ts).
+ - Капитализация Top-100 — ВНЕШНЯЯ метрика CoinGecko
+   (кэш 60 c); это внешний источник, сам universe
+   проекта — Top-100 по капитализации (lib/universe.ts).
  - Свечи/снимки/сигналы/стратегии — счётчики PostgreSQL.
  *
  * Если база недоступна или данных нет — честно
@@ -29,7 +29,7 @@ function fmtCap(n: number): string {
 }
 
 export default async function MarketOverview() {
-  const coins = await getTopCoins(500);
+  const coins = await getTopCoins();
 
   const totalCap = coins.reduce(
     (sum, c) => sum + (c.market_cap ?? 0),
@@ -88,7 +88,7 @@ export default async function MarketOverview() {
     <div className="cards">
       <div className="card">
         <div className="cardTitle">
-          Капитализация Top-500
+          Капитализация Top-100
         </div>
 
         <div className="bigValue">
@@ -99,8 +99,7 @@ export default async function MarketOverview() {
 
         <span className="muted">
           внешняя метрика CoinGecko (сумма по их
-          Top-500), обновляется раз в минуту; не
-          является universe проекта
+          Top-100), обновляется раз в минуту
         </span>
       </div>
 

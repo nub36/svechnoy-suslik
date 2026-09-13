@@ -3,7 +3,7 @@ import MarketTable from "@/components/MarketTable";
 import { getTopCoins } from "@/lib/market";
 
 export default async function Home() {
-  const coins = await getTopCoins(500);
+  const coins = await getTopCoins();
 
   return (
     <main className="shell">
@@ -11,7 +11,7 @@ export default async function Home() {
         <div>
           <h1>Рынок под микроскопом 🔬</h1>
           <div className="muted">
-            500 крупнейших активов и алгоритмический анализ без AI
+            100 крупнейших активов и алгоритмический анализ без AI
           </div>
         </div>
       </section>

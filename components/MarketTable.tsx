@@ -118,12 +118,22 @@ export default function MarketTable({ coins }: { coins: Coin[] }) {
                 </td>
               </tr>
             ) : (
-              filtered.map((coin, i) => {
+              filtered.map((coin) => {
                 const change = coin.price_change_percentage_24h ?? 0;
 
                 return (
                   <tr key={coin.id}>
-                    <td className="muted">{i + 1}</td>
+                    {/*
+                      Честный ранг по капитализации из данных источника
+                      (market_cap_rank), а НЕ позиция в отфильтрованном
+                      списке: при фильтре «Рост/Падение» номер строки
+                      не совпадает с местом в Top-100.
+                    */}
+                    <td className="muted">
+                      {coin.market_cap_rank > 0
+                        ? `#${String(coin.market_cap_rank)}`
+                        : "—"}
+                    </td>
 
                     <td>
                       <Link
