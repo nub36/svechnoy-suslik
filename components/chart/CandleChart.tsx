@@ -1270,8 +1270,9 @@ export default function CandleChart({
        *  - драг по оси времени → растянуть/сжать временную шкалу,
        *    драг по правой ценовой шкале → вертикальный масштаб
        *    (axisPressedMouseMove.time/.price);
-       *  - двойной клик по оси времени/цены → возврат к auto-scale
-       *    (axisDoubleClickReset), как и кнопка «Сбросить масштаб»;
+       *  - двойной клик по ценовой шкале → только auto-scale цены
+       *    (горизонтальный вид не трогает); двойной клик по оси
+       *    времени → масштаб времени; полный сброс — кнопка;
        *  - touch: горизонтальный драг и pinch работают, вертикальный
        *    драг отдан странице (vertTouchDrag false).
        * Собственная «физика» drag/zoom поверх библиотеки не пишется.
@@ -2602,6 +2603,7 @@ export default function CandleChart({
           вертикальный масштаб уничтожался (setAutoScale(true) по всем
           панелям). Полный сброс — только кнопка «Сбросить масштаб».
         */
+        <>
         <div
           ref={wrapRef}
           className="chartWrap"
@@ -2615,6 +2617,28 @@ export default function CandleChart({
             ref={legendRef}
             className="chartLegend"
           />
+
+          {loading && (
+            <div className="chartOverlay">
+              Загрузка…
+            </div>
+          )}
+
+          {historyLoading && (
+            <div className="chartHistoryLoader">
+              Загрузка истории…
+            </div>
+          )}
+
+          <button
+            type="button"
+            className="chip chartResetScale"
+            title="Полный сброс: авто-масштаб цены и последние закрытые бары"
+            onClick={resetChartScale}
+          >
+            Сбросить масштаб
+          </button>
+        </div>
 
           {dataMeta && (
             <div className="chartDataStatus muted">
@@ -2663,28 +2687,7 @@ export default function CandleChart({
               )}
             </div>
           )}
-
-          {loading && (
-            <div className="chartOverlay">
-              Загрузка…
-            </div>
-          )}
-
-          {historyLoading && (
-            <div className="chartHistoryLoader">
-              Загрузка истории…
-            </div>
-          )}
-
-          <button
-            type="button"
-            className="chip chartResetScale"
-            title="Вернуть масштаб по умолчанию"
-            onClick={resetChartScale}
-          >
-            Сбросить масштаб
-          </button>
-        </div>
+        </>
       )}
 
       {/* P1-C: read-only панель Smart Money. Рендерится независимо от
@@ -2707,11 +2710,12 @@ export default function CandleChart({
           горизонтальный свайп — движение по истории,
           колесо мыши или щипок — масштаб, драг по оси
           времени или по ценовой шкале — масштаб оси,
-          двойной клик по оси и кнопка «Сбросить
-          масштаб» — возврат к авто-масштабу и последним
-          закрытым барам; прокрутка влево подгружает
-          более старую историю, текущий вид при этом
-          сохраняется
+          двойной клик по ценовой шкале — только авто-масштаб
+          цены (горизонтальный вид сохраняется), кнопка
+          «Сбросить масштаб» — полный сброс к авто-масштабу
+          и последним закрытым барам; прокрутка влево
+          подгружает более старую историю, текущий вид
+          при этом сохраняется
           {historyEnded
             ? " · история загружена полностью"
             : ""}

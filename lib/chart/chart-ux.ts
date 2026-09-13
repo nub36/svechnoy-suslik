@@ -86,9 +86,11 @@ export const SUSLIK_HANDLE_SCROLL: HandleScrollOptions = {
  * - axisPressedMouseMove.price: драг по правой ценовой шкале →
  *   изменение вертикального масштаба ШТАТНЫМ способом библиотеки
  *   (собственная реализация price-pan не нужна и не добавляется);
- * - axisDoubleClickReset.time/.price: двойной клик по оси времени или
- *   по ценовой шкале возвращает auto/default scale — тот же результат,
- *   что и кнопка «Сбросить масштаб».
+ * - axisDoubleClickReset.time/.price: двойной клик по ценовой шкале
+ *   возвращает ТОЛЬКО auto-scale цены (горизонтальный вид не трогает);
+ *   двойной клик по оси времени возвращает масштаб времени. Полный
+ *   сброс (время + цена + последние бары) — только кнопка
+ *   «Сбросить масштаб».
  */
 export const SUSLIK_HANDLE_SCALE: HandleScaleOptions = {
   mouseWheel: true,
@@ -856,7 +858,9 @@ export interface VerticalScaleModePolicy {
  * применяется, никаких собственных min/max-ограничений приложение не
  * добавляет — действуют только штатные ограничения библиотеки.
  * Ручной масштаб не отменяется никаким React-эффектом: setAutoScale(true)
- * вызывается лишь явным сбросом пользователя.
+ * вызывается лишь явным сбросом пользователя (двойной клик по ценовой
+ * шкале — только цена; кнопка «Сбросить масштаб» — полный сброс).
+ * Двойной клик по обёртке графика полного сброса НЕ делает.
  */
 export function verticalScaleModePolicy(
   mode: VerticalScaleMode
@@ -871,8 +875,7 @@ export function verticalScaleModePolicy(
       clamps: [],
       restoredBy: [
         "двойной клик по ценовой шкале (handleScale.axisDoubleClickReset.price)",
-        "кнопка «Сбросить масштаб»",
-        "двойной клик по графику"
+        "кнопка «Сбросить масштаб»"
       ]
     };
   }

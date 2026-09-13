@@ -628,6 +628,19 @@ ok(
   /Сбросить масштаб/.test(CHART_SRC),
   "chart: кнопка «Сбросить масштаб» осталась"
 );
+{
+  const wrapInner = extractBetween(
+    CHART_SRC,
+    'className="chartWrap"',
+    "Сбросить масштаб",
+    "обёртка графика до кнопки сброса"
+  );
+
+  ok(
+    !wrapInner.includes("chartDataStatus"),
+    "chart: статусная строка ВНЕ обёртки — Reset не перекрывает «Загружено свечей» и остаётся на plot"
+  );
+}
 
 /* ================================================================ */
 /* 4. Smart Money P1-C не сломан                                     */
@@ -1313,8 +1326,12 @@ for (const paneHeightPx of [0, 60, 120, 240, 400, 800]) {
   );
   eq(
     manual.restoredBy.length,
-    3,
-    "policy MANUAL: auto-scale возвращается двойным кликом по шкале, кнопкой сброса и двойным кликом по графику"
+    2,
+    "policy MANUAL: auto-scale возвращается двойным кликом по шкале и кнопкой сброса (не двойным кликом по графику)"
+  );
+  ok(
+    !manual.restoredBy.some((r) => r.includes("по графику")),
+    "policy MANUAL: двойной клик по обёртке графика НЕ возвращает auto-scale"
   );
   ok(
     manual.restoredBy.some((r) => r.includes("axisDoubleClickReset.price")),
