@@ -1,5 +1,12 @@
 /**
- * P2-B+ — Read-only SQL safety allowlist — HARDENED.
+ * P2-B+ — Read-only SQL safety allowlist — HARDENED — STATIC DEFENSE ONLY.
+ *
+ * SCOPE DOCUMENTATION (factual, per audit):
+ * - This module is STATIC DEFENSIVE SQL INSPECTION ONLY — it is NOT PostgreSQL semantic proof,
+ *   NOT DB enforcement, NOT runtime guard unless actually wired into CLI/transaction.
+ * - CLI truthfully does NOT execute SET TRANSACTION READ ONLY — buildReadOnlyTransactionSql() returns string but is NOT executed;
+ *   read-only guarantee comes from capability-restricted Prisma surface (findUnique/findMany/candle.findMany/$disconnect), not from DB transaction enforcement.
+ * - No need to add raw SQL to CLI just to use scanner — scanner is for tests/static audit, not for runtime.
  *
  * Goal: statically auditable guarantee that real DB layer executes only SELECT, no side-effects.
  *
@@ -10,9 +17,9 @@
  * - Prisma API guard: only findMany/findUnique/findFirst/count/aggregate/groupBy
  *
  * This module is pure, no Prisma/DB, no env, no Date.now(), no new Date().
- * Used as static check + runtime guard for owner-run CLI (defensive).
+ * Used as static check + test defense, described accurately — NOT claimed as runtime DB guard unless wired.
  *
- * Guarantee:
+ * Guarantee (static inspection):
  * - Rejects: INSERT, UPDATE, DELETE, MERGE, UPSERT, REPLACE, CREATE, ALTER, DROP, TRUNCATE,
  *   REINDEX, VACUUM, ANALYZE, CLUSTER, COPY, LOAD, LOCK, GRANT, REVOKE, SECURITY, COMMENT, OWNER, TABLESPACE,
  *   CALL, DO, PERFORM, EXECUTE, EXEC, LISTEN, NOTIFY, UNLISTEN, REFRESH,
@@ -23,16 +30,16 @@
  *   pg_cancel_backend, pg_terminate_backend, pg_reload_conf, etc. via pg_*() pattern,
  *   $executeRaw, $queryRawUnsafe, etc.
  * - Allows: SELECT ... FROM ... WHERE ... ORDER BY ... LIMIT ... OFFSET, WITH ... SELECT
- *   with transaction READ ONLY intent.
  *
- * Limitations:
- * - This is syntactic guard, not full SQL parser. It does not execute DB.
+ * Limitations (documented exactly):
+ * - Syntactic guard, not full SQL parser, not PostgreSQL semantic proof, not DB enforcement.
  * - Dollar-quoted $$...$$ and single-quoted '...' containing forbidden keywords are still rejected (fail-closed) — intentional.
  * - Comments containing INSERT are also rejected if they contain forbidden tokens or cause allowlist miss (fail-closed).
  * - SELECT INTO is rejected because it creates table in Postgres.
- * - FOR UPDATE/SHARE detection uses robust regex with \s+ and case-insensitive, handles newlines via [\\s\\S]*? where needed.
+ * - FOR UPDATE/SHARE detection uses robust regex with \\s+ and case-insensitive, handles newlines via [\\s\\S]*? where needed.
  * - Does NOT attempt to detect all possible side-effects (e.g., custom functions), but forbids known pg_* patterns.
  * - Multi-statement detection via split ; outside of empty — heuristic, fail-closed.
+ * - Runtime enforcement only if actually wired — currently NOT wired in CLI, CLI relies on capability-restricted surface instead.
  *
  * Also checks Prisma API: forbids create/update/upsert/delete, createMany/updateMany/deleteMany/$executeRaw and $queryRaw variants.
  */
@@ -111,10 +118,6 @@ export type ReadOnlySqlCheckResult = {
 };
 
 function stripDollarQuotedForSemicolonCheck(sql: string): string {
-  // For multi-statement detection, we want to ignore semicolons inside $$...$$ or $tag$...$tag$
-  // Simple heuristic: replace dollar-quoted blocks with spaces, then check ; count.
-  // This is not full parser, but prevents false bypass.
-  // Pattern: \$[^$]*\$[\s\S]*?\$[^$]*\$  or \$\$[\s\S]*?\$\$
   return sql.replace(/\$[A-Za-z_]*\$[\s\S]*?\$[A-Za-z_]*\$/g, (m) => " ".repeat(m.length));
 }
 
@@ -131,25 +134,19 @@ export function assertReadOnlySql(sql: string): ReadOnlySqlCheckResult {
     return { ok: false, errors: ["SQL empty"] };
   }
 
-  // Allowlist: must start with SELECT or WITH (CTE that ends with SELECT)
-  // Also allow leading ( and comments? We fail-closed: must start with SELECT/WITH after optional whitespace/comments? For simplicity, require start.
-  // To handle /* comment */ SELECT, we check after stripping leading /* */? But we want fail-closed if comment hides write — so we first check if after trimming leading whitespace, upper starts with SELECT or WITH, OR starts with /* and then SELECT? For strict allowlist, we require SELECT/WITH at start, comment at start will fail, which is fail-closed and acceptable.
   const upper = trimmed.toUpperCase();
   const startsAllowed = upper.startsWith("SELECT") || upper.startsWith("WITH");
   if (!startsAllowed) {
     errors.push(`SQL must start with SELECT or WITH (read-only), got: ${trimmed.slice(0, 40)}`);
   }
 
-  // Check forbidden patterns — on original string (fail-closed for comments/dollar-quoted)
   for (const { re, label } of FORBIDDEN_SQL_PATTERNS) {
     if (re.test(trimmed)) {
       errors.push(`SQL contains forbidden token ${label}: matched ${re.source}`);
     }
   }
 
-  // Multi-statement detection — heuristic, fail-closed
   const withoutDollar = stripDollarQuotedForSemicolonCheck(trimmed);
-  // Split by ; and filter non-empty after trim
   const statements = withoutDollar
     .split(";")
     .map((s) => s.trim())
@@ -157,10 +154,6 @@ export function assertReadOnlySql(sql: string): ReadOnlySqlCheckResult {
   if (statements.length > 1) {
     errors.push(`Multiple SQL statements not allowed in read-only context (found ${statements.length})`);
   }
-
-  // Additional: if contains ; at all and second part contains letters, already caught, but also forbid trailing ; with suspicious following?
-  // Single trailing semicolon is allowed? In Postgres, single statement may end with ; — we allow 1 statement with trailing ;? Our split logic treats "SELECT 1;" as 1 statement because filter removes empty after last ;? Actually "SELECT 1;" split => ["SELECT 1", ""] => filter removes empty => 1 statement, ok.
-  // "SELECT 1; SELECT 2" => 2 statements => forbidden.
 
   return { ok: errors.length === 0, errors: Object.freeze(errors) };
 }
@@ -170,7 +163,6 @@ export function assertReadOnlyPrismaMethod(methodName: string): ReadOnlySqlCheck
   if ((FORBIDDEN_PRISMA_METHODS as readonly string[]).includes(methodName)) {
     errors.push(`Prisma method ${methodName} is forbidden in read-only data plane`);
   }
-  // Allowlist for read-only: findMany, findUnique, findFirst, count, aggregate (read-only), groupBy, findRaw? No, findRaw is forbidden.
   const allowed = new Set(["findMany", "findUnique", "findFirst", "count", "aggregate", "groupBy"]);
   if (!allowed.has(methodName)) {
     if (!(FORBIDDEN_PRISMA_METHODS as readonly string[]).includes(methodName)) {
@@ -181,17 +173,15 @@ export function assertReadOnlyPrismaMethod(methodName: string): ReadOnlySqlCheck
 }
 
 /**
- * Defensive read-only transaction wrapper check.
- * In real owner-run CLI, we should use:
- * prisma.$transaction(async (tx) => { ... }, { isolationLevel: 'RepeatableRead' })
- * and SET TRANSACTION READ ONLY.
- * This function validates intent.
+ * Defensive read-only transaction wrapper check — returns SQL string but NOT executed in CLI.
+ * CLI relies on capability-restricted Prisma surface, not on SET TRANSACTION READ ONLY.
  */
 export function buildReadOnlyTransactionSql(): string {
   return "SET TRANSACTION READ ONLY";
 }
 
 export const READ_ONLY_SQL_ALLOWLIST_DOC = Object.freeze({
+  scope: "STATIC DEFENSIVE SQL INSPECTION ONLY — NOT PostgreSQL semantic proof, NOT DB enforcement, NOT runtime guard unless actually wired. CLI does NOT execute SET TRANSACTION READ ONLY; read-only via capability-restricted surface.",
   guarantee:
     "Positive allowlist: must start with SELECT/WITH, single statement, no forbidden write/lock/side-effect tokens. Fail-closed on comments/dollar-quoted hiding.",
   allowedStart: ["SELECT", "WITH"],
@@ -246,5 +236,5 @@ export const READ_ONLY_SQL_ALLOWLIST_DOC = Object.freeze({
   allowedPrismaMethods: ["findMany", "findUnique", "findFirst", "count", "aggregate", "groupBy"],
   forbiddenPrismaMethods: [...FORBIDDEN_PRISMA_METHODS],
   limitations:
-    "Syntactic guard, not full parser. Dollar-quoted and comments containing forbidden keywords are rejected fail-closed. Does not detect custom side-effecting functions, but forbids known pg_* patterns.",
+    "Syntactic guard, not full parser, not PostgreSQL semantic proof, not DB enforcement. Dollar-quoted and comments containing forbidden keywords are rejected fail-closed. Does not detect custom side-effecting functions, but forbids known pg_* patterns. Runtime enforcement only if actually wired — currently NOT wired in CLI.",
 });

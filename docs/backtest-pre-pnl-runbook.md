@@ -1,8 +1,10 @@
 # Pre-PnL Backtest Runbook — BTC only, 5m/15m/1h/4h/1d, BINGX excluded 1d
 
-**Base:** 51eb129dea6a36ac077770d57859837769ece705 VPS-verified ACCEPTED (P2-A p2a-1.2.0, P2-B HARDENED, P2-C p2c-1.2.0)
+**Base:** 51eb129dea6a36ac077770d57859837769ece705 VPS-verified ACCEPTED (P2-A p2a-1.2.0, P2-B HARDENED, P2-C p2c-1.2.0) — base only, new work NOT accepted/VPS-verified
+**Current Branch:** arena/01a09726-core-pre-pnl — sequential commits from 7f58365, PENDING INDEPENDENT RE-AUDIT
 **Status:** IMPLEMENTED / PENDING INDEPENDENT ADVERSARIAL REVIEW — no PnL, no profitability claims
 **Production:** d6c573c20a11e79e26153579575818f1dada2f96 — DO NOT deploy, DO NOT restart workers
+**Changed Files from base 51eb129:** 27 files (see git diff --name-only 51eb129..HEAD), not >6700 checks as chain evidence
 
 ## 1. Scope — What is pre-PnL
 
@@ -48,11 +50,12 @@ Executability
   -> EXECUTABLE only if APPROVED policy + valid SL/TP levels at decision bar
   -> NON_EXECUTABLE reasons: NO_EXECUTION_POLICY, INVALID_POLICY, NO_VALID_STOP, NO_VALID_TARGET, LEVELS_INVALID_AT_DECISION, POLICY_NOT_APPROVED, PRE_REGISTRATION_REQUIRED, etc.
 
-PrePnlRunner
-  -> runPrePnlDiagnostics: bars per market -> coverage -> eligibility -> raw SMC observations -> execution policy boundary -> P2-A skipped (no real trades until READY_FOR_EXECUTION)
-  -> status: PRE_REGISTRATION_REQUIRED until APPROVED policy, READY_FOR_EXECUTION after (still no PnL until full execution pipeline approved)
+PrePnlRunner (FACTUAL CORRECTION: stops before economics, does NOT go →P2-A→P2-C)
+  -> runPrePnlDiagnostics: bars per market -> coverage -> eligibility -> raw SMC observations -> execution policy boundary -> STOP, returns PRE_REGISTRATION_REQUIRED, no P2-A economics entered
+  -> status: PRE_REGISTRATION_REQUIRED until APPROVED policy, READY_FOR_EXECUTION after approval but still no PnL until full execution pipeline separately approved
   -> diagnostics only: coverage per market, raw counts, NON_EXECUTABLE counts, data limitations, eligibility limitations, fingerprints, common horizon
   -> truthful baseline naming: SMC-Direction Baseline / EP-1 until execution/eligibility production-derived
+  -> No P2-A engine import, no computeMetrics, no profitFactor/netPnl — import-closure asserted
 
 SplitsReadiness
   -> uses P2-C semantics: selection stages TRAIN/VALIDATION only, OOS final witness only, tie-break selectionKey -> inputOrder, OOS-blind
@@ -72,12 +75,14 @@ Three methodologies (owner-unresolved, E1/E2/E3):
 
 Leave E1/E2/E3 unresolved — do NOT choose. Truthful labeling mandatory.
 
-## 4. OHLCV PIT Fidelity — Known Limitation
+## 4. OHLCV PIT Fidelity — Known Limitation (factual correction)
 
-- lib/ohlcv/sync.ts upsert path: updates existing candles (open/high/low/close/volume/closeTime/closed/createdAt/updatedAt) — current DB contents do NOT prove historical values at time T.
-- createdAt does NOT prove values identical at creation, updatedAt shows mutation timing but does NOT recover old values.
+- lib/ohlcv/sync.ts upsert path: update branch updates ONLY closeTime/open/high/low/close/volume/closed — createdAt NOT overwritten (Prisma default, not in update), updatedAt auto-updated.
+- Current DB contents do NOT prove historical values at time T — upsert overwrites OHLCV values, but createdAt preserves original creation time.
+- createdAt does NOT prove values identical at creation, but does prove when row was first created; updatedAt shows mutation timing but does NOT recover old values.
 - Expected write files: lib/ohlcv/sync.ts only (audited)
 - Diagnostics: rowsWithCreatedAt/UpdatedAt/diff, limitations docs, no claim of strict PIT fidelity
+- Factual correction: earlier docs claimed createdAt overwritten by update branch — FALSE, corrected here.
 
 ## 5. No-Lookahead Contract
 
@@ -131,10 +136,11 @@ CLI truthfulness (independent audit confirmed):
 - No PnL, no trades, no metrics, no writes
 - Output: coverage per market, common timestamps, contiguous intervals, feasibility, eligibility diagnostics CANNOT_RECONSTRUCT, provenance revision diagnostics, limitations, TRAIN/VALIDATION/OOS readiness
 
-## 8. Tests — How to Run (no DB)
+## 8. Tests — How to Run (no DB) — exact suite counts reported separately, not as >6700 chain evidence
 
 ```bash
-npx tsx scripts/test-backtest-engine.ts      # 439/439 (includes isolation for new files)
+# P2-A/B/C accepted (base) — exact counts, separate from chain evidence
+npx tsx scripts/test-backtest-engine.ts      # 442/442 (includes isolation for new files) — was 439/439 in base, now 442 after new checks
 npx tsx scripts/test-backtest-p2b.ts         # 427/427
 npx tsx scripts/test-backtest-metrics.ts     # 123/123
 npx tsx scripts/test-backtest-splits.ts      # 108/108
@@ -143,12 +149,28 @@ npx tsx scripts/test-experiment-report.ts    # 225/225
 npx tsx scripts/test-experiment-leakage.ts   # 174/174
 npx tsx scripts/test-experiment-hardening.ts # 165/165
 npx tsx scripts/test-smart-money-eligibility.ts # 96/96
+
+# Pre-PnL new suites — exact counts, not aggregated as chain evidence
 npx tsx scripts/test-backtest-data-plane.ts  # 46/46 (Phase A)
 npx tsx scripts/test-backtest-execution-policy.ts # 16/16 (Phase D)
 npx tsx scripts/test-backtest-smc-observation.ts # 78/78 (Phase C)
-npx tsx scripts/test-backtest-pre-pnl.ts     # 28/28 (Phase E/F)
+npx tsx scripts/test-backtest-pre-pnl.ts     # 28/28 (Phase E/F) — fixed vacuous || raw
+npx tsx scripts/test-real-long-short.ts      # 16/16 — real LONG/SHORT via production evaluateSmc path
+npx tsx scripts/test-canonical-coverage-real.ts # 38/38 — behavior-level coverage, no source.includes
+npx tsx scripts/test-no-pnl-output.ts        # 8/8 — recursive forbidden economics checks
+npx tsx scripts/test-economic-default-detection.ts # 12/12 — mutation {atrSlMultiplier,k,rrMin,timeoutBars} must fail
+npx tsx scripts/test-core-api-immutability.ts # 14/14 — deep-freeze
+npx tsx scripts/test-survivorship-fixtures.ts # 10/10 — active/disabled/inactive/delisted
+npx tsx scripts/test-eligibility-hardening.ts # 30+/30+ — fixed || true
+npx tsx scripts/test-historical-clock-hardening.ts # 40+/40+ — fixed || true
+npx tsx scripts/test-readonly-sql-hardening.ts
+npx tsx scripts/test-pre-pnl-structural-proof.ts # fixed p2aEntered spy
+npx tsx scripts/test-mutation-controls.ts
+npx tsx scripts/test-owner-inspection-readiness.ts # fixed DATABASE_URL escape hatch
+
 npx tsc --noEmit
 npm run build
+git diff --check
 ```
 
 Isolation contract (lib/backtest/*.ts):
@@ -156,6 +178,8 @@ Isolation contract (lib/backtest/*.ts):
 - No Date.now(), no Math.random(), no process.env
 - No dynamic import, no require, no eval
 - Strip comments before FORBIDDEN_TOKENS check
+- Report titles must match actual file names, final SHA must be actual HEAD, not stale 15 commits/2178 checks titles
+- Do NOT use >6700 checks as chain evidence — report exact suite counts separately per suite
 
 ## 9. Admin UI — Truthful Readiness
 
