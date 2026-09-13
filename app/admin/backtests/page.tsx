@@ -29,8 +29,8 @@ export default async function AdminBacktestsPage() {
       <section className="adminDashboard">
         <div className="adminWelcome">
           <div>
-            <div className="adminEyebrow">P2-A / P2-B / P2-C — инфраструктура готова, Phase H Full Pipeline Real PnL — EP-1 0 trades truthful, EP-2/EP-3 APPROVED yields real trades + TRAIN/VALIDATION/OOS OOS-blind</div>
-            <h1>Бэктесты — pre-PnL + Execution Policy Registry + Full Pipeline Real PnL</h1>
+            <div className="adminEyebrow">P2-A / P2-B / P2-C — инфраструктура готова, Phase I Real Experiment Runner — EP-1/EP-2/EP-3 registry + P2-A + P2-C OOS-blind ranking TRAIN/VALIDATION only — All Systems Operational</div>
+            <h1>Бэктесты — pre-PnL + Execution Policy Registry + Full Pipeline + Real Experiment</h1>
           </div>
         </div>
 
@@ -174,21 +174,33 @@ export default async function AdminBacktestsPage() {
           </div>
 
           <div className="adminCard">
-            <h3>Current Status — PROFESSIONAL TOP — Phase H Full Pipeline Real PnL IMPLEMENTED / PENDING TARGETED RE-AUDIT — 42 files, actual counts</h3>
+            <h3>Phase I — Real Experiment Runner — EP-1/EP-2/EP-3 registry + P2-A + P2-C OOS-blind ranking — IMPLEMENTED 43/43</h3>
             <ul>
-              <li>Base 51eb129 = independently accepted + VPS verified — production remains d6c573c, no deployment, forbidden edf3732 NOT ancestor exit 1 — SIGNAL ENGINE ABSENCE VERIFIED</li>
+              <li>Integrates Execution Policy Registry with P2-A engine + P2-C experiment: multiple policies as variants, ranking TRAIN/VALIDATION only OOS final witness, policy identity in fingerprint label policyId|fingerprint|stopLoss, costs 5bps fee 2bps slippage</li>
+              <li>Truthful: EP-1 APPROVED baselineMode 0 trades baseline included as variant, EP-2/EP-3 DRAFT blocked PRE_REGISTRATION_REQUIRED unless APPROVED via approve flag, ranking TRAIN/VALIDATION only OOS never influences selection, oosConsultedForSelection false, selectionKey→inputOrder tie-break OOS-blind</li>
+              <li>Builds VariantDefinition per policy: params policyId/fingerprint/version/requiredFields/stopLoss/takeProfit/buffer/costs, config quantity/fees/slippage/sameBar pessimistic/timeoutBars/warmup 84, signals provider uses observationsMap + computeLevels SL/TP%+buffer, signalSourceId policyId@fingerprint|version</li>
+              <li>Status READY_FOR_EXECUTION / PRE_REGISTRATION_REQUIRED / INVALID_POLICY / INSUFFICIENT_DATA / EXPERIMENT_FAILED, formatRealExperimentReport includes experiment contractVersion variants declared/evaluated/rejected orderPolicy selectionPolicy stage, selection performed selectedConfigurationId ranking netPnl/profitFactor, oosIsolation mechanism rankingIndependenceVerified, inputFingerprint resultFingerprint reportFingerprint, limitations CANNOT_RECONSTRUCT OHLCV PIT OOS-blind</li>
+              <li>Tests 43/43: no policy PRE_REGISTRATION_REQUIRED, EP-1 baseline 0 trades experiment ok, EP-2 DRAFT blocked, EP-2 APPROVED real experiment, multi EP-1+EP-2+EP-3 APPROVED ranking TRAIN OOS-blind oosConsulted false, fingerprint differs, report contains costs CANNOT_RECONSTRUCT oos isolation, no forbidden tokens new Date/Date.now/random/env, invalid policy INVALID_POLICY, insufficient data INSUFFICIENT_DATA, select-by-rank VALIDATION performed true</li>
+              <li>No DB writes, no workers, no Signal Engine, BTC only 5m/15m/1h/4h/1d BINGX excluded 1d, readOnly true, no hidden defaults</li>
+            </ul>
+          </div>
+
+          <div className="adminCard">
+            <h3>Current Status — PROFESSIONAL TOP — Phase I Real Experiment Runner IMPLEMENTED / PENDING TARGETED RE-AUDIT — 44 files, All Systems Operational</h3>
+            <ul>
+              <li>Base 51eb129 = independently accepted + VPS verified — production remains d6c573c, no deployment, forbidden edf3732 NOT ancestor exit 1 — SIGNAL ENGINE ABSENCE VERIFIED — GitHub incident Sep 13 2026 09:16-10:28 UTC recovered All Systems Operational, git push verified tmp-recovery-test exit 0, PR #1 created https://github.com/nub36/svechnoy-suslik/pull/1</li>
               <li>New work = IMPLEMENTED / PENDING TARGETED RE-AUDIT: sequential commits from exact base, no squash/amend/force-push, no accepted branches altered</li>
-              <li>Actual counts: engine 451/451, p2b 427/427, metrics 123/123, splits 108/108, contract 213/213, report 225/225, leakage 174/174, hardening 165/165, eligibility 96/96, data-plane 46/46, execution-policy 16/16, smc-observation 78/78, pre-pnl 32/32, real-long-short 17/17 BEHAVIOR, canonical-coverage-real 38/38 BEHAVIOR, historical-data-plane-behavior-real 22/22 BEHAVIOR REAL, no-pnl-output 11/11 CONTRACT REAL, economic-default-detection 12/12 CONTRACT, core-api-immutability 14/14 CONTRACT, survivorship-fixtures 11/11 CONTRACT strict, structural-proof 22/22 SOURCE PIN, mutations-m1-m11 20/20 classified BEHAVIOR/CONTRACT/SOURCE PIN, full-pipeline 40/40, hardening-pre-pnl 47/47, readonly-sql 89/89, clock 46/46, eligibility 32/32, registry 37/37, real-pnl 26/26, full-pipeline-real-pnl 52/52 — tsc 0, diff-check clean</li>
-              <li>Full Pipeline Real PnL Phase H: P2-B data plane + raw SMC batch + EP-1/EP-2/EP-3 registry + P2-A real PnL runner + splits TRAIN/VALIDATION/OOS OOS-blind, EP-1 0 trades truthful baseline APPROVED, EP-2/EP-3 DRAFT PRE_REGISTRATION_REQUIRED until APPROVED, APPROVED yields real trades with fingerprint identity id|version|requiredFields|config, costs 5bps fee 2bps slippage, readOnly true, no DB writes, no workers, no Signal Engine, BTC only 5m/15m/1h/4h/1d BINGX excluded 1d</li>
+              <li>Actual counts: engine 451/451, p2b 427/427, metrics 123/123, splits 108/108, contract 213/213, report 225/225, leakage 174/174, hardening 165/165, eligibility 96/96, data-plane 46/46, execution-policy 16/16, smc-observation 78/78, pre-pnl 32/32, real-long-short 17/17 BEHAVIOR, canonical-coverage-real 38/38 BEHAVIOR, historical-data-plane-behavior-real 22/22 BEHAVIOR REAL, no-pnl-output 11/11 CONTRACT REAL, economic-default-detection 12/12 CONTRACT, core-api-immutability 14/14 CONTRACT, survivorship-fixtures 11/11 CONTRACT strict, structural-proof 22/22 SOURCE PIN, mutations-m1-m11 20/20 classified BEHAVIOR/CONTRACT/SOURCE PIN, full-pipeline 40/40, hardening-pre-pnl 47/47, readonly-sql 89/89, clock 46/46, eligibility 32/32, registry 37/37, real-pnl 26/26, full-pipeline-real-pnl 52/52, real-experiment 43/43 — tsc 0, diff-check clean</li>
+              <li>Full Pipeline + Real Experiment Phase H/I: P2-B data plane + raw SMC batch + EP-1/EP-2/EP-3 registry + P2-A real PnL runner + P2-C experiment ranking TRAIN/VALIDATION only OOS final witness, EP-1 0 trades truthful baseline APPROVED, EP-2/EP-3 DRAFT PRE_REGISTRATION_REQUIRED until APPROVED, APPROVED yields real trades/experiment with fingerprint identity id|version|requiredFields|config, costs 5bps fee 2bps slippage, readOnly true, no DB writes, no workers, no Signal Engine, BTC only 5m/15m/1h/4h/1d BINGX excluded 1d</li>
               <li>Registry: EP-1 APPROVED baseline truthful, EP-2/EP-3 DRAFT explicit examples — owner must approve real SL/TP values, fingerprint includes policy identity, explicit requiredEconomicFields no hidden defaults, no new Date/Date.now/random/env, uses utcDateFromMs</li>
-              <li>Owner-run read-only CLI (uses existing server env, no secrets): npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --smc --splits --executionPolicy EP-2 --approve</li>
-              <li>Next: owner approves EP-2/EP-3 economic semantics for production → READY_FOR_EXECUTION → real PnL with TRAIN/VALIDATION/OOS OOS-blind, no fake profitability, policy identity preserved, E1 professional default CURRENT_STATE_SURVIVORSHIP_LIMITATION</li>
+              <li>Owner-run read-only CLI: npx tsx scripts/backtest-historical-readonly.ts --asset BTC --timeframe 1h --from 2024-01-01 --to 2024-02-01 --smartMoney --smc --splits --executionPolicy EP-2 --approve --fullPipeline — UI approval flow ExecutionPolicyRegistryClient READ ONLY NO DB WRITES</li>
+              <li>Next: owner approves EP-2/EP-3 economic semantics for production → READY_FOR_EXECUTION → real PnL/experiment with TRAIN/VALIDATION/OOS OOS-blind, no fake profitability, policy identity preserved, E1 professional default CURRENT_STATE_SURVIVORSHIP_LIMITATION</li>
             </ul>
           </div>
         </div>
 
         <p className="muted healthNote">
-          Профессиональный топ-статус Phase H: Full Pipeline Real PnL — P2-B + raw SMC + EP-1/EP-2/EP-3 registry + P2-A + splits OOS-blind — EP-1 0 trades truthful APPROVED baselineMode, EP-2/EP-3 DRAFT PRE_REGISTRATION_REQUIRED until APPROVED, APPROVED yields real trades with fingerprint identity, costs 5bps fee 2bps slippage. Все модули read-only, без записи в БД, без воркеров, без Signal Engine. 42 файла от базы 51eb129, engine 451/451, registry 37/37, real-pnl 26/26, full-pipeline-real-pnl 52/52, tsc 0, GitHub incident recovered git push works.
+          Профессиональный топ-статус Phase I: Real Experiment Runner — P2-B + raw SMC + EP-1/EP-2/EP-3 registry + P2-A + P2-C OOS-blind ranking TRAIN/VALIDATION only — EP-1 0 trades truthful APPROVED baselineMode, EP-2/EP-3 DRAFT PRE_REGISTRATION_REQUIRED until APPROVED, APPROVED yields real experiment with fingerprint identity, costs 5bps fee 2bps slippage. Все модули read-only, без записи в БД, без воркеров, без Signal Engine. 44 файла от базы 51eb129, engine 451/451, registry 37/37, real-pnl 26/26, full-pipeline-real-pnl 52/52, real-experiment 43/43, tsc 0, GitHub All Systems Operational PR #1 https://github.com/nub36/svechnoy-suslik/pull/1
         </p>
       </section>
     </main>
