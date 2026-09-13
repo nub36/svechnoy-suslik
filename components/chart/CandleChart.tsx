@@ -2522,7 +2522,7 @@ export default function CandleChart({
         </fieldset>
       </div>
 
-      /*
+      {/*
        * КОНТЕЙНЕР ГРАФИКА НИКОГДА НЕ РАЗМОНТИРУЕТСЯ СТАТУСАМИ.
 
        * lightweight-charts создаётся ОДИН раз (эффект создания графика
@@ -2534,7 +2534,7 @@ export default function CandleChart({
        * на новом div рисовать нечем — пустая область до перезагрузки
        * страницы. Поэтому статусы error/empty — оверлей ВНУТРИ
        * chartWrap, обёртка и контейнер смонтированы всегда.
-       */
+       */}
       <div
         ref={wrapRef}
         className="chartWrap"
