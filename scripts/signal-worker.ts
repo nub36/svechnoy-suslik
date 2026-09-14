@@ -133,9 +133,9 @@ async function main() {
       console.log(`Need BOTH --enable-smart-money-write AND SMART_MONEY_WRITE_ENABLED=true (or V2)`);
       args.dryRun = true;
     }
-    if (args.strategy === "smart-money-v2") {
-      console.log(`V2 LIVE blocked per task — even if AND guard passes, V2 should stay DISABLED/DRY_RUN for this checkpoint, not LIVE`);
-      args.dryRun = true;
+    if (args.strategy === "smart-money-v2" && !args.dryRun) {
+      console.log(`V2: DRY_RUN/FORWARD_TEST allowed when AND guard passes, LIVE remains gated — engine will block LIVE mode`);
+      // LIVE blocking is enforced in v2-signal-engine.ts, not here; allow FORWARD_TEST writes
     }
   }
 
