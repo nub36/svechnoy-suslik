@@ -239,21 +239,9 @@ module.exports = {
       max_memory_restart: "300M",
       cron_restart: "2,17,32,47 * * * *",
     },
-    {
-      name: "svechnoy-suslik-signal-btc-15m-v2-dry",
-      script: "npx",
-      args: "tsx scripts/signal-worker.ts --strategy=smart-money-v2 --symbol=BTC --timeframe=15m --dry-run",
-      cwd: "/root/svechnoy-suslik",
-      interpreter: "none",
-      instances: 1,
-      exec_mode: "fork",
-      autorestart: false,
-      watch: false,
-      env: {
-        NODE_ENV: "production",
-      },
-      restart_delay: 0,
-      max_memory_restart: "300M",
-    },
+    // NOTE: dry checker removed from ecosystem to avoid duplicate evaluations/log noise.
+    // V2 dry-run is manual only: npx tsx scripts/signal-worker.ts --strategy=smart-money-v2 --timeframe=15m --dry-run
+    // Only svechnoy-suslik-signal-btc-15m-v2 writer persists signals (LIVE_FORWARD with AND guard).
+    // V1 worker svechnoy-suslik-signal-btc-15m-smart remains independent same cron — same direction keep both, conflict keep both.
   ],
 };

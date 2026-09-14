@@ -1621,42 +1621,41 @@ td:nth-child(2) {
   font-size: 13px;
 }
 
-/* ===== Public Signals — compact cards ~50% height desktop ===== */
+/* ===== Public Signals — compact ~50% desktop, 2-3 cards per screen ===== */
 .signalsPage {
-  max-width: 880px;
+  max-width: 900px;
   margin: 0 auto;
 }
 .signalsHero {
-  padding: 18px 0 8px;
+  padding: 14px 0 6px;
 }
 .signalsHero h1 {
-  font-size: clamp(22px, 3vw, 28px);
-  margin: 0 0 4px;
+  font-size: clamp(20px, 2.6vw, 24px);
+  margin: 0 0 2px;
   font-weight: 850;
 }
 .signalsHero p {
   margin: 0;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
+  font-size: 11px;
+  line-height: 1.35;
 }
 .signalsList {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin-top: 12px;
+  gap: 8px;
+  margin-top: 10px;
 }
 .signalCard {
   background: var(--panel);
   border: 1px solid var(--line);
   border-left-width: 3px;
-  border-radius: 10px;
-  padding: 10px 12px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.03);
-  transition: box-shadow .12s;
+  border-radius: 9px;
+  padding: 8px 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.02);
 }
 .signalCard:hover {
-  box-shadow: 0 3px 12px rgba(0,0,0,0.06);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.05);
 }
 .signalCard[data-dir="LONG"] {
   border-left-color: var(--green);
@@ -1665,7 +1664,7 @@ td:nth-child(2) {
   border-left-color: var(--red);
 }
 .signalCard[data-legacy="true"] {
-  opacity: 0.88;
+  opacity: 0.86;
   border-left-color: #9ca3af;
   background: color-mix(in srgb, var(--panel) 96%, #f3f4f6);
 }
@@ -1673,18 +1672,18 @@ td:nth-child(2) {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 .signalCardSymbol {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   flex-wrap: wrap;
 }
 .signalCardSymbol b {
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 850;
   letter-spacing: -0.01em;
 }
@@ -1692,11 +1691,11 @@ td:nth-child(2) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 2px 8px;
+  padding: 1px 6px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 900;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.02em;
 }
 .signalDirBadge[data-dir="LONG"] {
   background: rgba(25,183,122,0.12);
@@ -1711,11 +1710,11 @@ td:nth-child(2) {
 .signalTf, .signalStrat {
   display: inline-flex;
   align-items: center;
-  padding: 2px 6px;
+  padding: 1px 5px;
   border-radius: 999px;
   background: var(--panel2);
   border: 1px solid var(--line);
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 600;
   color: var(--muted);
 }
@@ -1726,13 +1725,13 @@ td:nth-child(2) {
 .signalCardRight {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 .signalStatusBadge {
   display: inline-flex;
-  padding: 2px 7px;
-  border-radius: 6px;
-  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 9px;
   font-weight: 800;
   letter-spacing: 0.02em;
   text-transform: uppercase;
@@ -1780,128 +1779,131 @@ td:nth-child(2) {
 .signalWaitingCompact {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   flex-wrap: wrap;
   background: #fffbeb;
   border: 1px solid #fde68a;
-  border-radius: 8px;
-  padding: 6px 10px;
-  margin: 4px 0 6px;
-  font-size: 11px;
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin: 2px 0 4px;
+  font-size: 10px;
   color: #92400e;
+  line-height: 1.25;
 }
 .signalWaitingCompact b {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
 }
 .signalWaitingCompact .waitingIcon {
-  font-size: 12px;
+  font-size: 11px;
 }
 .signalWaitingCompact .waitingSep {
-  opacity: 0.5;
+  opacity: 0.45;
 }
 .signalPrices {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
-  gap: 6px;
-  margin: 6px 0;
+  gap: 4px;
+  margin: 4px 0;
 }
 .signalPriceBlock {
   background: var(--panel2);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 6px 8px;
+  border-radius: 6px;
+  padding: 4px 6px;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0px;
   min-width: 0;
 }
 .signalPriceBlock[data-type="ENTRY"] {
   background: var(--panel);
   border-color: var(--line);
-  border-width: 1.2px;
+  border-width: 1px;
 }
 .signalPriceBlock[data-type="SL"] {
-  background: rgba(240,68,92,0.05);
-  border-color: rgba(240,68,92,0.15);
+  background: rgba(240,68,92,0.04);
+  border-color: rgba(240,68,92,0.14);
 }
 .signalPriceBlock[data-type="TP"] {
-  background: rgba(25,183,122,0.05);
-  border-color: rgba(25,183,122,0.15);
+  background: rgba(25,183,122,0.04);
+  border-color: rgba(25,183,122,0.14);
 }
 .signalPriceLabel {
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 700;
   letter-spacing: 0.05em;
   color: var(--muted);
   text-transform: uppercase;
 }
 .signalPriceValue {
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 800;
   letter-spacing: -0.01em;
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.2;
 }
 .signalBottomRow {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
-  margin-top: 6px;
+  margin-top: 4px;
 }
 .signalBottomLeft {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 .signalBottomRight {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
   margin-left: auto;
 }
 .signalMiniMetric {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
-  border-radius: 6px;
+  gap: 3px;
+  padding: 1px 5px;
+  border-radius: 5px;
   background: var(--panel2);
   border: 1px solid var(--line);
-  font-size: 11px;
+  font-size: 10px;
+  line-height: 1.2;
 }
 .signalMiniMetric .miniLabel {
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 700;
   color: var(--muted);
   letter-spacing: 0.04em;
 }
 .signalMiniMetric b {
   font-weight: 800;
-  font-size: 11px;
+  font-size: 10px;
 }
 .signalMiniMeta {
-  font-size: 10px;
+  font-size: 9px;
   color: var(--muted);
 }
 .signalOutcomeMilestones {
   display: flex;
-  gap: 4px;
+  gap: 3px;
   flex-wrap: wrap;
 }
 .milestone {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 2px 6px;
+  gap: 2px;
+  padding: 1px 5px;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
   border: 1px solid var(--line);
   background: var(--panel);
@@ -1922,13 +1924,13 @@ td:nth-child(2) {
 }
 .signalLegacyBadge {
   display: inline-flex;
-  padding: 2px 6px;
-  border-radius: 5px;
+  padding: 1px 5px;
+  border-radius: 4px;
   background: #f3f4f6;
   border: 1px solid #e5e7eb;
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 800;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
   color: #6b7280;
 }
 .signalLegacyBadge.live {
@@ -1939,50 +1941,50 @@ td:nth-child(2) {
 .signalsEmpty {
   background: var(--panel);
   border: 1px dashed var(--line);
-  border-radius: 12px;
-  padding: 20px 16px;
+  border-radius: 10px;
+  padding: 16px 14px;
   text-align: center;
-  margin-top: 12px;
+  margin-top: 10px;
 }
 .signalsEmpty b {
   display: block;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 800;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
 }
 .signalsEmpty span {
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
+  font-size: 11px;
+  line-height: 1.35;
 }
 .signalsSectionTitle {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
-  letter-spacing: 0.07em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--muted);
-  margin: 16px 0 8px;
+  margin: 12px 0 6px;
 }
 @media (max-width: 700px) {
   .signalsPage {
     max-width: 100%;
   }
   .signalCard {
-    padding: 10px 11px;
-    border-radius: 10px;
+    padding: 8px 9px;
+    border-radius: 9px;
   }
   .signalCardSymbol b {
-    font-size: 14px;
+    font-size: 13px;
   }
   .signalPrices {
     grid-template-columns: repeat(2, 1fr);
-    gap: 6px;
+    gap: 4px;
   }
   .signalPrices .signalPriceBlock:nth-child(5) {
     grid-column: span 2;
   }
   .signalPriceValue {
-    font-size: 13px;
+    font-size: 11px;
   }
 }
 @media (max-width: 420px) {
@@ -1990,41 +1992,45 @@ td:nth-child(2) {
     grid-template-columns: 1fr 1fr;
   }
   .signalCardHeader {
-    gap: 6px;
+    gap: 4px;
   }
   .signalBottomRow {
-    gap: 6px;
+    gap: 4px;
   }
 }
 
-/* ===== TradingView homepage ===== */
+/* ===== TradingView homepage — compact 280-320 desktop, 260-300 mobile, no overflow ===== */
 .tradingViewCard {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 14px;
-  padding: 10px;
-  margin-top: 16px;
+  padding: 8px;
+  margin-top: 14px;
 }
 .tradingViewHeader {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 10px;
-  padding: 4px 6px 8px;
+  gap: 8px;
+  padding: 2px 4px 6px;
   flex-wrap: wrap;
 }
 .tradingViewHeader b {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 800;
 }
 .tradingViewContainer {
-  height: clamp(360px, 55vh, 560px);
+  height: clamp(280px, 32vh, 320px);
   width: 100%;
   border-radius: 10px;
   overflow: hidden;
 }
 @media (max-width: 640px) {
   .tradingViewContainer {
-    height: 380px;
+    height: clamp(260px, 42vh, 300px);
+  }
+  .tradingViewCard {
+    padding: 6px;
+    margin-top: 10px;
   }
 }

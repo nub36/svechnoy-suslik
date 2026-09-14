@@ -1,0 +1,575 @@
+// @version=5
+// Smart Money V2 — Pine Script mirror of server V2 engine
+// Server: lib/strategies/smart-money-v2.ts + lib/smc/* + lib/signals/v2-signal-engine.ts
+// This Pine indicator is maintained separately for TradingView.com
+// Homepage TradingView widget (components/TradingViewWidget.tsx) uses plain chart only,
+// backend V2 status/signals remain website data (BINANCE:BTCUSDT 15m default)
+//
+// Features mirrored:
+// - BOS (Break of Structure) — SWING_TREND + RECENT_SWING_BOS
+// - OB (Order Block) — SWING_ORDER_BLOCK / INTERNAL fallback
+// - FVG (Fair Value Gap)
+// - Liquidity Sweep — LIQUIDITY_SWEEP
+// - Range Position — Premium/Discount RANGE_POSITION
+// - OB+FVG Confluence — DERIVED bonus
+// - Internal Structure — INTERNAL_TREND context
+// - Displacement placeholder (not scored yet, exposed for visibility)
+// - CHOCH placeholder (shares INTERNAL_TREND, disabled to avoid double count)
+// - Score / confirmations with categories INDEPENDENT/DERIVED/CONTEXT/PLACEHOLDER
+// - Trend context: OFF / MARKET_STRUCTURE / EMA / HTF / COMBINED + policies SCORE_BOOST/TIERING/HARD_ALIGNMENT
+// - LONG/SHORT with EDGE episode semantics, confirmed closed bars only, no lookahead
+// - Alerts LONG/SHORT
+//
+// No repainting: uses only confirmed close (barstate.isconfirmed), no request.security with lookahead_on
+// No future data: all pivots confirmed after right bars
+//
+// Author: svechnoy-suslik V2 (arena/01a09726-svechnoy-suslik)
+// Mode: FORWARD_TEST visible, LIVE gated on server
+
+indicator("Smart Money V2 — BOS/OB/FVG/Sweep/Range/Confluence/Internal [Suslik]", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=5000)
+
+// ==== Inputs — mirror DEFAULT_V2_CONFIG ====
+modeInput = input.string("FORWARD_TEST", "Mode (server gated LIVE)", options=["DISABLED","DRY_RUN","FORWARD_TEST","LIVE"], tooltip="LIVE gated on server until research validation. Pine mirrors logic only.")
+symbolInput = input.string("BTC", "Symbol (server BTC default)")
+timeframeInput = input.timeframe("15", "Timeframe (server 15m default)")
+referenceExchangeInput = input.string("BINANCE", "Reference Exchange (server BINANCE default)")
+
+minScoreInput = input.int(65, "Minimum Score", minval=0, maxval=100, tooltip="Server DEFAULT_V2_CONFIG.minimumSignalScore 65")
+swingLeftInput = input.int(20, "Swing Left", minval=1, maxval=500)
+swingRightInput = input.int(20, "Swing Right", minval=1, maxval=500)
+internalLeftInput = input.int(3, "Internal Left", minval=1, maxval=500)
+internalRightInput = input.int(3, "Internal Right", minval=1, maxval=500)
+atrPeriodInput = input.int(14, "ATR Period", minval=1)
+structureFreshInput = input.int(10, "Structure Fresh Bars", minval=0)
+sweepFreshInput = input.int(5, "Sweep Fresh Bars", minval=0)
+obFreshInput = input.int(20, "OB Fresh Bars", minval=0)
+fvgFreshInput = input.int(20, "FVG Fresh Bars", minval=0)
+eqBandInput = input.float(0.02, "EQ Band", minval=0, maxval=0.49, step=0.01)
+
+// Weights — must sum 100 (server invariant)
+wSwingBias = input.int(20, "W swingStructureBias", minval=0, maxval=100, inline="w1")
+wRecentBos = input.int(15, "W recentSwingBos", minval=0, maxval=100, inline="w1")
+wInternal = input.int(10, "W internalStructure", minval=0, maxval=100, inline="w2")
+wSweep = input.int(10, "W liquiditySweep", minval=0, maxval=100, inline="w2")
+wSwingOb = input.int(15, "W swingOrderBlock", minval=0, maxval=100, inline="w3")
+wInternalOb = input.int(5, "W internalOrderBlock", minval=0, maxval=100, inline="w3")
+wFvg = input.int(10, "W fvg", minval=0, maxval=100, inline="w4")
+wRange = input.int(10, "W rangePosition", minval=0, maxval=100, inline="w4")
+wConfluence = input.int(5, "W confluence", minval=0, maxval=100, inline="w5")
+
+// Confirmations — mirror DEFAULT_CONFIRMATIONS with categories
+bosEnabled = input.bool(true, "BOS INDEPENDENT required", inline="c1")
+bosWeight = input.int(20, "W", minval=0, maxval=100, inline="c1")
+chochEnabled = input.bool(false, "CHOCH PLACEHOLDER disabled (duplicate INTERNAL_TREND)", inline="c2")
+chochWeight = input.int(0, "W", minval=0, maxval=100, inline="c2")
+obEnabled = input.bool(true, "OB INDEPENDENT required", inline="c3")
+obWeight = input.int(20, "W", minval=0, maxval=100, inline="c3")
+fvgEnabled = input.bool(true, "FVG INDEPENDENT", inline="c4")
+fvgWeight = input.int(15, "W", minval=0, maxval=100, inline="c4")
+sweepEnabled = input.bool(true, "Sweep INDEPENDENT", inline="c5")
+sweepWeight = input.int(15, "W", minval=0, maxval=100, inline="c5")
+displEnabled = input.bool(false, "Displacement PLACEHOLDER disabled (no reason yet)", inline="c6")
+displWeight = input.int(0, "W", minval=0, maxval=100, inline="c6")
+rangeEnabled = input.bool(true, "Range INDEPENDENT", inline="c7")
+rangeWeight = input.int(15, "W", minval=0, maxval=100, inline="c7")
+conflEnabled = input.bool(true, "Confluence DERIVED bonus", inline="c8")
+conflWeight = input.int(5, "W", minval=0, maxval=100, inline="c8")
+internalEnabled = input.bool(true, "Internal CONTEXT", inline="c9")
+internalWeight = input.int(10, "W", minval=0, maxval=100, inline="c9")
+
+// Trend context
+trendEnabled = input.bool(true, "Trend enabled")
+trendMode = input.string("MARKET_STRUCTURE", "Trend Mode", options=["OFF","MARKET_STRUCTURE","EMA","HTF","COMBINED"])
+trendPolicy = input.string("SCORE_BOOST", "Trend Policy", options=["SCORE_BOOST","TIERING","HARD_ALIGNMENT"], tooltip="HARD_ALIGNMENT requires research validation")
+emaFastInput = input.int(20, "EMA Fast", minval=1)
+emaSlowInput = input.int(50, "EMA Slow", minval=1)
+emaSlopeLookback = input.int(5, "EMA Slope Lookback", minval=1)
+htfInput = input.timeframe("60", "HTF Timeframe")
+trendWeight = input.int(15, "Trend Weight")
+counterPenalty = input.int(10, "Counter Trend Penalty")
+
+// ATR SL/TP (mirror server atr)
+atrStopMult = input.float(1.5, "ATR Stop Mult", step=0.1)
+atrTp1Mult = input.float(1.5, "ATR TP1 Mult", step=0.1)
+atrTp2Mult = input.float(2.5, "ATR TP2 Mult", step=0.1)
+atrTp3Mult = input.float(4.0, "ATR TP3 Mult", step=0.1)
+
+// Display toggles
+showBos = input.bool(true, "Show BOS")
+showOb = input.bool(true, "Show OB")
+showFvg = input.bool(true, "Show FVG")
+showSweep = input.bool(true, "Show Sweep")
+showRange = input.bool(false, "Show Range")
+showInternal = input.bool(false, "Show Internal Structure")
+showScore = input.bool(true, "Show Score/Confirmations")
+
+// ==== Core calculations — closed bars only, no lookahead ====
+atr = ta.atr(atrPeriodInput)
+
+// Swing pivots — server pivots.ts with plateau policy, here simplified with ta.pivothigh/low confirmed after right bars
+swingHigh = ta.pivothigh(high, swingLeftInput, swingRightInput)
+swingLow = ta.pivotlow(low, swingLeftInput, swingRightInput)
+// Confirmed pivots appear right bars ago, but value is at that historical bar — no repaint if we use confirmed only
+swingHighPrice = swingHigh
+swingLowPrice = swingLow
+
+// Internal pivots (smaller window)
+internalHigh = ta.pivothigh(high, internalLeftInput, internalRightInput)
+internalLow = ta.pivotlow(low, internalLeftInput, internalRightInput)
+
+// Track last swing levels — only on confirmed close
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var int lastSwingHighBar = na
+var int lastSwingLowBar = na
+
+if not na(swingHighPrice) and barstate.isconfirmed
+    lastSwingHigh := swingHighPrice
+    lastSwingHighBar := bar_index[swingRightInput]
+
+if not na(swingLowPrice) and barstate.isconfirmed
+    lastSwingLow := swingLowPrice
+    lastSwingLowBar := bar_index[swingRightInput]
+
+// Internal last
+var float lastInternalHigh = na
+var float lastInternalLow = na
+if not na(internalHigh) and barstate.isconfirmed
+    lastInternalHigh := internalHigh
+if not na(internalLow) and barstate.isconfirmed
+    lastInternalLow := internalLow
+
+// BOS detection — break of previous swing level with close beyond
+bullBos = false
+bearBos = false
+bullBosPrice = na
+bearBosPrice = na
+if barstate.isconfirmed and not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
+    bullBos := true
+    bullBosPrice := lastSwingHigh
+if barstate.isconfirmed and not na(lastSwingLow) and close < lastSwingLow and close[1] >= lastSwingLow
+    bearBos := true
+    bearBosPrice := lastSwingLow
+
+// Internal structure trend bias
+var string internalPhase = "UNDEFINED"
+if barstate.isconfirmed
+    if close > lastInternalHigh
+        internalPhase := "TREND_UP"
+    if close < lastInternalLow
+        internalPhase := "TREND_DOWN"
+
+// Displacement — impulse with large body/range vs ATR
+body = math.abs(close - open)
+range = high - low
+bullCloseLoc = (close - low) / (range == 0 ? 1 : range)
+bearCloseLoc = bullCloseLoc
+isBullDisplacement = body > atr * 1.5 and range > atr * 2.0 and bullCloseLoc > 0.6 and barstate.isconfirmed
+isBearDisplacement = body > atr * 1.5 and range > atr * 2.0 and bearCloseLoc < 0.4 and barstate.isconfirmed
+
+// FVG — 3-bar imbalance, confirmed on close of 3rd bar
+bullFvg = low > high[2] and close[1] > high[2] and barstate.isconfirmed
+bearFvg = high < low[2] and close[1] < low[2] and barstate.isconfirmed
+bullFvgTop = bullFvg ? low : na
+bullFvgBottom = bullFvg ? high[2] : na
+bearFvgTop = bearFvg ? low[2] : na
+bearFvgBottom = bearFvg ? high : na
+
+// Track recent FVG for freshness
+var int lastBullFvgBar = na
+var int lastBearFvgBar = na
+if bullFvg
+    lastBullFvgBar := bar_index
+if bearFvg
+    lastBearFvgBar := bar_index
+
+bullFvgFresh = not na(lastBullFvgBar) and (bar_index - lastBullFvgBar) <= fvgFreshInput
+bearFvgFresh = not na(lastBearFvgBar) and (bar_index - lastBearFvgBar) <= fvgFreshInput
+
+// Order Blocks — last bearish candle before bullish displacement/BOS, etc.
+// Simplified: bearish OB for LONG, bullish OB for SHORT
+var box[] bullObBoxes = array.new_box(0)
+var box[] bearObBoxes = array.new_box(0)
+
+bullObSignal = bullBos and isBullDisplacement[1] == false // BOS as trigger, look back for bearish candle
+bearObSignal = bearBos and isBearDisplacement[1] == false
+
+// Find last bearish candle before bull BOS (within 10 bars)
+bullObHigh = na
+bullObLow = na
+bullObFound = false
+if bullBos
+    for i = 1 to 10
+        if close[i] < open[i]
+            bullObHigh := high[i]
+            bullObLow := low[i]
+            bullObFound := true
+            break
+
+bearObHigh = na
+bearObLow = na
+bearObFound = false
+if bearBos
+    for i = 1 to 10
+        if close[i] > open[i]
+            bearObHigh := high[i]
+            bearObLow := low[i]
+            bearObFound := true
+            break
+
+// Liquidity Sweep — wick beyond recent swing then close back inside
+bullSweep = false
+bearSweep = false
+if barstate.isconfirmed and not na(lastSwingLow)
+    // Bear sweep: low wicks below lastSwingLow then close above
+    if low < lastSwingLow and close > lastSwingLow
+        bullSweep := true
+if barstate.isconfirmed and not na(lastSwingHigh)
+    if high > lastSwingHigh and close < lastSwingHigh
+        bearSweep := true
+
+var int lastBullSweepBar = na
+var int lastBearSweepBar = na
+if bullSweep
+    lastBullSweepBar := bar_index
+if bearSweep
+    lastBearSweepBar := bar_index
+
+bullSweepFresh = not na(lastBullSweepBar) and (bar_index - lastBullSweepBar) <= sweepFreshInput
+bearSweepFresh = not na(lastBearSweepBar) and (bar_index - lastBearSweepBar) <= sweepFreshInput
+
+// Range Position — Premium/Discount based on recent swing range
+recentHigh = ta.highest(high, 100)
+recentLow = ta.lowest(low, 100)
+rangeSize = recentHigh - recentLow
+premiumThreshold = recentLow + rangeSize * 0.7
+discountThreshold = recentLow + rangeSize * 0.3
+inDiscount = close < discountThreshold
+inPremium = close > premiumThreshold
+rangePositionLong = inDiscount // Discount for LONG
+rangePositionShort = inPremium // Premium for SHORT
+
+// OB+FVG Confluence — OB overlaps FVG
+bullConfluence = bullObFound and bullFvgFresh and not na(bullObLow) and not na(bullFvgBottom) and bullObLow <= bullFvgTop and bullObHigh >= bullFvgBottom
+bearConfluence = bearObFound and bearFvgFresh and not na(bearObLow) and not na(bearFvgBottom) and bearObLow <= bearFvgTop and bearObHigh >= bearFvgBottom
+
+// Trend context — EMA + Market Structure + HTF
+emaFast = ta.ema(close, emaFastInput)
+emaSlow = ta.ema(close, emaSlowInput)
+emaBull = emaFast > emaSlow
+emaBear = emaFast < emaSlow
+emaSlope = emaFast - emaFast[emaSlopeLookback]
+emaSlopeBull = emaSlope > 0
+emaSlopeBear = emaSlope < 0
+
+// Market structure trend: swing structure bias
+marketBull = internalPhase == "TREND_UP" or (not na(lastSwingLow) and close > lastSwingLow and (na(lastSwingHigh) or close < lastSwingHigh * 1.1))
+marketBear = internalPhase == "TREND_DOWN" or (not na(lastSwingHigh) and close < lastSwingHigh and (na(lastSwingLow) or close > lastSwingLow * 0.9))
+
+// HTF trend via request.security without lookahead
+htfClose = request.security(syminfo.tickerid, htfInput, close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+htfEmaFast = request.security(syminfo.tickerid, htfInput, ta.ema(close, emaFastInput), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+htfEmaSlow = request.security(syminfo.tickerid, htfInput, ta.ema(close, emaSlowInput), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+htfBull = htfEmaFast > htfEmaSlow and htfClose > htfEmaFast
+htfBear = htfEmaFast < htfEmaSlow and htfClose < htfEmaFast
+
+// Combined trend
+trendBull =
+     (trendMode == "OFF" ? true :
+     trendMode == "MARKET_STRUCTURE" ? marketBull :
+     trendMode == "EMA" ? (emaBull and emaSlopeBull) :
+     trendMode == "HTF" ? htfBull :
+     trendMode == "COMBINED" ? (marketBull and emaBull and htfBull) : true)
+
+trendBear =
+     (trendMode == "OFF" ? true :
+     trendMode == "MARKET_STRUCTURE" ? marketBear :
+     trendMode == "EMA" ? (emaBear and emaSlopeBear) :
+     trendMode == "HTF" ? htfBear :
+     trendMode == "COMBINED" ? (marketBear and emaBear and htfBear) : true)
+
+// ==== Scoring — mirror server weights and confirmations ====
+longScore = 0
+shortScore = 0
+longConfirmations = 0
+shortConfirmations = 0
+longTotal = 0
+shortTotal = 0
+
+// BOS
+if bosEnabled
+    longTotal += bosWeight
+    shortTotal += bosWeight
+    if bullBos
+        longScore += wSwingBias + wRecentBos
+        longConfirmations += 1
+    if bearBos
+        shortScore += wSwingBias + wRecentBos
+        shortConfirmations += 1
+
+// OB
+if obEnabled
+    longTotal += obWeight
+    shortTotal += obWeight
+    if bullObFound and (bar_index - lastSwingLowBar <= obFreshInput or na(lastSwingLowBar))
+        longScore += wSwingOb
+        longConfirmations += 1
+    if bearObFound and (bar_index - lastSwingHighBar <= obFreshInput or na(lastSwingHighBar))
+        shortScore += wSwingOb
+        shortConfirmations += 1
+
+// FVG
+if fvgEnabled
+    longTotal += fvgWeight
+    shortTotal += fvgWeight
+    if bullFvgFresh
+        longScore += wFvg
+        longConfirmations += 1
+    if bearFvgFresh
+        shortScore += wFvg
+        shortConfirmations += 1
+
+// Sweep
+if sweepEnabled
+    longTotal += sweepWeight
+    shortTotal += sweepWeight
+    if bullSweepFresh
+        longScore += wSweep
+        longConfirmations += 1
+    if bearSweepFresh
+        shortScore += wSweep
+        shortConfirmations += 1
+
+// Range
+if rangeEnabled
+    longTotal += rangeWeight
+    shortTotal += rangeWeight
+    if rangePositionLong
+        longScore += wRange
+        longConfirmations += 1
+    if rangePositionShort
+        shortScore += wRange
+        shortConfirmations += 1
+
+// Confluence DERIVED
+if conflEnabled
+    longTotal += conflWeight
+    shortTotal += conflWeight
+    if bullConfluence
+        longScore += wConfluence
+        longConfirmations += 1
+    if bearConfluence
+        shortScore += wConfluence
+        shortConfirmations += 1
+
+// Internal CONTEXT
+if internalEnabled
+    longTotal += internalWeight
+    shortTotal += internalWeight
+    if internalPhase == "TREND_UP"
+        longScore += wInternal
+        longConfirmations += 1
+    if internalPhase == "TREND_DOWN"
+        shortScore += wInternal
+        shortConfirmations += 1
+
+// Displacement PLACEHOLDER — not scored, only visibility
+// CHOCH PLACEHOLDER — shares INTERNAL_TREND, disabled to avoid double count
+
+// Trend policy
+if trendEnabled
+    if trendMode != "OFF"
+        if trendPolicy == "SCORE_BOOST"
+            if trendBull
+                longScore += trendWeight
+            else
+                longScore -= counterPenalty
+            if trendBear
+                shortScore += trendWeight
+            else
+                shortScore -= counterPenalty
+        if trendPolicy == "TIERING"
+            // Tiering: boost only if already above 50% threshold
+            if longScore >= minScoreInput * 0.5 and trendBull
+                longScore += trendWeight
+            if shortScore >= minScoreInput * 0.5 and trendBear
+                shortScore += trendWeight
+        if trendPolicy == "HARD_ALIGNMENT"
+            if not trendBull
+                longScore := -100
+            if not trendBear
+                shortScore := -100
+
+// Clamp 0..100
+longScore := math.max(0, math.min(100, longScore))
+shortScore := math.max(0, math.min(100, shortScore))
+
+// ==== EDGE episode semantics — server lib/signals/v2-signal-engine.ts ====
+// EDGE: first time score crosses threshold after BOS + confirmation, confirmed close only
+// HOLD: continues to hold if score remains above threshold in same direction
+// REARM: after score drops below threshold then crosses again
+// REVERSAL: opposite direction EDGE
+
+var string edgeState = "NONE" // NONE, EDGE_LONG, EDGE_SHORT, HOLD_LONG, HOLD_SHORT, REARM_LONG, REARM_SHORT
+var int lastEdgeBar = na
+var string lastEdgeDir = "NONE"
+
+isLongEdgeCandidate = barstate.isconfirmed and longScore >= minScoreInput and bullBos and longConfirmations >= 2
+isShortEdgeCandidate = barstate.isconfirmed and shortScore >= minScoreInput and bearBos and shortConfirmations >= 2
+
+// Simple EDGE state machine (closed bars only)
+newEdgeLong = false
+newEdgeShort = false
+
+if isLongEdgeCandidate
+    if lastEdgeDir != "LONG" or na(lastEdgeBar) or (bar_index - lastEdgeBar) > 10
+        edgeState := "EDGE_LONG"
+        newEdgeLong := true
+        lastEdgeDir := "LONG"
+        lastEdgeBar := bar_index
+    else
+        edgeState := "HOLD_LONG"
+
+if isShortEdgeCandidate
+    if lastEdgeDir != "SHORT" or na(lastEdgeBar) or (bar_index - lastEdgeBar) > 10
+        edgeState := "EDGE_SHORT"
+        newEdgeShort := true
+        lastEdgeDir := "SHORT"
+        lastEdgeBar := bar_index
+    else
+        edgeState := "HOLD_SHORT"
+
+if not isLongEdgeCandidate and not isShortEdgeCandidate
+    // No edge, but keep last state unless timeout
+    if not na(lastEdgeBar) and (bar_index - lastEdgeBar) > 20
+        edgeState := "NONE"
+
+// ==== SL/TP based on ATR — mirror server atr ====
+longSL = close - atr * atrStopMult
+longTP1 = close + atr * atrTp1Mult
+longTP2 = close + atr * atrTp2Mult
+longTP3 = close + atr * atrTp3Mult
+
+shortSL = close + atr * atrStopMult
+shortTP1 = close - atr * atrTp1Mult
+shortTP2 = close - atr * atrTp2Mult
+shortTP3 = close - atr * atrTp3Mult
+
+// ==== Plotting — compact, no repaint ====
+plot(na, title="Hidden", display=display.none)
+
+if showBos
+    plotshape(bullBos and barstate.isconfirmed, title="Bull BOS", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.tiny, text="BOS↑")
+    plotshape(bearBos and barstate.isconfirmed, title="Bear BOS", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.tiny, text="BOS↓")
+
+if showSweep
+    plotshape(bullSweep and barstate.isconfirmed, title="Bull Sweep", style=shape.circle, location=location.belowbar, color=color.new(color.blue, 0), size=size.tiny, text="SWEEP↑")
+    plotshape(bearSweep and barstate.isconfirmed, title="Bear Sweep", style=shape.circle, location=location.abovebar, color=color.new(color.orange, 0), size=size.tiny, text="SWEEP↓")
+
+if showFvg
+    // FVG boxes — only on confirmed bars
+    if bullFvg and barstate.isconfirmed
+        box.new(bar_index[1], bullFvgTop, bar_index, bullFvgBottom, bgcolor=color.new(color.green, 80), border_color=color.new(color.green, 0))
+    if bearFvg and barstate.isconfirmed
+        box.new(bar_index[1], bearFvgTop, bar_index, bearFvgBottom, bgcolor=color.new(color.red, 80), border_color=color.new(color.red, 0))
+
+if showOb
+    if bullObFound and barstate.isconfirmed
+        b = box.new(bar_index, bullObHigh, bar_index + 20, bullObLow, bgcolor=color.new(color.green, 85), border_color=color.new(color.green, 50))
+        array.push(bullObBoxes, b)
+    if bearObFound and barstate.isconfirmed
+        b = box.new(bar_index, bearObHigh, bar_index + 20, bearObLow, bgcolor=color.new(color.red, 85), border_color=color.new(color.red, 50))
+        array.push(bearObBoxes, b)
+
+// Score table — compact
+if showScore and barstate.islast
+    var table scoreTable = table.new(position.top_right, 4, 8, bgcolor=color.new(color.black, 80), border_width=1)
+    table.cell(scoreTable, 0, 0, "V2 " + modeInput, text_color=color.white, text_size=size.tiny)
+    table.cell(scoreTable, 1, 0, "LONG " + str.tostring(longScore), text_color=longScore >= minScoreInput ? color.green : color.gray, text_size=size.tiny)
+    table.cell(scoreTable, 2, 0, "SHORT " + str.tostring(shortScore), text_color=shortScore >= minScoreInput ? color.red : color.gray, text_size=size.tiny)
+    table.cell(scoreTable, 3, 0, edgeState, text_color=color.yellow, text_size=size.tiny)
+
+    table.cell(scoreTable, 0, 1, "BOS", text_color=color.white, text_size=size.tiny)
+    table.cell(scoreTable, 1, 1, bullBos ? "✓" : "○", text_color=color.green, text_size=size.tiny)
+    table.cell(scoreTable, 2, 1, bearBos ? "✓" : "○", text_color=color.red, text_size=size.tiny)
+    table.cell(scoreTable, 3, 1, "IND req", text_color=color.gray, text_size=size.tiny)
+
+    table.cell(scoreTable, 0, 2, "OB", text_color=color.white, text_size=size.tiny)
+    table.cell(scoreTable, 1, 2, bullObFound ? "✓" : "○", text_color=color.green, text_size=size.tiny)
+    table.cell(scoreTable, 2, 2, bearObFound ? "✓" : "○", text_color=color.red, text_size=size.tiny)
+    table.cell(scoreTable, 3, 2, "IND req", text_color=color.gray, text_size=size.tiny)
+
+    table.cell(scoreTable, 0, 3, "FVG", text_color=color.white, text_size=size.tiny)
+    table.cell(scoreTable, 1, 3, bullFvgFresh ? "✓" : "○", text_color=color.green, text_size=size.tiny)
+    table.cell(scoreTable, 2, 3, bearFvgFresh ? "✓" : "○", text_color=color.red, text_size=size.tiny)
+    table.cell(scoreTable, 3, 3, "IND", text_color=color.gray, text_size=size.tiny)
+
+    table.cell(scoreTable, 0, 4, "Sweep", text_color=color.white, text_size=size.tiny)
+    table.cell(scoreTable, 1, 4, bullSweepFresh ? "✓" : "○", text_color=color.green, text_size=size.tiny)
+    table.cell(scoreTable, 2, 4, bearSweepFresh ? "✓" : "○", text_color=color.red, text_size=size.tiny)
+    table.cell(scoreTable, 3, 4, "IND", text_color=color.gray, text_size=size.tiny)
+
+    table.cell(scoreTable, 0, 5, "Range", text_color=color.white, text_size=size.tiny)
+    table.cell(scoreTable, 1, 5, rangePositionLong ? "✓" : "○", text_color=color.green, text_size=size.tiny)
+    table.cell(scoreTable, 2, 5, rangePositionShort ? "✓" : "○", text_color=color.red, text_size=size.tiny)
+    table.cell(scoreTable, 3, 5, "IND", text_color=color.gray, text_size=size.tiny)
+
+    table.cell(scoreTable, 0, 6, "Confl", text_color=color.white, text_size=size.tiny)
+    table.cell(scoreTable, 1, 6, bullConfluence ? "✓" : "○", text_color=color.green, text_size=size.tiny)
+    table.cell(scoreTable, 2, 6, bearConfluence ? "✓" : "○", text_color=color.red, text_size=size.tiny)
+    table.cell(scoreTable, 3, 6, "DERIVED", text_color=color.orange, text_size=size.tiny)
+
+    table.cell(scoreTable, 0, 7, "Internal", text_color=color.white, text_size=size.tiny)
+    table.cell(scoreTable, 1, 7, internalPhase == "TREND_UP" ? "✓" : "○", text_color=color.green, text_size=size.tiny)
+    table.cell(scoreTable, 2, 7, internalPhase == "TREND_DOWN" ? "✓" : "○", text_color=color.red, text_size=size.tiny)
+    table.cell(scoreTable, 3, 7, "CONTEXT", text_color=color.blue, text_size=size.tiny)
+
+// LONG/SHORT signals — EDGE only, confirmed close
+plotshape(newEdgeLong, title="V2 LONG EDGE", style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), textcolor=color.white, size=size.small, text="V2 LONG\n" + str.tostring(longScore))
+plotshape(newEdgeShort, title="V2 SHORT EDGE", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.small, text="V2 SHORT\n" + str.tostring(shortScore))
+
+// SL/TP lines for last EDGE
+var line longSLLine = na
+var line longTP1Line = na
+var line longTP2Line = na
+var line longTP3Line = na
+var line shortSLLine = na
+var line shortTP1Line = na
+var line shortTP2Line = na
+var line shortTP3Line = na
+
+if newEdgeLong and barstate.isconfirmed
+    if not na(longSLLine)
+        line.delete(longSLLine)
+    if not na(longTP1Line)
+        line.delete(longTP1Line)
+    if not na(longTP2Line)
+        line.delete(longTP2Line)
+    if not na(longTP3Line)
+        line.delete(longTP3Line)
+    longSLLine := line.new(bar_index, longSL, bar_index + 20, longSL, color=color.red, width=1, style=line.style_dashed)
+    longTP1Line := line.new(bar_index, longTP1, bar_index + 20, longTP1, color=color.green, width=1, style=line.style_dashed)
+    longTP2Line := line.new(bar_index, longTP2, bar_index + 20, longTP2, color=color.green, width=1, style=line.style_dotted)
+    longTP3Line := line.new(bar_index, longTP3, bar_index + 20, longTP3, color=color.green, width=2, style=line.style_dotted)
+
+if newEdgeShort and barstate.isconfirmed
+    if not na(shortSLLine)
+        line.delete(shortSLLine)
+    if not na(shortTP1Line)
+        line.delete(shortTP1Line)
+    if not na(shortTP2Line)
+        line.delete(shortTP2Line)
+    if not na(shortTP3Line)
+        line.delete(shortTP3Line)
+    shortSLLine := line.new(bar_index, shortSL, bar_index + 20, shortSL, color=color.red, width=1, style=line.style_dashed)
+    shortTP1Line := line.new(bar_index, shortTP1, bar_index + 20, shortTP1, color=color.green, width=1, style=line.style_dashed)
+    shortTP2Line := line.new(bar_index, shortTP2, bar_index + 20, shortTP2, color=color.green, width=1, style=line.style_dotted)
+    shortTP3Line := line.new(bar_index, shortTP3, bar_index + 20, shortTP3, color=color.green, width=2, style=line.style_dotted)
+
+// Alerts — LONG/SHORT
+alertcondition(newEdgeLong, title="V2 LONG EDGE", message="Smart Money V2 LONG EDGE {{ticker}} TF {{interval}} Score {{longScore}} Conf {{longConfirmations}}/{{longTotal}} BOS {{bullBos}} OB {{bullObFound}} FVG {{bullFvgFresh}} Sweep {{bullSweepFresh}} Range {{rangePositionLong}} Confluence {{bullConfluence}} Internal {{internalPhase}} Trend {{trendMode}} {{trendPolicy}} SL {{longSL}} TP1 {{longTP1}} TP2 {{longTP2}} TP3 {{longTP3}}")
+alertcondition(newEdgeShort, title="V2 SHORT EDGE", message="Smart Money V2 SHORT EDGE {{ticker}} TF {{interval}} Score {{shortScore}} Conf {{shortConfirmations}}/{{shortTotal}} BOS {{bearBos}} OB {{bearObFound}} FVG {{bearFvgFresh}} Sweep {{bearSweepFresh}} Range {{rangePositionShort}} Confluence {{bearConfluence}} Internal {{internalPhase}} Trend {{trendMode}} {{trendPolicy}} SL {{shortSL}} TP1 {{shortTP1}} TP2 {{shortTP2}} TP3 {{shortTP3}}")
+
+// Info label for debugging — only on last bar, shows categories and that CHOCH/Displacement are PLACEHOLDER
+if barstate.islast and showScore
+    label.new(bar_index, high, "V2 Categories:\nBOS INDEPENDENT req W" + str.tostring(bosWeight) + "\nOB INDEPENDENT req W" + str.tostring(obWeight) + "\nFVG INDEPENDENT W" + str.tostring(fvgWeight) + "\nSweep INDEPENDENT W" + str.tostring(sweepWeight) + "\nRange INDEPENDENT W" + str.tostring(rangeWeight) + "\nConfluence DERIVED bonus W" + str.tostring(conflWeight) + "\nInternal CONTEXT W" + str.tostring(internalWeight) + "\nCHOCH PLACEHOLDER disabled (duplicate INTERNAL_TREND)\nDisplacement PLACEHOLDER disabled (no reason yet)\nTrend " + trendMode + " " + trendPolicy + " W" + str.tostring(trendWeight) + "\nScore LONG " + str.tostring(longScore) + " SHORT " + str.tostring(shortScore) + " Min " + str.tostring(minScoreInput) + "\nConfirmations LONG " + str.tostring(longConfirmations) + "/" + str.tostring(longTotal) + " SHORT " + str.tostring(shortConfirmations) + "/" + str.tostring(shortTotal) + "\nEDGE state " + edgeState + " Mode " + modeInput + " Ref " + referenceExchangeInput + "\nClosed bars only, no lookahead", style=label.style_label_down, color=color.new(color.black, 80), textcolor=color.white, size=size.tiny)
