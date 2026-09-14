@@ -203,5 +203,22 @@ module.exports = {
       max_memory_restart: "300M",
       cron_restart: "2,17,32,47 * * * *",
     },
+    {
+      name: "svechnoy-suslik-signal-outcome",
+      script: "npx",
+      args: "tsx scripts/signal-outcome-worker.ts --once",
+      cwd: "/root/svechnoy-suslik",
+      interpreter: "none",
+      instances: 1,
+      exec_mode: "fork",
+      autorestart: false,
+      watch: false,
+      env: {
+        NODE_ENV: "production",
+      },
+      restart_delay: 0,
+      max_memory_restart: "300M",
+      cron_restart: "*/2 * * * *",
+    },
   ],
 };
