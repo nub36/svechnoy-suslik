@@ -1,0 +1,2426 @@
+{
+  "source": "SYNTHETIC forced 5856 candles",
+  "dateRange": {
+    "from": "2026-08-01T00:00:00.000Z",
+    "to": "2026-10-01T00:00:00.000Z"
+  },
+  "splits": {
+    "train": {
+      "from": "2026-08-01T00:00:00.000Z",
+      "to": "2026-09-06T14:24:00.000Z"
+    },
+    "validation": {
+      "from": "2026-09-06T14:24:00.000Z",
+      "to": "2026-09-18T19:12:00.000Z"
+    },
+    "oos": {
+      "from": "2026-09-18T19:12:00.000Z",
+      "to": "2026-10-01T00:00:00.000Z"
+    }
+  },
+  "v1Baseline": {
+    "totalSignals": 8,
+    "metrics": {
+      "name": "AGGREGATE",
+      "from": "2026-08-01T00:00:00.000Z",
+      "to": "2026-10-01T00:00:00.000Z",
+      "signals": 8,
+      "signalsPerDay": 0.131,
+      "longCount": 3,
+      "shortCount": 5,
+      "longRate": 0.375,
+      "shortRate": 0.625,
+      "edgeEpisodes": 8,
+      "tp1BeforeSl": 8,
+      "tp2BeforeSl": 8,
+      "tp3BeforeSl": 8,
+      "stopBeforeTp1": 0,
+      "tp1Rate": 1,
+      "tp2Rate": 1,
+      "tp3Rate": 1,
+      "stopRate": 0,
+      "avgScore": 40,
+      "avgBarsHeld": 5.4
+    },
+    "splits": [
+      {
+        "name": "TRAIN",
+        "from": "2026-08-01T00:00:00.000Z",
+        "to": "2026-09-06T14:24:00.000Z",
+        "signals": 2,
+        "signalsPerDay": 0.055,
+        "longCount": 2,
+        "shortCount": 0,
+        "longRate": 1,
+        "shortRate": 0,
+        "edgeEpisodes": 2,
+        "tp1BeforeSl": 2,
+        "tp2BeforeSl": 2,
+        "tp3BeforeSl": 2,
+        "stopBeforeTp1": 0,
+        "tp1Rate": 1,
+        "tp2Rate": 1,
+        "tp3Rate": 1,
+        "stopRate": 0,
+        "avgScore": 40,
+        "avgBarsHeld": 6
+      },
+      {
+        "name": "VALIDATION",
+        "from": "2026-09-06T14:24:00.000Z",
+        "to": "2026-09-18T19:12:00.000Z",
+        "signals": 6,
+        "signalsPerDay": 0.492,
+        "longCount": 1,
+        "shortCount": 5,
+        "longRate": 0.167,
+        "shortRate": 0.833,
+        "edgeEpisodes": 6,
+        "tp1BeforeSl": 6,
+        "tp2BeforeSl": 6,
+        "tp3BeforeSl": 6,
+        "stopBeforeTp1": 0,
+        "tp1Rate": 1,
+        "tp2Rate": 1,
+        "tp3Rate": 1,
+        "stopRate": 0,
+        "avgScore": 40,
+        "avgBarsHeld": 5.2
+      },
+      {
+        "name": "OOS",
+        "from": "2026-09-18T19:12:00.000Z",
+        "to": "2026-10-01T00:00:00.000Z",
+        "signals": 0,
+        "signalsPerDay": 0,
+        "longCount": 0,
+        "shortCount": 0,
+        "longRate": 0,
+        "shortRate": 0,
+        "edgeEpisodes": 0,
+        "tp1BeforeSl": 0,
+        "tp2BeforeSl": 0,
+        "tp3BeforeSl": 0,
+        "stopBeforeTp1": 0,
+        "tp1Rate": 0,
+        "tp2Rate": 0,
+        "tp3Rate": 0,
+        "stopRate": 0,
+        "avgScore": 0,
+        "avgBarsHeld": 0
+      }
+    ],
+    "config": {
+      "tf": "15m",
+      "minimumScore": 40,
+      "swingLeft": 20,
+      "swingRight": 20,
+      "internalLeft": 3,
+      "internalRight": 3,
+      "atrPeriod": 14,
+      "structureEventFreshBars": 10,
+      "sweepFreshBars": 5,
+      "orderBlockFreshBars": 20,
+      "fvgFreshBars": 20,
+      "eqBand": 0.02,
+      "weights": {
+        "swingStructureBias": 20,
+        "recentSwingBos": 15,
+        "internalStructure": 10,
+        "liquiditySweep": 10,
+        "swingOrderBlock": 15,
+        "internalOrderBlock": 5,
+        "fvg": 10,
+        "rangePosition": 10,
+        "confluence": 5
+      }
+    }
+  },
+  "v2Candidates": [
+    {
+      "model": "V2-OFF (no trend)",
+      "trendMode": "OFF",
+      "policy": "SCORE_BOOST",
+      "config": {
+        "mode": "DISABLED",
+        "symbol": "BTC",
+        "timeframe": "15m",
+        "referenceExchange": "BINANCE",
+        "minimumSignalScore": 35,
+        "swingLeft": 20,
+        "swingRight": 20,
+        "internalLeft": 3,
+        "internalRight": 3,
+        "atrPeriod": 14,
+        "structureEventFreshBars": 10,
+        "sweepFreshBars": 5,
+        "orderBlockFreshBars": 20,
+        "fvgFreshBars": 20,
+        "eqBand": 0.02,
+        "weights": {
+          "swingStructureBias": 20,
+          "recentSwingBos": 15,
+          "internalStructure": 10,
+          "liquiditySweep": 10,
+          "swingOrderBlock": 15,
+          "internalOrderBlock": 5,
+          "fvg": 10,
+          "rangePosition": 10,
+          "confluence": 5
+        },
+        "confirmations": {
+          "bos": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Break of Structure — SWING_TREND + RECENT_SWING_BOS"
+          },
+          "choch": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Change of Character — duplicate of internalStructure (INTERNAL_TREND), disabled to avoid double count"
+          },
+          "orderBlock": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Order Block — SWING_ORDER_BLOCK (or INTERNAL as fallback)"
+          },
+          "fvg": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Fair Value Gap — FVG"
+          },
+          "liquiditySweep": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Liquidity Sweep — LIQUIDITY_SWEEP"
+          },
+          "displacement": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Displacement — evaluateSmc exposes displacements[] but scoring has no DISPLACEMENT reason yet, placeholder until exposed"
+          },
+          "rangePosition": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Premium/Discount — RANGE_POSITION"
+          },
+          "confluence": {
+            "enabled": true,
+            "weight": 5,
+            "required": false,
+            "category": "DERIVED",
+            "description": "OB+FVG confluence — OB_FVG_CONFLUENCE overlap bonus, derived, not duplicate weight"
+          },
+          "internalStructure": {
+            "enabled": true,
+            "weight": 10,
+            "required": false,
+            "category": "CONTEXT",
+            "description": "Internal structure bias — INTERNAL_TREND context"
+          }
+        },
+        "trend": {
+          "enabled": true,
+          "mode": "OFF",
+          "policy": "SCORE_BOOST",
+          "emaFast": 20,
+          "emaSlow": 50,
+          "emaSlopeLookback": 5,
+          "htfTimeframe": "1h",
+          "weight": 15,
+          "counterTrendPenalty": 10
+        },
+        "atr": {
+          "period": 14,
+          "stopMultiplier": 1.5,
+          "takeProfit1Multiplier": 1.5,
+          "takeProfit2Multiplier": 2.5,
+          "takeProfit3Multiplier": 4
+        },
+        "filters": {
+          "minimumQuoteVolume24h": 0,
+          "top500Only": false
+        },
+        "execution": {
+          "closedCandleOnly": true,
+          "cooldownCandles": 3
+        }
+      },
+      "totalSignals": 8,
+      "frequencyVsV1": "100.0%",
+      "splits": [
+        {
+          "name": "TRAIN",
+          "from": "2026-08-01T00:00:00.000Z",
+          "to": "2026-09-06T14:24:00.000Z",
+          "signals": 2,
+          "signalsPerDay": 0.055,
+          "longCount": 2,
+          "shortCount": 0,
+          "longRate": 1,
+          "shortRate": 0,
+          "edgeEpisodes": 2,
+          "tp1BeforeSl": 2,
+          "tp2BeforeSl": 2,
+          "tp3BeforeSl": 2,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 40,
+          "avgBarsHeld": 6
+        },
+        {
+          "name": "VALIDATION",
+          "from": "2026-09-06T14:24:00.000Z",
+          "to": "2026-09-18T19:12:00.000Z",
+          "signals": 6,
+          "signalsPerDay": 0.492,
+          "longCount": 1,
+          "shortCount": 5,
+          "longRate": 0.167,
+          "shortRate": 0.833,
+          "edgeEpisodes": 6,
+          "tp1BeforeSl": 6,
+          "tp2BeforeSl": 6,
+          "tp3BeforeSl": 6,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 40,
+          "avgBarsHeld": 5.2
+        },
+        {
+          "name": "OOS",
+          "from": "2026-09-18T19:12:00.000Z",
+          "to": "2026-10-01T00:00:00.000Z",
+          "signals": 0,
+          "signalsPerDay": 0,
+          "longCount": 0,
+          "shortCount": 0,
+          "longRate": 0,
+          "shortRate": 0,
+          "edgeEpisodes": 0,
+          "tp1BeforeSl": 0,
+          "tp2BeforeSl": 0,
+          "tp3BeforeSl": 0,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 0,
+          "tp2Rate": 0,
+          "tp3Rate": 0,
+          "stopRate": 0,
+          "avgScore": 0,
+          "avgBarsHeld": 0
+        }
+      ],
+      "aggregate": {
+        "name": "AGGREGATE",
+        "from": "2026-08-01T00:00:00.000Z",
+        "to": "2026-10-01T00:00:00.000Z",
+        "signals": 8,
+        "signalsPerDay": 0.131,
+        "longCount": 3,
+        "shortCount": 5,
+        "longRate": 0.375,
+        "shortRate": 0.625,
+        "edgeEpisodes": 8,
+        "tp1BeforeSl": 8,
+        "tp2BeforeSl": 8,
+        "tp3BeforeSl": 8,
+        "stopBeforeTp1": 0,
+        "tp1Rate": 1,
+        "tp2Rate": 1,
+        "tp3Rate": 1,
+        "stopRate": 0,
+        "avgScore": 40,
+        "avgBarsHeld": 5.4
+      },
+      "longAggregate": {
+        "count": 3,
+        "tp1": 3,
+        "tp2": 3,
+        "tp3": 3,
+        "stop": 0
+      },
+      "shortAggregate": {
+        "count": 5,
+        "tp1": 5,
+        "tp2": 5,
+        "tp3": 5,
+        "stop": 0
+      },
+      "regression": {
+        "episode": "2026-09-13 08:15 SHORT -> 11:00 REARM",
+        "v1Action": "V1 baseline: SHORT at 08:15, REARM at 11:00 (expected ONE episode)",
+        "v2Action": "SHORT longScore 10 shortScore 55 met 4/7",
+        "detail": "Evaluation at exact regression candle 2026-09-13T08:15:00.000Z: SHORT longScore 10 shortScore 55 met 4/7"
+      }
+    },
+    {
+      "model": "V2-A SMC+MARKET_STRUCTURE SCORE_BOOST",
+      "trendMode": "MARKET_STRUCTURE",
+      "policy": "SCORE_BOOST",
+      "config": {
+        "mode": "DISABLED",
+        "symbol": "BTC",
+        "timeframe": "15m",
+        "referenceExchange": "BINANCE",
+        "minimumSignalScore": 35,
+        "swingLeft": 20,
+        "swingRight": 20,
+        "internalLeft": 3,
+        "internalRight": 3,
+        "atrPeriod": 14,
+        "structureEventFreshBars": 10,
+        "sweepFreshBars": 5,
+        "orderBlockFreshBars": 20,
+        "fvgFreshBars": 20,
+        "eqBand": 0.02,
+        "weights": {
+          "swingStructureBias": 20,
+          "recentSwingBos": 15,
+          "internalStructure": 10,
+          "liquiditySweep": 10,
+          "swingOrderBlock": 15,
+          "internalOrderBlock": 5,
+          "fvg": 10,
+          "rangePosition": 10,
+          "confluence": 5
+        },
+        "confirmations": {
+          "bos": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Break of Structure — SWING_TREND + RECENT_SWING_BOS"
+          },
+          "choch": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Change of Character — duplicate of internalStructure (INTERNAL_TREND), disabled to avoid double count"
+          },
+          "orderBlock": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Order Block — SWING_ORDER_BLOCK (or INTERNAL as fallback)"
+          },
+          "fvg": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Fair Value Gap — FVG"
+          },
+          "liquiditySweep": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Liquidity Sweep — LIQUIDITY_SWEEP"
+          },
+          "displacement": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Displacement — evaluateSmc exposes displacements[] but scoring has no DISPLACEMENT reason yet, placeholder until exposed"
+          },
+          "rangePosition": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Premium/Discount — RANGE_POSITION"
+          },
+          "confluence": {
+            "enabled": true,
+            "weight": 5,
+            "required": false,
+            "category": "DERIVED",
+            "description": "OB+FVG confluence — OB_FVG_CONFLUENCE overlap bonus, derived, not duplicate weight"
+          },
+          "internalStructure": {
+            "enabled": true,
+            "weight": 10,
+            "required": false,
+            "category": "CONTEXT",
+            "description": "Internal structure bias — INTERNAL_TREND context"
+          }
+        },
+        "trend": {
+          "enabled": true,
+          "mode": "MARKET_STRUCTURE",
+          "policy": "SCORE_BOOST",
+          "emaFast": 20,
+          "emaSlow": 50,
+          "emaSlopeLookback": 5,
+          "htfTimeframe": "1h",
+          "weight": 15,
+          "counterTrendPenalty": 10
+        },
+        "atr": {
+          "period": 14,
+          "stopMultiplier": 1.5,
+          "takeProfit1Multiplier": 1.5,
+          "takeProfit2Multiplier": 2.5,
+          "takeProfit3Multiplier": 4
+        },
+        "filters": {
+          "minimumQuoteVolume24h": 0,
+          "top500Only": false
+        },
+        "execution": {
+          "closedCandleOnly": true,
+          "cooldownCandles": 3
+        }
+      },
+      "totalSignals": 8,
+      "frequencyVsV1": "100.0%",
+      "splits": [
+        {
+          "name": "TRAIN",
+          "from": "2026-08-01T00:00:00.000Z",
+          "to": "2026-09-06T14:24:00.000Z",
+          "signals": 2,
+          "signalsPerDay": 0.055,
+          "longCount": 2,
+          "shortCount": 0,
+          "longRate": 1,
+          "shortRate": 0,
+          "edgeEpisodes": 2,
+          "tp1BeforeSl": 2,
+          "tp2BeforeSl": 2,
+          "tp3BeforeSl": 2,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 55,
+          "avgBarsHeld": 6
+        },
+        {
+          "name": "VALIDATION",
+          "from": "2026-09-06T14:24:00.000Z",
+          "to": "2026-09-18T19:12:00.000Z",
+          "signals": 6,
+          "signalsPerDay": 0.492,
+          "longCount": 1,
+          "shortCount": 5,
+          "longRate": 0.167,
+          "shortRate": 0.833,
+          "edgeEpisodes": 6,
+          "tp1BeforeSl": 6,
+          "tp2BeforeSl": 6,
+          "tp3BeforeSl": 6,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 55,
+          "avgBarsHeld": 5.2
+        },
+        {
+          "name": "OOS",
+          "from": "2026-09-18T19:12:00.000Z",
+          "to": "2026-10-01T00:00:00.000Z",
+          "signals": 0,
+          "signalsPerDay": 0,
+          "longCount": 0,
+          "shortCount": 0,
+          "longRate": 0,
+          "shortRate": 0,
+          "edgeEpisodes": 0,
+          "tp1BeforeSl": 0,
+          "tp2BeforeSl": 0,
+          "tp3BeforeSl": 0,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 0,
+          "tp2Rate": 0,
+          "tp3Rate": 0,
+          "stopRate": 0,
+          "avgScore": 0,
+          "avgBarsHeld": 0
+        }
+      ],
+      "aggregate": {
+        "name": "AGGREGATE",
+        "from": "2026-08-01T00:00:00.000Z",
+        "to": "2026-10-01T00:00:00.000Z",
+        "signals": 8,
+        "signalsPerDay": 0.131,
+        "longCount": 3,
+        "shortCount": 5,
+        "longRate": 0.375,
+        "shortRate": 0.625,
+        "edgeEpisodes": 8,
+        "tp1BeforeSl": 8,
+        "tp2BeforeSl": 8,
+        "tp3BeforeSl": 8,
+        "stopBeforeTp1": 0,
+        "tp1Rate": 1,
+        "tp2Rate": 1,
+        "tp3Rate": 1,
+        "stopRate": 0,
+        "avgScore": 55,
+        "avgBarsHeld": 5.4
+      },
+      "longAggregate": {
+        "count": 3,
+        "tp1": 3,
+        "tp2": 3,
+        "tp3": 3,
+        "stop": 0
+      },
+      "shortAggregate": {
+        "count": 5,
+        "tp1": 5,
+        "tp2": 5,
+        "tp3": 5,
+        "stop": 0
+      },
+      "regression": {
+        "episode": "2026-09-13 08:15 SHORT -> 11:00 REARM",
+        "v1Action": "V1 baseline: SHORT at 08:15, REARM at 11:00 (expected ONE episode)",
+        "v2Action": "SHORT longScore 10 shortScore 70 met 4/7",
+        "detail": "Evaluation at exact regression candle 2026-09-13T08:15:00.000Z: SHORT longScore 10 shortScore 70 met 4/7"
+      }
+    },
+    {
+      "model": "V2-B SMC+EMA SCORE_BOOST",
+      "trendMode": "EMA",
+      "policy": "SCORE_BOOST",
+      "config": {
+        "mode": "DISABLED",
+        "symbol": "BTC",
+        "timeframe": "15m",
+        "referenceExchange": "BINANCE",
+        "minimumSignalScore": 35,
+        "swingLeft": 20,
+        "swingRight": 20,
+        "internalLeft": 3,
+        "internalRight": 3,
+        "atrPeriod": 14,
+        "structureEventFreshBars": 10,
+        "sweepFreshBars": 5,
+        "orderBlockFreshBars": 20,
+        "fvgFreshBars": 20,
+        "eqBand": 0.02,
+        "weights": {
+          "swingStructureBias": 20,
+          "recentSwingBos": 15,
+          "internalStructure": 10,
+          "liquiditySweep": 10,
+          "swingOrderBlock": 15,
+          "internalOrderBlock": 5,
+          "fvg": 10,
+          "rangePosition": 10,
+          "confluence": 5
+        },
+        "confirmations": {
+          "bos": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Break of Structure — SWING_TREND + RECENT_SWING_BOS"
+          },
+          "choch": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Change of Character — duplicate of internalStructure (INTERNAL_TREND), disabled to avoid double count"
+          },
+          "orderBlock": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Order Block — SWING_ORDER_BLOCK (or INTERNAL as fallback)"
+          },
+          "fvg": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Fair Value Gap — FVG"
+          },
+          "liquiditySweep": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Liquidity Sweep — LIQUIDITY_SWEEP"
+          },
+          "displacement": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Displacement — evaluateSmc exposes displacements[] but scoring has no DISPLACEMENT reason yet, placeholder until exposed"
+          },
+          "rangePosition": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Premium/Discount — RANGE_POSITION"
+          },
+          "confluence": {
+            "enabled": true,
+            "weight": 5,
+            "required": false,
+            "category": "DERIVED",
+            "description": "OB+FVG confluence — OB_FVG_CONFLUENCE overlap bonus, derived, not duplicate weight"
+          },
+          "internalStructure": {
+            "enabled": true,
+            "weight": 10,
+            "required": false,
+            "category": "CONTEXT",
+            "description": "Internal structure bias — INTERNAL_TREND context"
+          }
+        },
+        "trend": {
+          "enabled": true,
+          "mode": "EMA",
+          "policy": "SCORE_BOOST",
+          "emaFast": 20,
+          "emaSlow": 50,
+          "emaSlopeLookback": 5,
+          "htfTimeframe": "1h",
+          "weight": 15,
+          "counterTrendPenalty": 10
+        },
+        "atr": {
+          "period": 14,
+          "stopMultiplier": 1.5,
+          "takeProfit1Multiplier": 1.5,
+          "takeProfit2Multiplier": 2.5,
+          "takeProfit3Multiplier": 4
+        },
+        "filters": {
+          "minimumQuoteVolume24h": 0,
+          "top500Only": false
+        },
+        "execution": {
+          "closedCandleOnly": true,
+          "cooldownCandles": 3
+        }
+      },
+      "totalSignals": 7,
+      "frequencyVsV1": "87.5%",
+      "splits": [
+        {
+          "name": "TRAIN",
+          "from": "2026-08-01T00:00:00.000Z",
+          "to": "2026-09-06T14:24:00.000Z",
+          "signals": 2,
+          "signalsPerDay": 0.055,
+          "longCount": 2,
+          "shortCount": 0,
+          "longRate": 1,
+          "shortRate": 0,
+          "edgeEpisodes": 2,
+          "tp1BeforeSl": 2,
+          "tp2BeforeSl": 1,
+          "tp3BeforeSl": 1,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 0.5,
+          "tp3Rate": 0.5,
+          "stopRate": 0,
+          "avgScore": 55,
+          "avgBarsHeld": 4.5
+        },
+        {
+          "name": "VALIDATION",
+          "from": "2026-09-06T14:24:00.000Z",
+          "to": "2026-09-18T19:12:00.000Z",
+          "signals": 5,
+          "signalsPerDay": 0.41,
+          "longCount": 1,
+          "shortCount": 4,
+          "longRate": 0.2,
+          "shortRate": 0.8,
+          "edgeEpisodes": 5,
+          "tp1BeforeSl": 5,
+          "tp2BeforeSl": 5,
+          "tp3BeforeSl": 3,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 0.6,
+          "stopRate": 0,
+          "avgScore": 58,
+          "avgBarsHeld": 4.6
+        },
+        {
+          "name": "OOS",
+          "from": "2026-09-18T19:12:00.000Z",
+          "to": "2026-10-01T00:00:00.000Z",
+          "signals": 0,
+          "signalsPerDay": 0,
+          "longCount": 0,
+          "shortCount": 0,
+          "longRate": 0,
+          "shortRate": 0,
+          "edgeEpisodes": 0,
+          "tp1BeforeSl": 0,
+          "tp2BeforeSl": 0,
+          "tp3BeforeSl": 0,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 0,
+          "tp2Rate": 0,
+          "tp3Rate": 0,
+          "stopRate": 0,
+          "avgScore": 0,
+          "avgBarsHeld": 0
+        }
+      ],
+      "aggregate": {
+        "name": "AGGREGATE",
+        "from": "2026-08-01T00:00:00.000Z",
+        "to": "2026-10-01T00:00:00.000Z",
+        "signals": 7,
+        "signalsPerDay": 0.115,
+        "longCount": 3,
+        "shortCount": 4,
+        "longRate": 0.429,
+        "shortRate": 0.571,
+        "edgeEpisodes": 7,
+        "tp1BeforeSl": 7,
+        "tp2BeforeSl": 6,
+        "tp3BeforeSl": 4,
+        "stopBeforeTp1": 0,
+        "tp1Rate": 1,
+        "tp2Rate": 0.857,
+        "tp3Rate": 0.571,
+        "stopRate": 0,
+        "avgScore": 57.1,
+        "avgBarsHeld": 4.6
+      },
+      "longAggregate": {
+        "count": 3,
+        "tp1": 3,
+        "tp2": 2,
+        "tp3": 1,
+        "stop": 0
+      },
+      "shortAggregate": {
+        "count": 4,
+        "tp1": 4,
+        "tp2": 4,
+        "tp3": 3,
+        "stop": 0
+      },
+      "regression": {
+        "episode": "2026-09-13 08:15 SHORT -> 11:00 REARM",
+        "v1Action": "V1 baseline: SHORT at 08:15, REARM at 11:00 (expected ONE episode)",
+        "v2Action": "SHORT at 2026-09-13T08:00:00.000Z score 70",
+        "detail": "Found 1 signals near 08:15, first SHORT at 2026-09-13T08:00:00.000Z score 70"
+      }
+    },
+    {
+      "model": "V2-C SMC+HTF 1h SCORE_BOOST",
+      "trendMode": "HTF",
+      "policy": "SCORE_BOOST",
+      "config": {
+        "mode": "DISABLED",
+        "symbol": "BTC",
+        "timeframe": "15m",
+        "referenceExchange": "BINANCE",
+        "minimumSignalScore": 35,
+        "swingLeft": 20,
+        "swingRight": 20,
+        "internalLeft": 3,
+        "internalRight": 3,
+        "atrPeriod": 14,
+        "structureEventFreshBars": 10,
+        "sweepFreshBars": 5,
+        "orderBlockFreshBars": 20,
+        "fvgFreshBars": 20,
+        "eqBand": 0.02,
+        "weights": {
+          "swingStructureBias": 20,
+          "recentSwingBos": 15,
+          "internalStructure": 10,
+          "liquiditySweep": 10,
+          "swingOrderBlock": 15,
+          "internalOrderBlock": 5,
+          "fvg": 10,
+          "rangePosition": 10,
+          "confluence": 5
+        },
+        "confirmations": {
+          "bos": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Break of Structure — SWING_TREND + RECENT_SWING_BOS"
+          },
+          "choch": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Change of Character — duplicate of internalStructure (INTERNAL_TREND), disabled to avoid double count"
+          },
+          "orderBlock": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Order Block — SWING_ORDER_BLOCK (or INTERNAL as fallback)"
+          },
+          "fvg": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Fair Value Gap — FVG"
+          },
+          "liquiditySweep": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Liquidity Sweep — LIQUIDITY_SWEEP"
+          },
+          "displacement": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Displacement — evaluateSmc exposes displacements[] but scoring has no DISPLACEMENT reason yet, placeholder until exposed"
+          },
+          "rangePosition": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Premium/Discount — RANGE_POSITION"
+          },
+          "confluence": {
+            "enabled": true,
+            "weight": 5,
+            "required": false,
+            "category": "DERIVED",
+            "description": "OB+FVG confluence — OB_FVG_CONFLUENCE overlap bonus, derived, not duplicate weight"
+          },
+          "internalStructure": {
+            "enabled": true,
+            "weight": 10,
+            "required": false,
+            "category": "CONTEXT",
+            "description": "Internal structure bias — INTERNAL_TREND context"
+          }
+        },
+        "trend": {
+          "enabled": true,
+          "mode": "HTF",
+          "policy": "SCORE_BOOST",
+          "emaFast": 20,
+          "emaSlow": 50,
+          "emaSlopeLookback": 5,
+          "htfTimeframe": "1h",
+          "weight": 15,
+          "counterTrendPenalty": 10
+        },
+        "atr": {
+          "period": 14,
+          "stopMultiplier": 1.5,
+          "takeProfit1Multiplier": 1.5,
+          "takeProfit2Multiplier": 2.5,
+          "takeProfit3Multiplier": 4
+        },
+        "filters": {
+          "minimumQuoteVolume24h": 0,
+          "top500Only": false
+        },
+        "execution": {
+          "closedCandleOnly": true,
+          "cooldownCandles": 3
+        }
+      },
+      "totalSignals": 6,
+      "frequencyVsV1": "75.0%",
+      "splits": [
+        {
+          "name": "TRAIN",
+          "from": "2026-08-01T00:00:00.000Z",
+          "to": "2026-09-06T14:24:00.000Z",
+          "signals": 2,
+          "signalsPerDay": 0.055,
+          "longCount": 2,
+          "shortCount": 0,
+          "longRate": 1,
+          "shortRate": 0,
+          "edgeEpisodes": 2,
+          "tp1BeforeSl": 2,
+          "tp2BeforeSl": 2,
+          "tp3BeforeSl": 2,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 55,
+          "avgBarsHeld": 6
+        },
+        {
+          "name": "VALIDATION",
+          "from": "2026-09-06T14:24:00.000Z",
+          "to": "2026-09-18T19:12:00.000Z",
+          "signals": 4,
+          "signalsPerDay": 0.328,
+          "longCount": 0,
+          "shortCount": 4,
+          "longRate": 0,
+          "shortRate": 1,
+          "edgeEpisodes": 4,
+          "tp1BeforeSl": 4,
+          "tp2BeforeSl": 4,
+          "tp3BeforeSl": 4,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 55,
+          "avgBarsHeld": 4
+        },
+        {
+          "name": "OOS",
+          "from": "2026-09-18T19:12:00.000Z",
+          "to": "2026-10-01T00:00:00.000Z",
+          "signals": 0,
+          "signalsPerDay": 0,
+          "longCount": 0,
+          "shortCount": 0,
+          "longRate": 0,
+          "shortRate": 0,
+          "edgeEpisodes": 0,
+          "tp1BeforeSl": 0,
+          "tp2BeforeSl": 0,
+          "tp3BeforeSl": 0,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 0,
+          "tp2Rate": 0,
+          "tp3Rate": 0,
+          "stopRate": 0,
+          "avgScore": 0,
+          "avgBarsHeld": 0
+        }
+      ],
+      "aggregate": {
+        "name": "AGGREGATE",
+        "from": "2026-08-01T00:00:00.000Z",
+        "to": "2026-10-01T00:00:00.000Z",
+        "signals": 6,
+        "signalsPerDay": 0.098,
+        "longCount": 2,
+        "shortCount": 4,
+        "longRate": 0.333,
+        "shortRate": 0.667,
+        "edgeEpisodes": 6,
+        "tp1BeforeSl": 6,
+        "tp2BeforeSl": 6,
+        "tp3BeforeSl": 6,
+        "stopBeforeTp1": 0,
+        "tp1Rate": 1,
+        "tp2Rate": 1,
+        "tp3Rate": 1,
+        "stopRate": 0,
+        "avgScore": 55,
+        "avgBarsHeld": 4.7
+      },
+      "longAggregate": {
+        "count": 2,
+        "tp1": 2,
+        "tp2": 2,
+        "tp3": 2,
+        "stop": 0
+      },
+      "shortAggregate": {
+        "count": 4,
+        "tp1": 4,
+        "tp2": 4,
+        "tp3": 4,
+        "stop": 0
+      },
+      "regression": {
+        "episode": "2026-09-13 08:15 SHORT -> 11:00 REARM",
+        "v1Action": "V1 baseline: SHORT at 08:15, REARM at 11:00 (expected ONE episode)",
+        "v2Action": "SHORT longScore 10 shortScore 70 met 4/7",
+        "detail": "Evaluation at exact regression candle 2026-09-13T08:15:00.000Z: SHORT longScore 10 shortScore 70 met 4/7"
+      }
+    },
+    {
+      "model": "V2-D SMC+COMBINED SCORE_BOOST",
+      "trendMode": "COMBINED",
+      "policy": "SCORE_BOOST",
+      "config": {
+        "mode": "DISABLED",
+        "symbol": "BTC",
+        "timeframe": "15m",
+        "referenceExchange": "BINANCE",
+        "minimumSignalScore": 35,
+        "swingLeft": 20,
+        "swingRight": 20,
+        "internalLeft": 3,
+        "internalRight": 3,
+        "atrPeriod": 14,
+        "structureEventFreshBars": 10,
+        "sweepFreshBars": 5,
+        "orderBlockFreshBars": 20,
+        "fvgFreshBars": 20,
+        "eqBand": 0.02,
+        "weights": {
+          "swingStructureBias": 20,
+          "recentSwingBos": 15,
+          "internalStructure": 10,
+          "liquiditySweep": 10,
+          "swingOrderBlock": 15,
+          "internalOrderBlock": 5,
+          "fvg": 10,
+          "rangePosition": 10,
+          "confluence": 5
+        },
+        "confirmations": {
+          "bos": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Break of Structure — SWING_TREND + RECENT_SWING_BOS"
+          },
+          "choch": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Change of Character — duplicate of internalStructure (INTERNAL_TREND), disabled to avoid double count"
+          },
+          "orderBlock": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Order Block — SWING_ORDER_BLOCK (or INTERNAL as fallback)"
+          },
+          "fvg": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Fair Value Gap — FVG"
+          },
+          "liquiditySweep": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Liquidity Sweep — LIQUIDITY_SWEEP"
+          },
+          "displacement": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Displacement — evaluateSmc exposes displacements[] but scoring has no DISPLACEMENT reason yet, placeholder until exposed"
+          },
+          "rangePosition": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Premium/Discount — RANGE_POSITION"
+          },
+          "confluence": {
+            "enabled": true,
+            "weight": 5,
+            "required": false,
+            "category": "DERIVED",
+            "description": "OB+FVG confluence — OB_FVG_CONFLUENCE overlap bonus, derived, not duplicate weight"
+          },
+          "internalStructure": {
+            "enabled": true,
+            "weight": 10,
+            "required": false,
+            "category": "CONTEXT",
+            "description": "Internal structure bias — INTERNAL_TREND context"
+          }
+        },
+        "trend": {
+          "enabled": true,
+          "mode": "COMBINED",
+          "policy": "SCORE_BOOST",
+          "emaFast": 20,
+          "emaSlow": 50,
+          "emaSlopeLookback": 5,
+          "htfTimeframe": "1h",
+          "weight": 15,
+          "counterTrendPenalty": 10
+        },
+        "atr": {
+          "period": 14,
+          "stopMultiplier": 1.5,
+          "takeProfit1Multiplier": 1.5,
+          "takeProfit2Multiplier": 2.5,
+          "takeProfit3Multiplier": 4
+        },
+        "filters": {
+          "minimumQuoteVolume24h": 0,
+          "top500Only": false
+        },
+        "execution": {
+          "closedCandleOnly": true,
+          "cooldownCandles": 3
+        }
+      },
+      "totalSignals": 6,
+      "frequencyVsV1": "75.0%",
+      "splits": [
+        {
+          "name": "TRAIN",
+          "from": "2026-08-01T00:00:00.000Z",
+          "to": "2026-09-06T14:24:00.000Z",
+          "signals": 2,
+          "signalsPerDay": 0.055,
+          "longCount": 2,
+          "shortCount": 0,
+          "longRate": 1,
+          "shortRate": 0,
+          "edgeEpisodes": 2,
+          "tp1BeforeSl": 2,
+          "tp2BeforeSl": 2,
+          "tp3BeforeSl": 2,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 55,
+          "avgBarsHeld": 6
+        },
+        {
+          "name": "VALIDATION",
+          "from": "2026-09-06T14:24:00.000Z",
+          "to": "2026-09-18T19:12:00.000Z",
+          "signals": 4,
+          "signalsPerDay": 0.328,
+          "longCount": 0,
+          "shortCount": 4,
+          "longRate": 0,
+          "shortRate": 1,
+          "edgeEpisodes": 4,
+          "tp1BeforeSl": 4,
+          "tp2BeforeSl": 4,
+          "tp3BeforeSl": 4,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 55,
+          "avgBarsHeld": 4
+        },
+        {
+          "name": "OOS",
+          "from": "2026-09-18T19:12:00.000Z",
+          "to": "2026-10-01T00:00:00.000Z",
+          "signals": 0,
+          "signalsPerDay": 0,
+          "longCount": 0,
+          "shortCount": 0,
+          "longRate": 0,
+          "shortRate": 0,
+          "edgeEpisodes": 0,
+          "tp1BeforeSl": 0,
+          "tp2BeforeSl": 0,
+          "tp3BeforeSl": 0,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 0,
+          "tp2Rate": 0,
+          "tp3Rate": 0,
+          "stopRate": 0,
+          "avgScore": 0,
+          "avgBarsHeld": 0
+        }
+      ],
+      "aggregate": {
+        "name": "AGGREGATE",
+        "from": "2026-08-01T00:00:00.000Z",
+        "to": "2026-10-01T00:00:00.000Z",
+        "signals": 6,
+        "signalsPerDay": 0.098,
+        "longCount": 2,
+        "shortCount": 4,
+        "longRate": 0.333,
+        "shortRate": 0.667,
+        "edgeEpisodes": 6,
+        "tp1BeforeSl": 6,
+        "tp2BeforeSl": 6,
+        "tp3BeforeSl": 6,
+        "stopBeforeTp1": 0,
+        "tp1Rate": 1,
+        "tp2Rate": 1,
+        "tp3Rate": 1,
+        "stopRate": 0,
+        "avgScore": 55,
+        "avgBarsHeld": 4.7
+      },
+      "longAggregate": {
+        "count": 2,
+        "tp1": 2,
+        "tp2": 2,
+        "tp3": 2,
+        "stop": 0
+      },
+      "shortAggregate": {
+        "count": 4,
+        "tp1": 4,
+        "tp2": 4,
+        "tp3": 4,
+        "stop": 0
+      },
+      "regression": {
+        "episode": "2026-09-13 08:15 SHORT -> 11:00 REARM",
+        "v1Action": "V1 baseline: SHORT at 08:15, REARM at 11:00 (expected ONE episode)",
+        "v2Action": "SHORT longScore 10 shortScore 70 met 4/7",
+        "detail": "Evaluation at exact regression candle 2026-09-13T08:15:00.000Z: SHORT longScore 10 shortScore 70 met 4/7"
+      }
+    },
+    {
+      "model": "V2-D SMC+COMBINED TIERING",
+      "trendMode": "COMBINED",
+      "policy": "TIERING",
+      "config": {
+        "mode": "DISABLED",
+        "symbol": "BTC",
+        "timeframe": "15m",
+        "referenceExchange": "BINANCE",
+        "minimumSignalScore": 35,
+        "swingLeft": 20,
+        "swingRight": 20,
+        "internalLeft": 3,
+        "internalRight": 3,
+        "atrPeriod": 14,
+        "structureEventFreshBars": 10,
+        "sweepFreshBars": 5,
+        "orderBlockFreshBars": 20,
+        "fvgFreshBars": 20,
+        "eqBand": 0.02,
+        "weights": {
+          "swingStructureBias": 20,
+          "recentSwingBos": 15,
+          "internalStructure": 10,
+          "liquiditySweep": 10,
+          "swingOrderBlock": 15,
+          "internalOrderBlock": 5,
+          "fvg": 10,
+          "rangePosition": 10,
+          "confluence": 5
+        },
+        "confirmations": {
+          "bos": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Break of Structure — SWING_TREND + RECENT_SWING_BOS"
+          },
+          "choch": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Change of Character — duplicate of internalStructure (INTERNAL_TREND), disabled to avoid double count"
+          },
+          "orderBlock": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Order Block — SWING_ORDER_BLOCK (or INTERNAL as fallback)"
+          },
+          "fvg": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Fair Value Gap — FVG"
+          },
+          "liquiditySweep": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Liquidity Sweep — LIQUIDITY_SWEEP"
+          },
+          "displacement": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Displacement — evaluateSmc exposes displacements[] but scoring has no DISPLACEMENT reason yet, placeholder until exposed"
+          },
+          "rangePosition": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Premium/Discount — RANGE_POSITION"
+          },
+          "confluence": {
+            "enabled": true,
+            "weight": 5,
+            "required": false,
+            "category": "DERIVED",
+            "description": "OB+FVG confluence — OB_FVG_CONFLUENCE overlap bonus, derived, not duplicate weight"
+          },
+          "internalStructure": {
+            "enabled": true,
+            "weight": 10,
+            "required": false,
+            "category": "CONTEXT",
+            "description": "Internal structure bias — INTERNAL_TREND context"
+          }
+        },
+        "trend": {
+          "enabled": true,
+          "mode": "COMBINED",
+          "policy": "TIERING",
+          "emaFast": 20,
+          "emaSlow": 50,
+          "emaSlopeLookback": 5,
+          "htfTimeframe": "1h",
+          "weight": 15,
+          "counterTrendPenalty": 10
+        },
+        "atr": {
+          "period": 14,
+          "stopMultiplier": 1.5,
+          "takeProfit1Multiplier": 1.5,
+          "takeProfit2Multiplier": 2.5,
+          "takeProfit3Multiplier": 4
+        },
+        "filters": {
+          "minimumQuoteVolume24h": 0,
+          "top500Only": false
+        },
+        "execution": {
+          "closedCandleOnly": true,
+          "cooldownCandles": 3
+        }
+      },
+      "totalSignals": 8,
+      "frequencyVsV1": "100.0%",
+      "splits": [
+        {
+          "name": "TRAIN",
+          "from": "2026-08-01T00:00:00.000Z",
+          "to": "2026-09-06T14:24:00.000Z",
+          "signals": 2,
+          "signalsPerDay": 0.055,
+          "longCount": 2,
+          "shortCount": 0,
+          "longRate": 1,
+          "shortRate": 0,
+          "edgeEpisodes": 2,
+          "tp1BeforeSl": 2,
+          "tp2BeforeSl": 2,
+          "tp3BeforeSl": 2,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 55,
+          "avgBarsHeld": 6
+        },
+        {
+          "name": "VALIDATION",
+          "from": "2026-09-06T14:24:00.000Z",
+          "to": "2026-09-18T19:12:00.000Z",
+          "signals": 6,
+          "signalsPerDay": 0.492,
+          "longCount": 1,
+          "shortCount": 5,
+          "longRate": 0.167,
+          "shortRate": 0.833,
+          "edgeEpisodes": 6,
+          "tp1BeforeSl": 6,
+          "tp2BeforeSl": 6,
+          "tp3BeforeSl": 6,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 50,
+          "avgBarsHeld": 5.2
+        },
+        {
+          "name": "OOS",
+          "from": "2026-09-18T19:12:00.000Z",
+          "to": "2026-10-01T00:00:00.000Z",
+          "signals": 0,
+          "signalsPerDay": 0,
+          "longCount": 0,
+          "shortCount": 0,
+          "longRate": 0,
+          "shortRate": 0,
+          "edgeEpisodes": 0,
+          "tp1BeforeSl": 0,
+          "tp2BeforeSl": 0,
+          "tp3BeforeSl": 0,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 0,
+          "tp2Rate": 0,
+          "tp3Rate": 0,
+          "stopRate": 0,
+          "avgScore": 0,
+          "avgBarsHeld": 0
+        }
+      ],
+      "aggregate": {
+        "name": "AGGREGATE",
+        "from": "2026-08-01T00:00:00.000Z",
+        "to": "2026-10-01T00:00:00.000Z",
+        "signals": 8,
+        "signalsPerDay": 0.131,
+        "longCount": 3,
+        "shortCount": 5,
+        "longRate": 0.375,
+        "shortRate": 0.625,
+        "edgeEpisodes": 8,
+        "tp1BeforeSl": 8,
+        "tp2BeforeSl": 8,
+        "tp3BeforeSl": 8,
+        "stopBeforeTp1": 0,
+        "tp1Rate": 1,
+        "tp2Rate": 1,
+        "tp3Rate": 1,
+        "stopRate": 0,
+        "avgScore": 51.3,
+        "avgBarsHeld": 5.4
+      },
+      "longAggregate": {
+        "count": 3,
+        "tp1": 3,
+        "tp2": 3,
+        "tp3": 3,
+        "stop": 0
+      },
+      "shortAggregate": {
+        "count": 5,
+        "tp1": 5,
+        "tp2": 5,
+        "tp3": 5,
+        "stop": 0
+      },
+      "regression": {
+        "episode": "2026-09-13 08:15 SHORT -> 11:00 REARM",
+        "v1Action": "V1 baseline: SHORT at 08:15, REARM at 11:00 (expected ONE episode)",
+        "v2Action": "SHORT longScore 10 shortScore 70 met 4/7",
+        "detail": "Evaluation at exact regression candle 2026-09-13T08:15:00.000Z: SHORT longScore 10 shortScore 70 met 4/7"
+      }
+    },
+    {
+      "model": "V2-D SMC+COMBINED HARD_ALIGNMENT",
+      "trendMode": "COMBINED",
+      "policy": "HARD_ALIGNMENT",
+      "config": {
+        "mode": "DISABLED",
+        "symbol": "BTC",
+        "timeframe": "15m",
+        "referenceExchange": "BINANCE",
+        "minimumSignalScore": 35,
+        "swingLeft": 20,
+        "swingRight": 20,
+        "internalLeft": 3,
+        "internalRight": 3,
+        "atrPeriod": 14,
+        "structureEventFreshBars": 10,
+        "sweepFreshBars": 5,
+        "orderBlockFreshBars": 20,
+        "fvgFreshBars": 20,
+        "eqBand": 0.02,
+        "weights": {
+          "swingStructureBias": 20,
+          "recentSwingBos": 15,
+          "internalStructure": 10,
+          "liquiditySweep": 10,
+          "swingOrderBlock": 15,
+          "internalOrderBlock": 5,
+          "fvg": 10,
+          "rangePosition": 10,
+          "confluence": 5
+        },
+        "confirmations": {
+          "bos": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Break of Structure — SWING_TREND + RECENT_SWING_BOS"
+          },
+          "choch": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Change of Character — duplicate of internalStructure (INTERNAL_TREND), disabled to avoid double count"
+          },
+          "orderBlock": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Order Block — SWING_ORDER_BLOCK (or INTERNAL as fallback)"
+          },
+          "fvg": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Fair Value Gap — FVG"
+          },
+          "liquiditySweep": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Liquidity Sweep — LIQUIDITY_SWEEP"
+          },
+          "displacement": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Displacement — evaluateSmc exposes displacements[] but scoring has no DISPLACEMENT reason yet, placeholder until exposed"
+          },
+          "rangePosition": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Premium/Discount — RANGE_POSITION"
+          },
+          "confluence": {
+            "enabled": true,
+            "weight": 5,
+            "required": false,
+            "category": "DERIVED",
+            "description": "OB+FVG confluence — OB_FVG_CONFLUENCE overlap bonus, derived, not duplicate weight"
+          },
+          "internalStructure": {
+            "enabled": true,
+            "weight": 10,
+            "required": false,
+            "category": "CONTEXT",
+            "description": "Internal structure bias — INTERNAL_TREND context"
+          }
+        },
+        "trend": {
+          "enabled": true,
+          "mode": "COMBINED",
+          "policy": "HARD_ALIGNMENT",
+          "emaFast": 20,
+          "emaSlow": 50,
+          "emaSlopeLookback": 5,
+          "htfTimeframe": "1h",
+          "weight": 15,
+          "counterTrendPenalty": 10
+        },
+        "atr": {
+          "period": 14,
+          "stopMultiplier": 1.5,
+          "takeProfit1Multiplier": 1.5,
+          "takeProfit2Multiplier": 2.5,
+          "takeProfit3Multiplier": 4
+        },
+        "filters": {
+          "minimumQuoteVolume24h": 0,
+          "top500Only": false
+        },
+        "execution": {
+          "closedCandleOnly": true,
+          "cooldownCandles": 3
+        }
+      },
+      "totalSignals": 6,
+      "frequencyVsV1": "75.0%",
+      "splits": [
+        {
+          "name": "TRAIN",
+          "from": "2026-08-01T00:00:00.000Z",
+          "to": "2026-09-06T14:24:00.000Z",
+          "signals": 2,
+          "signalsPerDay": 0.055,
+          "longCount": 2,
+          "shortCount": 0,
+          "longRate": 1,
+          "shortRate": 0,
+          "edgeEpisodes": 2,
+          "tp1BeforeSl": 2,
+          "tp2BeforeSl": 2,
+          "tp3BeforeSl": 2,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 40,
+          "avgBarsHeld": 6
+        },
+        {
+          "name": "VALIDATION",
+          "from": "2026-09-06T14:24:00.000Z",
+          "to": "2026-09-18T19:12:00.000Z",
+          "signals": 4,
+          "signalsPerDay": 0.328,
+          "longCount": 0,
+          "shortCount": 4,
+          "longRate": 0,
+          "shortRate": 1,
+          "edgeEpisodes": 4,
+          "tp1BeforeSl": 4,
+          "tp2BeforeSl": 4,
+          "tp3BeforeSl": 4,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 40,
+          "avgBarsHeld": 4
+        },
+        {
+          "name": "OOS",
+          "from": "2026-09-18T19:12:00.000Z",
+          "to": "2026-10-01T00:00:00.000Z",
+          "signals": 0,
+          "signalsPerDay": 0,
+          "longCount": 0,
+          "shortCount": 0,
+          "longRate": 0,
+          "shortRate": 0,
+          "edgeEpisodes": 0,
+          "tp1BeforeSl": 0,
+          "tp2BeforeSl": 0,
+          "tp3BeforeSl": 0,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 0,
+          "tp2Rate": 0,
+          "tp3Rate": 0,
+          "stopRate": 0,
+          "avgScore": 0,
+          "avgBarsHeld": 0
+        }
+      ],
+      "aggregate": {
+        "name": "AGGREGATE",
+        "from": "2026-08-01T00:00:00.000Z",
+        "to": "2026-10-01T00:00:00.000Z",
+        "signals": 6,
+        "signalsPerDay": 0.098,
+        "longCount": 2,
+        "shortCount": 4,
+        "longRate": 0.333,
+        "shortRate": 0.667,
+        "edgeEpisodes": 6,
+        "tp1BeforeSl": 6,
+        "tp2BeforeSl": 6,
+        "tp3BeforeSl": 6,
+        "stopBeforeTp1": 0,
+        "tp1Rate": 1,
+        "tp2Rate": 1,
+        "tp3Rate": 1,
+        "stopRate": 0,
+        "avgScore": 40,
+        "avgBarsHeld": 4.7
+      },
+      "longAggregate": {
+        "count": 2,
+        "tp1": 2,
+        "tp2": 2,
+        "tp3": 2,
+        "stop": 0
+      },
+      "shortAggregate": {
+        "count": 4,
+        "tp1": 4,
+        "tp2": 4,
+        "tp3": 4,
+        "stop": 0
+      },
+      "regression": {
+        "episode": "2026-09-13 08:15 SHORT -> 11:00 REARM",
+        "v1Action": "V1 baseline: SHORT at 08:15, REARM at 11:00 (expected ONE episode)",
+        "v2Action": "SHORT longScore 10 shortScore 55 met 4/7",
+        "detail": "Evaluation at exact regression candle 2026-09-13T08:15:00.000Z: SHORT longScore 10 shortScore 55 met 4/7"
+      }
+    },
+    {
+      "model": "V2-A MARKET_STRUCTURE SCORE_BOOST min70",
+      "trendMode": "MARKET_STRUCTURE",
+      "policy": "SCORE_BOOST",
+      "config": {
+        "mode": "DISABLED",
+        "symbol": "BTC",
+        "timeframe": "15m",
+        "referenceExchange": "BINANCE",
+        "minimumSignalScore": 35,
+        "swingLeft": 20,
+        "swingRight": 20,
+        "internalLeft": 3,
+        "internalRight": 3,
+        "atrPeriod": 14,
+        "structureEventFreshBars": 10,
+        "sweepFreshBars": 5,
+        "orderBlockFreshBars": 20,
+        "fvgFreshBars": 20,
+        "eqBand": 0.02,
+        "weights": {
+          "swingStructureBias": 20,
+          "recentSwingBos": 15,
+          "internalStructure": 10,
+          "liquiditySweep": 10,
+          "swingOrderBlock": 15,
+          "internalOrderBlock": 5,
+          "fvg": 10,
+          "rangePosition": 10,
+          "confluence": 5
+        },
+        "confirmations": {
+          "bos": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Break of Structure — SWING_TREND + RECENT_SWING_BOS"
+          },
+          "choch": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Change of Character — duplicate of internalStructure (INTERNAL_TREND), disabled to avoid double count"
+          },
+          "orderBlock": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Order Block — SWING_ORDER_BLOCK (or INTERNAL as fallback)"
+          },
+          "fvg": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Fair Value Gap — FVG"
+          },
+          "liquiditySweep": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Liquidity Sweep — LIQUIDITY_SWEEP"
+          },
+          "displacement": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Displacement — evaluateSmc exposes displacements[] but scoring has no DISPLACEMENT reason yet, placeholder until exposed"
+          },
+          "rangePosition": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Premium/Discount — RANGE_POSITION"
+          },
+          "confluence": {
+            "enabled": true,
+            "weight": 5,
+            "required": false,
+            "category": "DERIVED",
+            "description": "OB+FVG confluence — OB_FVG_CONFLUENCE overlap bonus, derived, not duplicate weight"
+          },
+          "internalStructure": {
+            "enabled": true,
+            "weight": 10,
+            "required": false,
+            "category": "CONTEXT",
+            "description": "Internal structure bias — INTERNAL_TREND context"
+          }
+        },
+        "trend": {
+          "enabled": true,
+          "mode": "MARKET_STRUCTURE",
+          "policy": "SCORE_BOOST",
+          "emaFast": 20,
+          "emaSlow": 50,
+          "emaSlopeLookback": 5,
+          "htfTimeframe": "1h",
+          "weight": 15,
+          "counterTrendPenalty": 10
+        },
+        "atr": {
+          "period": 14,
+          "stopMultiplier": 1.5,
+          "takeProfit1Multiplier": 1.5,
+          "takeProfit2Multiplier": 2.5,
+          "takeProfit3Multiplier": 4
+        },
+        "filters": {
+          "minimumQuoteVolume24h": 0,
+          "top500Only": false
+        },
+        "execution": {
+          "closedCandleOnly": true,
+          "cooldownCandles": 3
+        }
+      },
+      "totalSignals": 8,
+      "frequencyVsV1": "100.0%",
+      "splits": [
+        {
+          "name": "TRAIN",
+          "from": "2026-08-01T00:00:00.000Z",
+          "to": "2026-09-06T14:24:00.000Z",
+          "signals": 2,
+          "signalsPerDay": 0.055,
+          "longCount": 2,
+          "shortCount": 0,
+          "longRate": 1,
+          "shortRate": 0,
+          "edgeEpisodes": 2,
+          "tp1BeforeSl": 2,
+          "tp2BeforeSl": 2,
+          "tp3BeforeSl": 2,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 55,
+          "avgBarsHeld": 6
+        },
+        {
+          "name": "VALIDATION",
+          "from": "2026-09-06T14:24:00.000Z",
+          "to": "2026-09-18T19:12:00.000Z",
+          "signals": 6,
+          "signalsPerDay": 0.492,
+          "longCount": 1,
+          "shortCount": 5,
+          "longRate": 0.167,
+          "shortRate": 0.833,
+          "edgeEpisodes": 6,
+          "tp1BeforeSl": 6,
+          "tp2BeforeSl": 6,
+          "tp3BeforeSl": 6,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 55,
+          "avgBarsHeld": 5.2
+        },
+        {
+          "name": "OOS",
+          "from": "2026-09-18T19:12:00.000Z",
+          "to": "2026-10-01T00:00:00.000Z",
+          "signals": 0,
+          "signalsPerDay": 0,
+          "longCount": 0,
+          "shortCount": 0,
+          "longRate": 0,
+          "shortRate": 0,
+          "edgeEpisodes": 0,
+          "tp1BeforeSl": 0,
+          "tp2BeforeSl": 0,
+          "tp3BeforeSl": 0,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 0,
+          "tp2Rate": 0,
+          "tp3Rate": 0,
+          "stopRate": 0,
+          "avgScore": 0,
+          "avgBarsHeld": 0
+        }
+      ],
+      "aggregate": {
+        "name": "AGGREGATE",
+        "from": "2026-08-01T00:00:00.000Z",
+        "to": "2026-10-01T00:00:00.000Z",
+        "signals": 8,
+        "signalsPerDay": 0.131,
+        "longCount": 3,
+        "shortCount": 5,
+        "longRate": 0.375,
+        "shortRate": 0.625,
+        "edgeEpisodes": 8,
+        "tp1BeforeSl": 8,
+        "tp2BeforeSl": 8,
+        "tp3BeforeSl": 8,
+        "stopBeforeTp1": 0,
+        "tp1Rate": 1,
+        "tp2Rate": 1,
+        "tp3Rate": 1,
+        "stopRate": 0,
+        "avgScore": 55,
+        "avgBarsHeld": 5.4
+      },
+      "longAggregate": {
+        "count": 3,
+        "tp1": 3,
+        "tp2": 3,
+        "tp3": 3,
+        "stop": 0
+      },
+      "shortAggregate": {
+        "count": 5,
+        "tp1": 5,
+        "tp2": 5,
+        "tp3": 5,
+        "stop": 0
+      },
+      "regression": {
+        "episode": "2026-09-13 08:15 SHORT -> 11:00 REARM",
+        "v1Action": "V1 baseline: SHORT at 08:15, REARM at 11:00 (expected ONE episode)",
+        "v2Action": "SHORT longScore 10 shortScore 70 met 4/7",
+        "detail": "Evaluation at exact regression candle 2026-09-13T08:15:00.000Z: SHORT longScore 10 shortScore 70 met 4/7"
+      }
+    },
+    {
+      "model": "V2-D COMBINED TIERING min70",
+      "trendMode": "COMBINED",
+      "policy": "TIERING",
+      "config": {
+        "mode": "DISABLED",
+        "symbol": "BTC",
+        "timeframe": "15m",
+        "referenceExchange": "BINANCE",
+        "minimumSignalScore": 35,
+        "swingLeft": 20,
+        "swingRight": 20,
+        "internalLeft": 3,
+        "internalRight": 3,
+        "atrPeriod": 14,
+        "structureEventFreshBars": 10,
+        "sweepFreshBars": 5,
+        "orderBlockFreshBars": 20,
+        "fvgFreshBars": 20,
+        "eqBand": 0.02,
+        "weights": {
+          "swingStructureBias": 20,
+          "recentSwingBos": 15,
+          "internalStructure": 10,
+          "liquiditySweep": 10,
+          "swingOrderBlock": 15,
+          "internalOrderBlock": 5,
+          "fvg": 10,
+          "rangePosition": 10,
+          "confluence": 5
+        },
+        "confirmations": {
+          "bos": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Break of Structure — SWING_TREND + RECENT_SWING_BOS"
+          },
+          "choch": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Change of Character — duplicate of internalStructure (INTERNAL_TREND), disabled to avoid double count"
+          },
+          "orderBlock": {
+            "enabled": true,
+            "weight": 20,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Order Block — SWING_ORDER_BLOCK (or INTERNAL as fallback)"
+          },
+          "fvg": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Fair Value Gap — FVG"
+          },
+          "liquiditySweep": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Liquidity Sweep — LIQUIDITY_SWEEP"
+          },
+          "displacement": {
+            "enabled": false,
+            "weight": 0,
+            "required": false,
+            "category": "PLACEHOLDER",
+            "description": "Displacement — evaluateSmc exposes displacements[] but scoring has no DISPLACEMENT reason yet, placeholder until exposed"
+          },
+          "rangePosition": {
+            "enabled": true,
+            "weight": 15,
+            "required": false,
+            "category": "INDEPENDENT",
+            "description": "Premium/Discount — RANGE_POSITION"
+          },
+          "confluence": {
+            "enabled": true,
+            "weight": 5,
+            "required": false,
+            "category": "DERIVED",
+            "description": "OB+FVG confluence — OB_FVG_CONFLUENCE overlap bonus, derived, not duplicate weight"
+          },
+          "internalStructure": {
+            "enabled": true,
+            "weight": 10,
+            "required": false,
+            "category": "CONTEXT",
+            "description": "Internal structure bias — INTERNAL_TREND context"
+          }
+        },
+        "trend": {
+          "enabled": true,
+          "mode": "COMBINED",
+          "policy": "TIERING",
+          "emaFast": 20,
+          "emaSlow": 50,
+          "emaSlopeLookback": 5,
+          "htfTimeframe": "1h",
+          "weight": 15,
+          "counterTrendPenalty": 10
+        },
+        "atr": {
+          "period": 14,
+          "stopMultiplier": 1.5,
+          "takeProfit1Multiplier": 1.5,
+          "takeProfit2Multiplier": 2.5,
+          "takeProfit3Multiplier": 4
+        },
+        "filters": {
+          "minimumQuoteVolume24h": 0,
+          "top500Only": false
+        },
+        "execution": {
+          "closedCandleOnly": true,
+          "cooldownCandles": 3
+        }
+      },
+      "totalSignals": 8,
+      "frequencyVsV1": "100.0%",
+      "splits": [
+        {
+          "name": "TRAIN",
+          "from": "2026-08-01T00:00:00.000Z",
+          "to": "2026-09-06T14:24:00.000Z",
+          "signals": 2,
+          "signalsPerDay": 0.055,
+          "longCount": 2,
+          "shortCount": 0,
+          "longRate": 1,
+          "shortRate": 0,
+          "edgeEpisodes": 2,
+          "tp1BeforeSl": 2,
+          "tp2BeforeSl": 2,
+          "tp3BeforeSl": 2,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 55,
+          "avgBarsHeld": 6
+        },
+        {
+          "name": "VALIDATION",
+          "from": "2026-09-06T14:24:00.000Z",
+          "to": "2026-09-18T19:12:00.000Z",
+          "signals": 6,
+          "signalsPerDay": 0.492,
+          "longCount": 1,
+          "shortCount": 5,
+          "longRate": 0.167,
+          "shortRate": 0.833,
+          "edgeEpisodes": 6,
+          "tp1BeforeSl": 6,
+          "tp2BeforeSl": 6,
+          "tp3BeforeSl": 6,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 1,
+          "tp2Rate": 1,
+          "tp3Rate": 1,
+          "stopRate": 0,
+          "avgScore": 50,
+          "avgBarsHeld": 5.2
+        },
+        {
+          "name": "OOS",
+          "from": "2026-09-18T19:12:00.000Z",
+          "to": "2026-10-01T00:00:00.000Z",
+          "signals": 0,
+          "signalsPerDay": 0,
+          "longCount": 0,
+          "shortCount": 0,
+          "longRate": 0,
+          "shortRate": 0,
+          "edgeEpisodes": 0,
+          "tp1BeforeSl": 0,
+          "tp2BeforeSl": 0,
+          "tp3BeforeSl": 0,
+          "stopBeforeTp1": 0,
+          "tp1Rate": 0,
+          "tp2Rate": 0,
+          "tp3Rate": 0,
+          "stopRate": 0,
+          "avgScore": 0,
+          "avgBarsHeld": 0
+        }
+      ],
+      "aggregate": {
+        "name": "AGGREGATE",
+        "from": "2026-08-01T00:00:00.000Z",
+        "to": "2026-10-01T00:00:00.000Z",
+        "signals": 8,
+        "signalsPerDay": 0.131,
+        "longCount": 3,
+        "shortCount": 5,
+        "longRate": 0.375,
+        "shortRate": 0.625,
+        "edgeEpisodes": 8,
+        "tp1BeforeSl": 8,
+        "tp2BeforeSl": 8,
+        "tp3BeforeSl": 8,
+        "stopBeforeTp1": 0,
+        "tp1Rate": 1,
+        "tp2Rate": 1,
+        "tp3Rate": 1,
+        "stopRate": 0,
+        "avgScore": 51.3,
+        "avgBarsHeld": 5.4
+      },
+      "longAggregate": {
+        "count": 3,
+        "tp1": 3,
+        "tp2": 3,
+        "tp3": 3,
+        "stop": 0
+      },
+      "shortAggregate": {
+        "count": 5,
+        "tp1": 5,
+        "tp2": 5,
+        "tp3": 5,
+        "stop": 0
+      },
+      "regression": {
+        "episode": "2026-09-13 08:15 SHORT -> 11:00 REARM",
+        "v1Action": "V1 baseline: SHORT at 08:15, REARM at 11:00 (expected ONE episode)",
+        "v2Action": "SHORT longScore 10 shortScore 70 met 4/7",
+        "detail": "Evaluation at exact regression candle 2026-09-13T08:15:00.000Z: SHORT longScore 10 shortScore 70 met 4/7"
+      }
+    }
+  ],
+  "recommended": {
+    "model": "V2-A SMC+MARKET_STRUCTURE SCORE_BOOST",
+    "trendMode": "MARKET_STRUCTURE",
+    "policy": "SCORE_BOOST",
+    "frequencyVsV1": "100.0%",
+    "aggregate": {
+      "name": "AGGREGATE",
+      "from": "2026-08-01T00:00:00.000Z",
+      "to": "2026-10-01T00:00:00.000Z",
+      "signals": 8,
+      "signalsPerDay": 0.131,
+      "longCount": 3,
+      "shortCount": 5,
+      "longRate": 0.375,
+      "shortRate": 0.625,
+      "edgeEpisodes": 8,
+      "tp1BeforeSl": 8,
+      "tp2BeforeSl": 8,
+      "tp3BeforeSl": 8,
+      "stopBeforeTp1": 0,
+      "tp1Rate": 1,
+      "tp2Rate": 1,
+      "tp3Rate": 1,
+      "stopRate": 0,
+      "avgScore": 55,
+      "avgBarsHeld": 5.4
+    },
+    "config": {
+      "mode": "DISABLED",
+      "symbol": "BTC",
+      "timeframe": "15m",
+      "referenceExchange": "BINANCE",
+      "minimumSignalScore": 35,
+      "swingLeft": 20,
+      "swingRight": 20,
+      "internalLeft": 3,
+      "internalRight": 3,
+      "atrPeriod": 14,
+      "structureEventFreshBars": 10,
+      "sweepFreshBars": 5,
+      "orderBlockFreshBars": 20,
+      "fvgFreshBars": 20,
+      "eqBand": 0.02,
+      "weights": {
+        "swingStructureBias": 20,
+        "recentSwingBos": 15,
+        "internalStructure": 10,
+        "liquiditySweep": 10,
+        "swingOrderBlock": 15,
+        "internalOrderBlock": 5,
+        "fvg": 10,
+        "rangePosition": 10,
+        "confluence": 5
+      },
+      "confirmations": {
+        "bos": {
+          "enabled": true,
+          "weight": 20,
+          "required": false,
+          "category": "INDEPENDENT",
+          "description": "Break of Structure — SWING_TREND + RECENT_SWING_BOS"
+        },
+        "choch": {
+          "enabled": false,
+          "weight": 0,
+          "required": false,
+          "category": "PLACEHOLDER",
+          "description": "Change of Character — duplicate of internalStructure (INTERNAL_TREND), disabled to avoid double count"
+        },
+        "orderBlock": {
+          "enabled": true,
+          "weight": 20,
+          "required": false,
+          "category": "INDEPENDENT",
+          "description": "Order Block — SWING_ORDER_BLOCK (or INTERNAL as fallback)"
+        },
+        "fvg": {
+          "enabled": true,
+          "weight": 15,
+          "required": false,
+          "category": "INDEPENDENT",
+          "description": "Fair Value Gap — FVG"
+        },
+        "liquiditySweep": {
+          "enabled": true,
+          "weight": 15,
+          "required": false,
+          "category": "INDEPENDENT",
+          "description": "Liquidity Sweep — LIQUIDITY_SWEEP"
+        },
+        "displacement": {
+          "enabled": false,
+          "weight": 0,
+          "required": false,
+          "category": "PLACEHOLDER",
+          "description": "Displacement — evaluateSmc exposes displacements[] but scoring has no DISPLACEMENT reason yet, placeholder until exposed"
+        },
+        "rangePosition": {
+          "enabled": true,
+          "weight": 15,
+          "required": false,
+          "category": "INDEPENDENT",
+          "description": "Premium/Discount — RANGE_POSITION"
+        },
+        "confluence": {
+          "enabled": true,
+          "weight": 5,
+          "required": false,
+          "category": "DERIVED",
+          "description": "OB+FVG confluence — OB_FVG_CONFLUENCE overlap bonus, derived, not duplicate weight"
+        },
+        "internalStructure": {
+          "enabled": true,
+          "weight": 10,
+          "required": false,
+          "category": "CONTEXT",
+          "description": "Internal structure bias — INTERNAL_TREND context"
+        }
+      },
+      "trend": {
+        "enabled": true,
+        "mode": "MARKET_STRUCTURE",
+        "policy": "SCORE_BOOST",
+        "emaFast": 20,
+        "emaSlow": 50,
+        "emaSlopeLookback": 5,
+        "htfTimeframe": "1h",
+        "weight": 15,
+        "counterTrendPenalty": 10
+      },
+      "atr": {
+        "period": 14,
+        "stopMultiplier": 1.5,
+        "takeProfit1Multiplier": 1.5,
+        "takeProfit2Multiplier": 2.5,
+        "takeProfit3Multiplier": 4
+      },
+      "filters": {
+        "minimumQuoteVolume24h": 0,
+        "top500Only": false
+      },
+      "execution": {
+        "closedCandleOnly": true,
+        "cooldownCandles": 3
+      }
+    },
+    "regression": {
+      "episode": "2026-09-13 08:15 SHORT -> 11:00 REARM",
+      "v1Action": "V1 baseline: SHORT at 08:15, REARM at 11:00 (expected ONE episode)",
+      "v2Action": "SHORT longScore 10 shortScore 70 met 4/7",
+      "detail": "Evaluation at exact regression candle 2026-09-13T08:15:00.000Z: SHORT longScore 10 shortScore 70 met 4/7"
+    }
+  },
+  "regressionTarget": {
+    "episode": "2026-09-13 08:15 SHORT -> 11:00 REARM",
+    "expected": "ONE SHORT episode start 08:15 end 11:00 durationBars 11",
+    "v1Baseline": "SHORT at 08:15, REARM at 11:00",
+    "note": "Do NOT tune V2 specifically to make this episode pass"
+  },
+  "strategyIsolation": "V2 independent state via strategyId, signals both saved even if conflicting",
+  "blockingForDryRun": "Need DB with BINANCE BTC/USDT 15m history for max reliable replay, owner approval to set mode DRY_RUN (currently DISABLED). V2 LIVE blocked."
+}

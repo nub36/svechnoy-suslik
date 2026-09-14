@@ -118,19 +118,23 @@ async function main() {
     process.exit(1);
   }
 
-  const allowedStrategies = ["trend-suslik", "smart-money-suslik"];
+  const allowedStrategies = ["trend-suslik", "smart-money-suslik", "smart-money-v2"];
   if (!allowedStrategies.includes(args.strategy)) {
     console.error(`Strategy must be one of ${allowedStrategies.join(", ")}, got ${args.strategy}`);
     process.exit(1);
   }
 
-  if (args.strategy === "smart-money-suslik" && !args.dryRun) {
+  if ((args.strategy === "smart-money-suslik" || args.strategy === "smart-money-v2") && !args.dryRun) {
     const flag = args.enableSmartMoneyWrite;
-    const env = process.env.SMART_MONEY_WRITE_ENABLED === "true";
+    const env = process.env.SMART_MONEY_WRITE_ENABLED === "true" || process.env.SMART_MONEY_V2_WRITE_ENABLED === "true";
     const allowed = flag && env;
     if (!allowed) {
-      console.log(`WARNING: smart-money-suslik live requested but AND guard not satisfied (flag=${flag} env=${env} need both true) — forcing dryRun=true`);
-      console.log(`Need BOTH --enable-smart-money-write AND SMART_MONEY_WRITE_ENABLED=true`);
+      console.log(`WARNING: ${args.strategy} live requested but AND guard not satisfied (flag=${flag} env=${env} need both true) — forcing dryRun=true`);
+      console.log(`Need BOTH --enable-smart-money-write AND SMART_MONEY_WRITE_ENABLED=true (or V2)`);
+      args.dryRun = true;
+    }
+    if (args.strategy === "smart-money-v2") {
+      console.log(`V2 LIVE blocked per task — even if AND guard passes, V2 should stay DISABLED/DRY_RUN for this checkpoint, not LIVE`);
       args.dryRun = true;
     }
   }

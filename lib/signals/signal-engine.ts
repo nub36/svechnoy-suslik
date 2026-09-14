@@ -30,6 +30,7 @@ import { selectQuorumClosedHorizon } from "../strategies/common-horizon-quorum";
 import { buildSmartMoneySignalCandidate } from "./smart-money-candidate";
 import { computeEdgeTransition, type AggregateState } from "./edge-state-machine";
 import { buildSetupKeyFromCandidate } from "./setup-key";
+import { runSmartMoneyV2Engine } from "./v2-signal-engine";
 
 export type SignalEngineResult = {
   evaluatedMarkets: number;
@@ -835,8 +836,9 @@ export async function runSignalEngineForBtc(opts: {
   });
 
   if (strategies.length === 0) {
+    const slugForFallback = ["smart-money-suslik", "smart-money-v2", "trend-suslik"].includes(strategySlug) ? strategySlug : "trend-suslik";
     const anyStrategy = await prisma.strategy.findFirst({
-      where: { slug: strategySlug === "smart-money-suslik" ? "smart-money-suslik" : "trend-suslik" },
+      where: { slug: slugForFallback },
       orderBy: { version: "desc" },
     });
     if (!anyStrategy) {
@@ -850,9 +852,9 @@ export async function runSignalEngineForBtc(opts: {
       });
       strategies.push({ ...anyStrategy, enabled: true, status: "PUBLISHED" } as any);
     } else {
-      if (strategySlug === "smart-money-suslik") {
+      if (strategySlug === "smart-money-suslik" || strategySlug === "smart-money-v2") {
         strategies.push(anyStrategy as any);
-        console.log(`Dry-run: using strategy id=${anyStrategy.id} slug=${anyStrategy.slug} enabled=${anyStrategy.enabled} status=${anyStrategy.status}`);
+        console.log(`Dry-run: using strategy id=${anyStrategy.id} slug=${anyStrategy.slug} enabled=${anyStrategy.enabled} status=${anyStrategy.status} mode=${(anyStrategy as any).mode}`);
       } else {
         result.errors.push(`Found strategy id=${anyStrategy.id} slug=${anyStrategy.slug} but enabled=${anyStrategy.enabled} status=${anyStrategy.status} — dryRun, not auto-enabling`);
         return result;
@@ -864,14 +866,14 @@ export async function runSignalEngineForBtc(opts: {
     const filtered = strategies.filter((s: any) => s.slug === strategySlug);
     if (filtered.length > 0) {
       strategies = filtered;
-    } else if (strategySlug === "smart-money-suslik") {
+    } else if (strategySlug === "smart-money-suslik" || strategySlug === "smart-money-v2") {
       const sm = await prisma.strategy.findFirst({
-        where: { slug: "smart-money-suslik" },
+        where: { slug: strategySlug },
         orderBy: { version: "desc" },
       });
       if (sm) {
         strategies = [sm as any];
-        console.log(`Loaded smart-money strategy directly: id=${sm.id} v${sm.version}`);
+        console.log(`Loaded ${strategySlug} strategy directly: id=${sm.id} v${sm.version} mode=${(sm as any).mode}`);
       }
     }
   }
@@ -939,6 +941,17 @@ export async function runSignalEngineForBtc(opts: {
       enableSmartMoneyWrite,
       emitOnBootstrap,
       commonHorizonPolicy,
+    });
+  } else if (strategySlug === "smart-money-v2") {
+    // V2 reference market BINANCE BTC/USDT CLOSED 15m only, isolated state via strategyId
+    await runSmartMoneyV2Engine({
+      timeframe,
+      dryRun,
+      symbol,
+      strategies,
+      result: result as any,
+      enableSmartMoneyWrite,
+      emitOnBootstrap,
     });
   } else {
     await runTrendSuslikEngine({
