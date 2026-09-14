@@ -289,7 +289,7 @@ export function validateV2Config(config: SmartMoneyV2Config, timeframes: string[
     errors.push(`mode: expected DISABLED/DRY_RUN/FORWARD_TEST/LIVE got ${config.mode}`);
   }
   if (config.mode === "LIVE") {
-    errors.push("mode LIVE not allowed in this task — use DISABLED or DRY_RUN");
+    errors.push("mode LIVE not allowed yet — use DISABLED/DRY_RUN/FORWARD_TEST, LIVE gated until research/forward validation complete");
   }
   if (!/^[A-Z0-9]{1,20}$/.test(config.symbol)) {
     errors.push(`symbol: expected 1..20 uppercase got ${config.symbol}`);

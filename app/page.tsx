@@ -1,5 +1,6 @@
 import MarketOverview from "@/components/MarketOverview";
 import MarketTable from "@/components/MarketTable";
+import TradingViewWidget from "@/components/TradingViewWidget";
 import { getPublicTop50 } from "@/lib/public/top50";
 
 export default async function Home() {
@@ -17,6 +18,8 @@ export default async function Home() {
       </section>
 
       <MarketOverview />
+
+      <TradingViewWidget symbol="BINANCE:BTCUSDT" interval="15" theme="dark" />
 
       <section className="marketSection">
         <h2>TOP-50 Публичный</h2>

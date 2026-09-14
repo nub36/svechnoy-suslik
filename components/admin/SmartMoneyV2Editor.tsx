@@ -199,7 +199,7 @@ export default function SmartMoneyV2Editor({ strategy }: Props) {
   async function save() {
     if (!canSave) return;
     if ((mode as string) === "LIVE") {
-      setMessage("LIVE режим не разрешён в этой задаче — используйте DISABLED или DRY_RUN");
+      setMessage("LIVE режим пока запрещён — используйте DISABLED/DRY_RUN/FORWARD_TEST, LIVE после валидации");
       return;
     }
     setSaving(true);
@@ -295,7 +295,7 @@ export default function SmartMoneyV2Editor({ strategy }: Props) {
                 </option>
               ))}
             </select>
-            <small style={{ color: "#6b7280" }}>LIVE off — по ТЗ</small>
+            <small style={{ color: "#6b7280" }}>LIVE gated — DRY_RUN/FORWARD_TEST OK</small>
           </label>
         </div>
       </section>
@@ -335,7 +335,7 @@ export default function SmartMoneyV2Editor({ strategy }: Props) {
 
       {(mode as string) === "LIVE" && (
         <div className="adminPanel" style={{ background: "#fef2f2", border: "1px solid #ef4444", padding: 12, borderRadius: 8, marginBottom: 16 }}>
-          <b>⚠ LIVE режим запрещён</b> — по ТЗ V2 LIVE off, используйте DISABLED или DRY_RUN
+          <b>⚠ LIVE режим пока запрещён</b> — DRY_RUN/FORWARD_TEST OK, LIVE после валидации
         </div>
       )}
 
