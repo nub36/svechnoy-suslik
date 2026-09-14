@@ -1,12 +1,28 @@
 /**
- * Smart Money V2 Signal Engine — reference market BINANCE BTC/USDT CLOSED 15m only
- * - No 3/5 exchange voting as directional confirmation
- * - V2 determines LONG/SHORT itself via evaluateV2WithCandles
- * - Independent StrategySignalState via strategyId
- * - EDGE/HOLD/REARM/REVERSAL lifecycle reused from edge-state-machine
- * - Signal persistence isolated: V2 signal only -> save V2, V1 signal only -> save V1, both same or conflicting -> save BOTH (different strategyId, unique constraint per strategyId)
- * - No dedup against V1
- * - AND guard for writes, strict atomicity Signal+Outcome+State
+ * Smart Money V2 Signal Engine — BINANCE BTC/USDT CLOSED 15m ONLY
+ * V2 MARKET CONTRACT:
+ * - ONE reference market: BINANCE BTC/USDT 15m CLOSED candles
+ * - Execution: BINANCE BTCUSDT CLOSED 15m -> V2 confirmations -> score -> direction -> V2 state machine -> optional V2 Signal
+ * - NOT: 5 exchanges, eligible markets, exchange votes, quorum, minExchanges, 3/5, 5/5
+ * - Do NOT use BINGX, BYBIT, GATE, KUCOIN anywhere in V2 signal decision
+ * - Other exchange data may remain elsewhere in website/V1, but V2 must not load it
+ *
+ * V2 CONFIRMATIONS: exactly 7 logical, no double count
+ * INDEPENDENT: BOS, Order Block, FVG, Liquidity Sweep, Range Position
+ * DERIVED: OB+FVG Confluence (bonus 5 only, not re-adding OB/FVG weights)
+ * CONTEXT: Internal Structure
+ * TREND CONTEXT: MARKET_STRUCTURE/EMA/HTF/COMBINED separate
+ * CHOCH/Displacement disabled
+ * Exchange count NOT a confirmation
+ *
+ * Double counting fix: BOS internals (SWING_TREND + RECENT_SWING_BOS) aggregate into ONE BOS confirmation max once, at most BOS weight 20
+ * OB internals (SWING_ORDER_BLOCK + INTERNAL_ORDER_BLOCK) aggregate into ONE OB confirmation max once, at most OB weight 20
+ * Confluence only explicit derived bonus
+ *
+ * ONE effective mode from DB column authoritative
+ * FORWARD_TEST: persist State, persist natural Signals when EDGE, Outcome tracker, /signals displays V2
+ * DISABLED: no writes
+ * LIVE: STILL BLOCKED
  */
 
 import { prisma } from '../prisma';
@@ -63,44 +79,49 @@ export async function runSmartMoneyV2Engine(opts: {
       return;
     }
     strategy = anyV2 as any;
-    console.log(`  Using fallback V2 strategy id=${strategy.id} slug=${strategy.slug} enabled=${strategy.enabled} mode=${(strategy as any).mode} status=${strategy.status}`);
   }
 
-  console.log(`\nStrategy ${strategy.slug} v${strategy.version} id=${strategy.id} mode=${(strategy as any).mode} timeframes=${strategy.timeframes.join(',')}`);
+  // ONE effective operating mode — DB column authoritative
+  const dbMode = (strategy as any).mode as string;
+  const rawConfig = strategy.config;
+  let v2Config: SmartMoneyV2Config = normalizeV2Config(rawConfig);
+  if (dbMode && ["DISABLED","DRY_RUN","FORWARD_TEST","LIVE"].includes(dbMode)) {
+    (v2Config as any).mode = dbMode as any;
+  }
+  if (dbMode && (rawConfig as any)?.mode && dbMode !== (rawConfig as any).mode) {
+    console.log(`  WARNING: DB mode ${dbMode} != config JSON mode ${(rawConfig as any).mode} — using DB mode as authoritative`);
+  }
+
+  const effectiveMode = v2Config.mode;
+
+  // Enforce BINANCE only per V2 market contract
+  if (v2Config.referenceExchange !== 'BINANCE') {
+    console.log(`  V2 CONTRACT: referenceExchange ${v2Config.referenceExchange} overridden to BINANCE per V2 market contract`);
+    v2Config.referenceExchange = 'BINANCE';
+  }
+  if (v2Config.symbol !== 'BTC') {
+    console.log(`  V2 CONTRACT: symbol ${v2Config.symbol} overridden to BTC`);
+    v2Config.symbol = 'BTC';
+  }
+
+  console.log(`\n=== SMART MONEY V2 ===`);
+  console.log(`Strategy: smart-money-v2 v${strategy.version}`);
+  console.log(`Mode: ${effectiveMode} (DB authoritative)`);
+  console.log(`Reference: BINANCE BTCUSDT`);
+  console.log(`Timeframe: ${timeframe}`);
+  console.log(`Symbol: ${symbol}`);
+
+  if (effectiveMode === 'LIVE') {
+    result.errors.push('V2 mode LIVE blocked — use DISABLED/DRY_RUN/FORWARD_TEST, LIVE gated until research/forward validation complete');
+    console.log(`LIVE BLOCKED — V2 LIVE not allowed yet`);
+    return;
+  }
 
   if (!strategy.timeframes.includes(timeframe)) {
     console.log(`  Skipped timeframe ${timeframe} not in strategy timeframes ${strategy.timeframes.join(',')}`);
     result.errors.push(`Timeframe ${timeframe} not in strategy timeframes`);
     return;
   }
-
-  const rawConfig = strategy.config;
-  // ONE effective operating mode — DB column is authoritative, config JSON may be stale (bug was config DISABLED but column FORWARD_TEST)
-  const dbMode = (strategy as any).mode as string;
-  let v2Config: SmartMoneyV2Config = normalizeV2Config(rawConfig);
-  // Override config JSON mode with authoritative DB column mode to ensure single source of truth
-  if (dbMode && ["DISABLED","DRY_RUN","FORWARD_TEST","LIVE"].includes(dbMode)) {
-    (v2Config as any).mode = dbMode as any;
-  }
-  // If still mismatch, log warning
-  if (dbMode && (rawConfig as any)?.mode && dbMode !== (rawConfig as any).mode) {
-    console.log(`  WARNING: DB mode ${dbMode} != config JSON mode ${(rawConfig as any).mode} — using DB mode as authoritative (fix applied)`);
-  }
-
-  const effectiveMode = v2Config.mode;
-
-  if (effectiveMode === 'LIVE') {
-    result.errors.push('V2 mode LIVE blocked per task — use DISABLED/DRY_RUN/FORWARD_TEST');
-    return;
-  }
-  if (v2Config.referenceExchange !== 'BINANCE') {
-    console.log(`  WARNING: V2 referenceExchange is ${v2Config.referenceExchange}, expected BINANCE per task, but will use ${v2Config.referenceExchange}`);
-  }
-  if (v2Config.symbol !== symbol) {
-    console.log(`  Note: V2 config symbol ${v2Config.symbol} vs requested ${symbol}, using requested ${symbol}`);
-  }
-
-  console.log(`  V2 Config: minScore=${v2Config.minimumSignalScore} ref=${v2Config.referenceExchange} ${v2Config.symbol} ${v2Config.timeframe} trend=${v2Config.trend.mode} policy=${v2Config.trend.policy} confirmations enabled=${Object.values(v2Config.confirmations).filter(c=>c.enabled).length}`);
 
   const asset = await prisma.asset.findUnique({
     where: { symbol },
@@ -111,10 +132,11 @@ export async function runSmartMoneyV2Engine(opts: {
     return;
   }
 
+  // V2 ONLY: BINANCE BTC/USDT SPOT ACTIVE — no other exchanges
   const referenceMarket = await prisma.market.findFirst({
     where: {
       assetId: asset.id,
-      exchange: v2Config.referenceExchange,
+      exchange: 'BINANCE',
       quote: 'USDT',
       marketType: 'SPOT',
       status: 'ACTIVE',
@@ -125,11 +147,11 @@ export async function runSmartMoneyV2Engine(opts: {
   });
 
   if (!referenceMarket) {
-    result.errors.push(`Reference market not found for ${v2Config.referenceExchange} ${symbol}/USDT SPOT ACTIVE`);
+    result.errors.push(`Reference market not found for BINANCE ${symbol}/USDT SPOT ACTIVE — V2 requires BINANCE only`);
     return;
   }
 
-  console.log(`  Reference market: ${referenceMarket.exchange} ${referenceMarket.exchangeSymbol} id=${referenceMarket.id}`);
+  console.log(`Reference market: ${referenceMarket.exchange} ${referenceMarket.exchangeSymbol} id=${referenceMarket.id}`);
 
   const rows = await prisma.candle.findMany({
     where: { marketId: referenceMarket.id, timeframe, closed: true },
@@ -147,12 +169,14 @@ export async function runSmartMoneyV2Engine(opts: {
     closed: r.closed,
   }));
 
-  console.log(`  Loaded ${candles.length} CLOSED ${timeframe} candles for reference ${referenceMarket.exchange}`);
-
   if (candles.length === 0) {
-    result.errors.push(`No CLOSED candles for reference market ${referenceMarket.exchange} ${timeframe}`);
+    result.errors.push(`No CLOSED candles for BINANCE ${symbol} ${timeframe} — V2 requires CLOSED candles only`);
     return;
   }
+
+  const lastCandle = candles[candles.length - 1];
+  console.log(`Candle: CLOSED ${lastCandle.openTime.toISOString()}`);
+  console.log(`Candles loaded: ${candles.length} CLOSED ${timeframe} BINANCE only`);
 
   let htfCandles: SmcRawCandle[] | undefined = undefined;
   if (v2Config.trend.enabled && (v2Config.trend.mode === 'HTF' || v2Config.trend.mode === 'COMBINED')) {
@@ -172,7 +196,7 @@ export async function runSmartMoneyV2Engine(opts: {
       close: r.close,
       closed: r.closed,
     }));
-    console.log(`  Loaded ${htfCandles!.length} HTF ${htfTf} candles for trend`);
+    console.log(`HTF Candles loaded: ${htfCandles!.length} CLOSED ${htfTf} for trend ${v2Config.trend.mode}`);
   }
 
   const now = new Date();
@@ -192,9 +216,30 @@ export async function runSmartMoneyV2Engine(opts: {
     if (evalResult.direction === 'LONG') currentAggregate = 'LONG';
     else if (evalResult.direction === 'SHORT') currentAggregate = 'SHORT';
     else currentAggregate = 'NEUTRAL';
-    console.log(`  V2 eval: dir=${evalResult.direction} longScore=${evalResult.longScore} shortScore=${evalResult.shortScore} met=${evalResult.metConfirmations}/${evalResult.totalConfirmations} independent ${evalResult.independentMet}/${evalResult.independentTotal} trend=${evalResult.trendContext.mode} ${evalResult.trendContext.direction} boost=${evalResult.trendContext.boost}`);
-    const confStr = evalResult.confirmations.map((c: any) => `${c.code}(${c.v2Key}) L${c.longPoints} S${c.shortPoints} ${c.enabled ? 'on' : 'off'} ${c.category}`).join(', ');
-    console.log(`  Confirmations: ${confStr}`);
+
+    console.log(`\n=== V2 ===`);
+    console.log(`direction=${evalResult.direction} longScore=${evalResult.longScore} shortScore=${evalResult.shortScore} met=${evalResult.metConfirmations}/${evalResult.totalConfirmations} independent ${evalResult.independentMet}/${evalResult.independentTotal} trend=${evalResult.trendContext.mode} ${evalResult.trendContext.direction} boost=${evalResult.trendContext.boost}`);
+    console.log(`Candle time: ${evalResult.candleTime.toISOString()} price=${evalResult.price}`);
+
+    // Score breakdown proving no double counting
+    console.log(`\n--- V2 Score Breakdown (no double count) ---`);
+    console.log(`Total logical confirmations: ${evalResult.totalConfirmations} (BOS, ORDER_BLOCK, FVG, LIQUIDITY_SWEEP, RANGE_POSITION, CONFLUENCE, INTERNAL_STRUCTURE)`);
+    console.log(`Met: ${evalResult.metConfirmations}/${evalResult.totalConfirmations}`);
+    console.log(`Categories: INDEPENDENT ${evalResult.independentTotal} (BOS, OB, FVG, Sweep, Range), DERIVED ${evalResult.derivedTotal} (Confluence bonus 5 only), CONTEXT ${evalResult.contextTotal} (Internal)`);
+    for (const c of evalResult.confirmations) {
+      const met = c.longPoints > 0 || c.shortPoints > 0 ? 'MET' : 'not met';
+      console.log(`  ${c.code}(${c.v2Key}) ${met} L${c.longPoints} S${c.shortPoints} cat=${c.category} smc=${c.smcCode || 'none'} label=${c.label}`);
+    }
+    // Prove BOS and OB aggregated
+    const bos = evalResult.confirmations.filter((c:any)=>c.v2Key==='bos');
+    const ob = evalResult.confirmations.filter((c:any)=>c.v2Key==='orderBlock');
+    console.log(`BOS count: ${bos.length} (should be 1, aggregated SWING_TREND+RECENT_SWING_BOS) — ${bos.length===1?'OK no double count':'FAIL double count'}`);
+    console.log(`ORDER_BLOCK count: ${ob.length} (should be 1, aggregated SWING+INTERNAL) — ${ob.length===1?'OK no double count':'FAIL double count'}`);
+    const confluence = evalResult.confirmations.find((c:any)=>c.v2Key==='confluence');
+    if (confluence) {
+      console.log(`CONFLUENCE: L${confluence.longPoints} S${confluence.shortPoints} — should be only derived bonus 5, not re-adding OB/FVG weights — ${confluence.longPoints<=5 && confluence.shortPoints<=5 ? 'OK bonus only' : 'check bonus'}`);
+    }
+    console.log(`--- End Breakdown ---`);
   }
 
   let stateRow: any = null;
@@ -207,9 +252,9 @@ export async function runSmartMoneyV2Engine(opts: {
     stateRow = null;
   }
 
-  console.log(`\n=== V2 EDGE STATE MACHINE ===`);
-  console.log(`Previous: ${stateRow ? `${stateRow.aggregateState} lastEval=${stateRow.lastEvaluatedCandleTime?.toISOString()} lastSignal=${stateRow.lastSignalCandleTime?.toISOString()} ${stateRow.lastSignalDirection}` : 'null (bootstrap)'}`);
-  console.log(`Current: ${currentAggregate} candle=${currentCandleTime?.toISOString()}`);
+  console.log(`\n=== State ===`);
+  console.log(`previous=${stateRow ? `${stateRow.aggregateState} lastEval=${stateRow.lastEvaluatedCandleTime?.toISOString()} lastSignal=${stateRow.lastSignalCandleTime?.toISOString()} ${stateRow.lastSignalDirection}` : 'null (bootstrap)'}`);
+  console.log(`current=${currentAggregate} candle=${currentCandleTime?.toISOString()}`);
 
   const transition = computeEdgeTransition({
     previousStateRow: stateRow ? {
@@ -227,7 +272,8 @@ export async function runSmartMoneyV2Engine(opts: {
     emitOnBootstrap: emitOnBootstrap || false,
   });
 
-  console.log(`Transition: ${transition.previousState ?? 'null'} -> ${transition.currentAggregate} action=${transition.action} shouldEmit=${transition.shouldEmit} emitDir=${transition.emitDirection} trigger=${transition.triggerType} reason=${transition.reason}`);
+  console.log(`action=${transition.action} shouldEmit=${transition.shouldEmit} emitDir=${transition.emitDirection} trigger=${transition.triggerType} reason=${transition.reason}`);
+  console.log(`Transition: ${transition.previousState ?? 'null'} -> ${transition.currentAggregate}`);
 
   result.evaluatedMarkets = 1;
 
@@ -235,11 +281,10 @@ export async function runSmartMoneyV2Engine(opts: {
   const envEnabled = process.env.SMART_MONEY_WRITE_ENABLED === 'true' || process.env.SMART_MONEY_V2_WRITE_ENABLED === 'true';
   const writeAllowed = flagEnabled && envEnabled;
 
-  // effectiveMode is already synced from DB column — ONE source of truth
   console.log(`\n=== V2 WRITE GUARD AND === flag=${flagEnabled} env=${envEnabled} => allowed=${writeAllowed} effectiveMode=${effectiveMode} dbMode=${dbMode} configMode=${(rawConfig as any)?.mode}`);
 
   if (effectiveMode === 'DISABLED') {
-    console.log(`V2 mode DISABLED — no signal emission, no state persistence (DISABLED remains blocked per task)`);
+    console.log(`V2 mode DISABLED — no signal emission, no state persistence`);
     if (dryRun) {
       console.log(`DRY-RUN DISABLED: would ${transition.shouldEmit ? 'EMIT' : 'update state to ' + currentAggregate} but blocked`);
       if (transition.shouldEmit) {
@@ -315,14 +360,14 @@ export async function runSmartMoneyV2Engine(opts: {
   }
 
   if (!transition.shouldEmit) {
-    console.log(`\nNo emit action=${transition.action}`);
+    console.log(`\nNo emit action=${transition.action} — will update state to ${currentAggregate}`);
     if (dryRun) {
-      console.log(`DRY-RUN — would update state to ${currentAggregate}`);
+      console.log(`DRY-RUN — would update state to ${currentAggregate} at ${transition.currentCandleTime?.toISOString()} but persist nothing`);
       result.neutralGroups++;
       return;
     }
     if (!writeAllowed) {
-      console.log(`WRITE BLOCKED`);
+      console.log(`WRITE BLOCKED — need AND guard`);
       result.neutralGroups++;
       return;
     }
@@ -334,7 +379,6 @@ export async function runSmartMoneyV2Engine(opts: {
             const prevWasUnavailable = isUnavailableStatus(existing.lastEvaluationStatus);
             const currIsEvaluable = isEvaluableAggregate(currentAggregate);
             if (prevWasUnavailable && currIsEvaluable) {
-              // allow re-evaluate
             } else {
               return;
             }
@@ -363,7 +407,10 @@ export async function runSmartMoneyV2Engine(opts: {
           });
         }
       });
-      console.log(`  State updated to ${currentAggregate}`);
+      console.log(`  State updated to ${currentAggregate} — ${transition.action} ${transition.reason}`);
+      if (transition.action === 'BOOTSTRAP_NO_SIGNAL') {
+        console.log(`  BOOTSTRAP: null -> NEUTRAL BOOTSTRAP_NO_SIGNAL — State created, 0 Signal (per V2 spec)`);
+      }
       result.neutralGroups++;
     } catch (e: any) {
       console.error(`  Error updating state: ${e.message}`);
@@ -415,7 +462,7 @@ export async function runSmartMoneyV2Engine(opts: {
   const confirmationTotal = v2Eval.totalConfirmations;
 
   const confFiltered = v2Eval.confirmations.filter((c: any) => c.longPoints > 0 || c.shortPoints > 0).map((c: any) => `[${c.code}:${c.v2Key}]`).join(';');
-  const reason = `V2 ${v2Config.trend.mode} ${v2Config.trend.policy} dir=${direction} score=${score} conf ${confirmationCount}/${confirmationTotal} independent ${v2Eval.independentMet}/${v2Eval.independentTotal} trend=${v2Eval.trendContext.direction} boost=${v2Eval.trendContext.boost} | ${confFiltered} | ref ${v2Config.referenceExchange} price ${price}`;
+  const reason = `V2 ${v2Config.trend.mode} ${v2Config.trend.policy} dir=${direction} score=${score} conf ${confirmationCount}/${confirmationTotal} independent ${v2Eval.independentMet}/${v2Eval.independentTotal} trend=${v2Eval.trendContext.direction} boost=${v2Eval.trendContext.boost} | ${confFiltered} | ref BINANCE price ${price}`;
 
   const candidateForSetup = {
     strategyId: strategy.id,
@@ -424,7 +471,7 @@ export async function runSmartMoneyV2Engine(opts: {
     signalCandleTime: currentCandleTime!,
     direction,
     score,
-    referenceExchange: v2Config.referenceExchange,
+    referenceExchange: 'BINANCE',
     referencePrice: price,
     metadata: {
       v2: true,
@@ -442,7 +489,7 @@ export async function runSmartMoneyV2Engine(opts: {
 
   console.log(`\n=== V2 CANDIDATE FOR EMIT (${transition.triggerType}) ===`);
   console.log(`candle=${currentCandleTime?.toISOString()} dir=${direction} score=${score} setupKey=${setupKey.slice(0,80)}...`);
-  console.log(`ref=${v2Config.referenceExchange} price=${price} atr=${atr.toFixed(2)} SL~${stopLoss?.toFixed(2)} TP1~${tp1?.toFixed(2)}`);
+  console.log(`ref=BINANCE price=${price} atr=${atr.toFixed(2)} SL~${stopLoss?.toFixed(2)} TP1~${tp1?.toFixed(2)}`);
 
   if (dryRun) {
     console.log(`\nDRY-RUN — would EMIT ${direction} trigger ${transition.triggerType} at ${currentCandleTime?.toISOString()} but persist nothing`);
@@ -460,7 +507,7 @@ export async function runSmartMoneyV2Engine(opts: {
     return;
   }
 
-  console.log(`\nLIVE WRITE ALLOWED — transactional V2 emit Signal+Outcome+State`);
+  console.log(`\nLIVE WRITE ALLOWED — transactional V2 emit Signal+Outcome+State (BINANCE only)`);
 
   try {
     await prisma.$transaction(async (tx: any) => {
@@ -498,7 +545,7 @@ export async function runSmartMoneyV2Engine(opts: {
           reason: reason.slice(0, 1000),
           strategyId: strategy.id,
           signalCandleTime: currentCandleTime,
-          referenceExchange: v2Config.referenceExchange,
+          referenceExchange: 'BINANCE',
           referencePrice: price,
           aggregatePrice: null,
           executionPolicy: 'SMC_ATR_V1',

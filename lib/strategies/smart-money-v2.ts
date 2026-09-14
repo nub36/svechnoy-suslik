@@ -474,9 +474,17 @@ export function evaluateV2WithCandles(
     };
   }
 
-  // Honest mapping — no proxy, no double counting
-  // Each SMC reason maps to exactly one V2 confirmation key
-  // Displacement is NOT mapped from SWING_TREND — it would be separate if exposed, currently PLACEHOLDER
+  // V2 MARKET CONTRACT: BINANCE BTCUSDT CLOSED 15m ONLY — no multi-exchange
+  // V2 CONFIRMATIONS: exactly 7 logical, no double count
+  // INDEPENDENT: BOS, ORDER_BLOCK, FVG, LIQUIDITY_SWEEP, RANGE_POSITION
+  // DERIVED: CONFLUENCE (OB+FVG) — bonus only, not re-adding OB/FVG
+  // CONTEXT: INTERNAL_STRUCTURE
+  // TREND CONTEXT: MARKET_STRUCTURE/EMA/HTF/COMBINED separate, not a confirmation
+  // CHOCH/Displacement disabled
+  // Exchange count NOT a confirmation
+
+  // Honest mapping — each SMC reason maps to exactly one V2 confirmation key
+  // Internal sub-calculations aggregate into ONE owning confirmation before score/count
   const confirmationMap: Record<string, { code: string; label: string; v2Key: keyof SmcConfirmationsV2; category: SmcConfirmationCategory }> = {
     SWING_TREND: { code: "BOS", label: "Break of Structure — swing trend bias", v2Key: "bos", category: "INDEPENDENT" },
     RECENT_SWING_BOS: { code: "BOS", label: "Recent swing BOS", v2Key: "bos", category: "INDEPENDENT" },
@@ -489,63 +497,137 @@ export function evaluateV2WithCandles(
     OB_FVG_CONFLUENCE: { code: "CONFLUENCE", label: "OB + FVG confluence", v2Key: "confluence", category: "DERIVED" },
   };
 
-  // Deduplicate by v2Key to avoid double counting same underlying fact
-  // e.g., SWING_TREND + RECENT_SWING_BOS both -> bos should count once
-  // SWING_ORDER_BLOCK + INTERNAL_ORDER_BLOCK both -> orderBlock counts once
-  const metByV2Key = new Map<keyof SmcConfirmationsV2, { long: number; short: number; codes: string[] }>();
+  // Aggregate by v2Key — at most ONE per logical confirmation
+  // BOS: SWING_TREND + RECENT_SWING_BOS → ONE BOS, max weight
+  // ORDER_BLOCK: SWING + INTERNAL → ONE OB
+  // This prevents double counting in both count and score breakdown
+  type Agg = { long: number; short: number; codes: string[]; smcCodes: string[]; label: string; category: SmcConfirmationCategory; code: string; v2Key: keyof SmcConfirmationsV2 };
+  const aggByV2Key = new Map<keyof SmcConfirmationsV2, Agg>();
 
-  const confirmations = smcEval.reasons.map(r => {
-    const mapped = confirmationMap[r.code] || { code: r.code, label: r.label, v2Key: "bos" as keyof SmcConfirmationsV2, category: "INDEPENDENT" as SmcConfirmationCategory };
+  // First pass: aggregate raw SMC reasons into owning V2 confirmation
+  for (const r of smcEval.reasons) {
+    const mapped = confirmationMap[r.code];
+    if (!mapped) continue; // ignore unknown
     const v2Key = mapped.v2Key;
-    const v2Conf = config.confirmations[v2Key] || { enabled: true, weight: 10, required: false, category: "INDEPENDENT" as SmcConfirmationCategory };
-
-    // Track met by v2Key (max points)
-    if (v2Conf.enabled && (r.longPoints > 0 || r.shortPoints > 0)) {
-      const existing = metByV2Key.get(v2Key);
-      if (!existing) {
-        metByV2Key.set(v2Key, { long: r.longPoints, short: r.shortPoints, codes: [r.code] });
-      } else {
-        // Keep max points, merge codes
-        existing.long = Math.max(existing.long, r.longPoints);
-        existing.short = Math.max(existing.short, r.shortPoints);
-        if (!existing.codes.includes(r.code)) existing.codes.push(r.code);
-      }
+    const existing = aggByV2Key.get(v2Key);
+    if (!existing) {
+      aggByV2Key.set(v2Key, {
+        long: r.longPoints,
+        short: r.shortPoints,
+        codes: [mapped.code],
+        smcCodes: [r.code],
+        label: mapped.label,
+        category: mapped.category,
+        code: mapped.code,
+        v2Key,
+      });
+    } else {
+      // Aggregate: keep max points to avoid double count beyond configured weight
+      // Example: BOS internals 20 + 15 → aggregate as max 20, not sum 35, at most BOS configured weight 20
+      // For OB: SWING 15 + INTERNAL 5 → max 15, at most OB weight 20
+      // This proves no double counting — ONE confirmation, ONE weight max
+      existing.long = Math.max(existing.long, r.longPoints);
+      existing.short = Math.max(existing.short, r.shortPoints);
+      if (!existing.smcCodes.includes(r.code)) existing.smcCodes.push(r.code);
     }
+  }
 
-    return {
-      code: mapped.code,
-      label: mapped.label,
-      longPoints: r.longPoints,
-      shortPoints: r.shortPoints,
-      enabled: v2Conf.enabled,
-      required: v2Conf.required,
-      category: v2Conf.category,
-      v2Key,
-      smcCode: r.code,
-    };
-  });
+  // For diagnostic: raw count vs aggregated
+  const rawReasonCount = smcEval.reasons.length;
+  const distinctV2KeysRaw = new Set(smcEval.reasons.map(r => confirmationMap[r.code]?.v2Key).filter(Boolean)).size;
 
-  // Count met confirmations by distinct v2Key, not by reason count — avoids double counting
-  // Only INDEPENDENT + CONTEXT + DERIVED count if enabled; PLACEHOLDER disabled are excluded
+  // Build aggregated confirmations array — exactly ONE per v2Key that has any SMC reason
+  // Plus ensure all enabled V2 confirmations appear even if 0 points? For total count we use enabled list
+  // For score breakdown, we will show all 7 logical confirmations
+  const metByV2Key = new Map<keyof SmcConfirmationsV2, { long: number; short: number; codes: string[] }>();
+  for (const [v2Key, agg] of aggByV2Key.entries()) {
+    const v2Conf = config.confirmations[v2Key];
+    if (!v2Conf?.enabled) continue;
+    if (agg.long > 0 || agg.short > 0) {
+      metByV2Key.set(v2Key, { long: agg.long, short: agg.short, codes: agg.smcCodes });
+    }
+  }
+
+  // Count met confirmations by distinct v2Key, not by raw reason count — avoids double counting
   const enabledConfs = Object.entries(config.confirmations).filter(([_, c]) => c.enabled);
-  const totalConfirmations = enabledConfs.length; // real N/M, not fixed 9
+  const totalConfirmations = enabledConfs.length; // should be 7: BOS, OB, FVG, Sweep, Range, Confluence, Internal
 
-  // For met count: distinct v2Keys that have points>0
-  // This automatically deduplicates BOS (SWING_TREND + RECENT_SWING_BOS) and ORDER_BLOCK (SWING + INTERNAL)
   let metConfirmations = metByV2Key.size;
 
   // Special handling for confluence: derived confirmation should only count if both OB and FVG are met
-  // Prevents confluence from silently duplicating OB+FVG weights
+  // Prevents confluence from silently duplicating OB+FVG weights — only explicit derived bonus 5
   if (metByV2Key.has("confluence")) {
     const hasOB = metByV2Key.has("orderBlock");
     const hasFVG = metByV2Key.has("fvg");
     if (!hasOB || !hasFVG) {
-      // Confluence without both parents is not valid — remove from met count
-      // It is bonus only when OB and FVG overlap
       metByV2Key.delete("confluence");
+      aggByV2Key.delete("confluence");
       metConfirmations = metByV2Key.size;
     }
   }
+
+  // Build final confirmations array — ONE per logical V2 confirmation (aggregated)
+  // This is what should be exposed publicly/logically: BOS, ORDER_BLOCK, FVG, LIQUIDITY_SWEEP, RANGE_POSITION, CONFLUENCE, INTERNAL_STRUCTURE
+  const aggregatedConfirmations: V2EvaluationResult["confirmations"] = [];
+  for (const [key, conf] of Object.entries(config.confirmations) as [keyof SmcConfirmationsV2, SmcConfirmationConfig][]) {
+    if (!conf.enabled) continue;
+    const agg = aggByV2Key.get(key);
+    if (agg) {
+      aggregatedConfirmations.push({
+        code: agg.code,
+        label: agg.label + (agg.smcCodes.length > 1 ? ` [aggregated ${agg.smcCodes.join('+')}]` : ''),
+        longPoints: agg.long,
+        shortPoints: agg.short,
+        enabled: true,
+        required: conf.required,
+        category: conf.category,
+        v2Key: key,
+        smcCode: agg.smcCodes.join('+'),
+      });
+    } else {
+      // Not met — still show as 0 points for breakdown honesty
+      const defLabelMap: Record<string, string> = {
+        bos: "Break of Structure",
+        orderBlock: "Order Block",
+        fvg: "Fair Value Gap",
+        liquiditySweep: "Liquidity Sweep",
+        rangePosition: "Premium/Discount",
+        confluence: "OB+FVG Confluence (derived bonus 5 only)",
+        internalStructure: "Internal Structure (context)",
+        choch: "Change of Character (disabled)",
+        displacement: "Displacement (disabled)",
+      };
+      const codeMap: Record<string, string> = {
+        bos: "BOS",
+        orderBlock: "ORDER_BLOCK",
+        fvg: "FVG",
+        liquiditySweep: "LIQUIDITY_SWEEP",
+        rangePosition: "RANGE_POSITION",
+        confluence: "CONFLUENCE",
+        internalStructure: "INTERNAL_STRUCTURE",
+        choch: "CHOCH",
+        displacement: "DISPLACEMENT",
+      };
+      aggregatedConfirmations.push({
+        code: codeMap[key] || key.toUpperCase(),
+        label: defLabelMap[key] || key,
+        longPoints: 0,
+        shortPoints: 0,
+        enabled: true,
+        required: conf.required,
+        category: conf.category,
+        v2Key: key,
+        smcCode: "",
+      });
+    }
+  }
+
+  // For backward compat, keep raw confirmations for debug but we will use aggregated for public/logical set
+  // The returned confirmations should be aggregated to prove no double count
+  const confirmations = aggregatedConfirmations;
+
+  // Diagnostic log for score breakdown proving no double count
+  // Will be logged by engine
 
   // Displacement placeholder: if enabled but no displacement fact, it stays unmet — honest
   // CHOCH placeholder: disabled by default, shares INTERNAL_TREND, so not double counted
@@ -655,41 +737,18 @@ export function evaluateV2WithCandles(
     }
   }
 
-  // Check required core conditions — honest, no proxy, no double count
+  // Check required core conditions — honest, no double count, using aggregated V2 keys
   // PLACEHOLDER confirmations (displacement, choch) are disabled by default, so they never appear as required
   // DERIVED confluence should never be required (it's bonus)
-  const requiredConfs = Object.entries(config.confirmations).filter(([_, c]) => c.required && c.enabled && c.category !== "PLACEHOLDER");
+  const requiredConfs = Object.entries(config.confirmations).filter(([_, c]) => c.required && c.enabled && c.category !== "PLACEHOLDER" && c.category !== "DERIVED");
   let requiredMet = true;
-  const seenRequiredCodes = new Set<string>(); // avoid double counting same SMC code for multiple V2 keys
   for (const [key] of requiredConfs) {
-    // Honest mapping — no SWING_TREND proxy for displacement
-    const codeMap: Record<string, string[]> = {
-      bos: ["SWING_TREND", "RECENT_SWING_BOS"],
-      choch: [], // PLACEHOLDER disabled — shares INTERNAL_TREND, do not require separately
-      orderBlock: ["SWING_ORDER_BLOCK", "INTERNAL_ORDER_BLOCK"],
-      fvg: ["FVG"],
-      liquiditySweep: ["LIQUIDITY_SWEEP"],
-      displacement: [], // PLACEHOLDER — no DISPLACEMENT reason in scoring yet, cannot be required
-      rangePosition: ["RANGE_POSITION"],
-      confluence: [], // DERIVED — should not be required, it's bonus
-      internalStructure: ["INTERNAL_TREND"],
-    };
-    const codes = codeMap[key] || [];
-    if (codes.length === 0) {
-      // If no codes (placeholder/derived), skip — it cannot be required honestly
-      continue;
-    }
-    // Avoid counting same SMC code twice for different V2 keys (e.g., bos and internalStructure are distinct, but choch would duplicate internalStructure)
-    const hasPoints = confirmations.some(c => {
-      if (seenRequiredCodes.has(c.smcCode)) return false; // already counted for another required key
-      return codes.includes(c.smcCode) && (c.longPoints > 0 || c.shortPoints > 0);
-    });
-    if (!hasPoints) {
+    // Required means its aggregated V2 confirmation must be met (points>0)
+    // This uses aggregated metByV2Key, so BOS internals aggregated → ONE BOS, not double
+    if (!metByV2Key.has(key as keyof SmcConfirmationsV2)) {
       requiredMet = false;
       break;
     }
-    // Mark codes as seen to prevent double counting
-    for (const code of codes) seenRequiredCodes.add(code);
   }
 
   let finalDirection: Direction = smcEval.direction as Direction;

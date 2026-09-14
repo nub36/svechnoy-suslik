@@ -798,6 +798,7 @@ async function runSmartMoneyEngine(opts: {
 // Main entry
 // ---------------------------------------------------------------------------
 
+
 export async function runSignalEngineForBtc(opts: {
   timeframe?: string;
   top?: number;
@@ -880,6 +881,35 @@ export async function runSignalEngineForBtc(opts: {
 
   console.log(`Signal Engine: found ${strategies.length} strategies for slug=${strategySlug}: ${strategies.map((s: any) => `${s.slug} v${s.version} id=${s.id}`).join(", ")}`);
 
+  // ============================================================
+  // V2 MARKET CONTRACT: SEPARATE SIMPLE EXECUTION PATH
+  // smart-money-v2 ONLY: BINANCE BTC/USDT CLOSED 15m
+  // NO multi-exchange, NO QUORUM, NO minExchanges, NO exchange votes
+  // Execution: BINANCE BTCUSDT CLOSED 15m -> V2 confirmations -> score -> direction -> V2 state machine -> optional V2 Signal
+  // ============================================================
+  if (strategySlug === "smart-money-v2") {
+    console.log(`\n=== SMART MONEY V2 — ISOLATED PATH ===`);
+    console.log(`Reference: BINANCE BTCUSDT ONLY, no other exchanges, no QUORUM, no minExchanges`);
+    await runSmartMoneyV2Engine({
+      timeframe,
+      dryRun,
+      symbol,
+      strategies,
+      result: result as any,
+      enableSmartMoneyWrite,
+      emitOnBootstrap,
+    });
+    console.log(`\n=== Signal Engine Result (V2 isolated) ===`);
+    console.log(`Reference: BINANCE BTCUSDT CLOSED ${timeframe}`);
+    console.log(`Signals created: ${result.signalsCreated} LONG=${result.longSignals} SHORT=${result.shortSignals} NEUTRAL groups=${result.neutralGroups}`);
+    console.log(`Skipped duplicate=${result.signalsSkippedDuplicate}`);
+    if (result.errors.length > 0) {
+      console.log(`Errors: ${result.errors.join("; ")}`);
+    }
+    return result;
+  }
+
+  // V1 and trend-suslik keep existing multi-exchange/quorum model
   const asset = await prisma.asset.findUnique({
     where: { symbol },
     select: { id: true, symbol: true, rank: true },
@@ -942,17 +972,6 @@ export async function runSignalEngineForBtc(opts: {
       emitOnBootstrap,
       commonHorizonPolicy,
     });
-  } else if (strategySlug === "smart-money-v2") {
-    // V2 reference market BINANCE BTC/USDT CLOSED 15m only, isolated state via strategyId
-    await runSmartMoneyV2Engine({
-      timeframe,
-      dryRun,
-      symbol,
-      strategies,
-      result: result as any,
-      enableSmartMoneyWrite,
-      emitOnBootstrap,
-    });
   } else {
     await runTrendSuslikEngine({
       timeframe,
@@ -975,3 +994,4 @@ export async function runSignalEngineForBtc(opts: {
 
   return result;
 }
+
