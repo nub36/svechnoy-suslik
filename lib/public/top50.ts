@@ -46,7 +46,7 @@ export async function getPublicTop50(): Promise<PublicCoin[]> {
     const enabledExchanges = exchangeConfigs.filter(c => c.publicEnabled).sort((a,b) => b.priority - a.priority).map(c => c.exchange);
     const defaultExchange = exchangeConfigs.find(c => c.isDefault && c.publicEnabled)?.exchange || "BINANCE";
 
-    // Top-50 assets from DB: rank 1..50, enabled, not archived
+    // Top-50 assets from DB: rank 1..50, enabled, not archived — primary
     let assets: any[] = [];
     try {
       assets = await prisma.asset.findMany({
@@ -64,12 +64,83 @@ export async function getPublicTop50(): Promise<PublicCoin[]> {
           },
         },
       }) as any[];
-    } catch {
+    } catch (e) {
+      console.error("[getPublicTop50] primary rank query failed:", e instanceof Error ? e.message : String(e));
       assets = [];
     }
 
+    // Fallback 1: if primary empty, try any ranked assets (rank not null) enabled, ordered by rank
     if (!Array.isArray(assets) || assets.length === 0) {
-      // Fallback to CoinGecko if no DB assets (dev)
+      console.warn("[getPublicTop50] primary TOP-50 empty (rank 1..50), trying fallback ranked any");
+      try {
+        assets = await prisma.asset.findMany({
+          where: {
+            enabled: true,
+            archivedAt: null,
+            rank: { not: null },
+          },
+          orderBy: { rank: "asc" },
+          take: TOP_UNIVERSE_SIZE,
+          include: {
+            markets: {
+              where: { enabled: true, status: "ACTIVE", quote: "USDT", marketType: "SPOT" },
+              select: { exchange: true, price: true, quoteVolume24h: true, volume24h: true, change24h: true },
+            },
+          },
+        }) as any[];
+      } catch (e) {
+        console.error("[getPublicTop50] fallback ranked query failed:", e instanceof Error ? e.message : String(e));
+        assets = [];
+      }
+    }
+
+    // Fallback 2: if still empty, try any enabled assets ordered by totalVolume desc, then symbol
+    if (!Array.isArray(assets) || assets.length === 0) {
+      console.warn("[getPublicTop50] fallback ranked empty, trying any enabled assets by volume");
+      try {
+        assets = await prisma.asset.findMany({
+          where: {
+            enabled: true,
+            archivedAt: null,
+          },
+          orderBy: [{ totalVolume24h: "desc" }, { symbol: "asc" }],
+          take: TOP_UNIVERSE_SIZE,
+          include: {
+            markets: {
+              where: { enabled: true, status: "ACTIVE", quote: "USDT", marketType: "SPOT" },
+              select: { exchange: true, price: true, quoteVolume24h: true, volume24h: true, change24h: true },
+            },
+          },
+        }) as any[];
+      } catch (e) {
+        console.error("[getPublicTop50] fallback volume query failed:", e instanceof Error ? e.message : String(e));
+        assets = [];
+      }
+    }
+
+    // Fallback 3: if still empty, try any enabled assets without markets include (at least show symbols)
+    if (!Array.isArray(assets) || assets.length === 0) {
+      console.warn("[getPublicTop50] fallback volume empty, trying any enabled assets without markets");
+      try {
+        const rawAssets = await prisma.asset.findMany({
+          where: {
+            enabled: true,
+            archivedAt: null,
+          },
+          orderBy: { symbol: "asc" },
+          take: TOP_UNIVERSE_SIZE,
+          select: { id: true, symbol: true, name: true, rank: true, imageUrl: true, totalVolume24h: true },
+        }) as any[];
+        // Convert to same shape with empty markets
+        assets = rawAssets.map((a: any) => ({ ...a, markets: [] }));
+      } catch (e) {
+        console.error("[getPublicTop50] fallback no-markets query failed:", e instanceof Error ? e.message : String(e));
+        assets = [];
+      }
+    }
+
+    if (!Array.isArray(assets) || assets.length === 0) {
+      console.error("[getPublicTop50] all queries empty — DB may have no enabled assets or prisma mock active (build without prisma generate)");
       return [];
     }
 
