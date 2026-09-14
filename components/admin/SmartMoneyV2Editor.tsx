@@ -205,6 +205,8 @@ export default function SmartMoneyV2Editor({ strategy }: Props) {
     setSaving(true);
     setMessage("");
     try {
+      // ONE effective mode — ensure config JSON mode matches authoritative column mode (fix for FORWARD_TEST bug)
+      const configToSave = { ...config, mode } as SmartMoneyV2Config;
       const res = await fetch(`/api/admin/strategies/${strategy.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -213,7 +215,7 @@ export default function SmartMoneyV2Editor({ strategy }: Props) {
           mode,
           minExchanges,
           timeframes,
-          config,
+          config: configToSave,
         }),
       });
       const data = await res.json();
@@ -288,7 +290,12 @@ export default function SmartMoneyV2Editor({ strategy }: Props) {
           </label>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={{ fontSize: 12, fontWeight: 600 }}>Режим (MODE)</span>
-            <select value={mode} onChange={(e) => setMode(e.target.value as StrategyMode)} style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #d1d5db" }}>
+            <select value={mode} onChange={(e) => {
+              const newMode = e.target.value as StrategyMode;
+              setMode(newMode);
+              // Keep config JSON mode in sync with column mode — single source of truth
+              setConfig((prev) => ({ ...prev, mode: newMode }));
+            }} style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #d1d5db" }}>
               {ALLOWED_MODES.map((m) => (
                 <option key={m} value={m} disabled={(m as string) === "LIVE"}>
                   {m} {(m as string) === "LIVE" ? "(запрещён в этой задаче)" : ""}

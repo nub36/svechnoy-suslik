@@ -1,6 +1,7 @@
 /**
  * Signal Worker — BTC ONLY pilot — 3001 test → 3000 production
  * + PHASE 2A/2B/2C + EDGE/RE-ARM V1
+ * FIX: ONE effective operating mode — DB column mode authoritative, config JSON synced, LIVE gated, FORWARD_TEST persists State even on NEUTRAL
  */
 
 import "dotenv/config";
@@ -71,7 +72,7 @@ Usage:
 Options:
   --symbol <symbol>               BTC only (default BTC)
   --timeframe <tf>                5m/15m/1h/4h/1d (default 1h)
-  --strategy <slug>               trend-suslik or smart-money-suslik
+  --strategy <slug>               trend-suslik or smart-money-suslik or smart-money-v2
   --common-horizon-policy <pol>   STRICT or QUORUM (default QUORUM)
   --dry-run                       Dry run, no DB writes (default) — also does NOT mutate StrategySignalState
   --no-dry-run --once             Live run, requires BOTH --enable-smart-money-write AND ENV SMART_MONEY_WRITE_ENABLED=true for smart-money
@@ -95,6 +96,10 @@ EDGE STATE MACHINE V1:
 
 PHASE 2C Guard AND:
   flag false/env false BLOCKED, flag true/env false BLOCKED, flag false/env true BLOCKED, flag true/env true ALLOWED
+
+V2 FORWARD_TEST FIX:
+  DB column mode is authoritative (ONE effective mode). Previously bug: DB mode FORWARD_TEST but config JSON mode DISABLED stale, engine used config mode and blocked state persistence.
+  Required: DB mode FORWARD_TEST enabled true PUBLISHED => effectiveMode FORWARD_TEST, AND guard true => NEUTRAL bootstrap persists StrategySignalState (0 Signal).
 `);
 }
 
@@ -105,7 +110,7 @@ async function main() {
     process.exit(0);
   }
 
-  console.log(`=== SIGNAL WORKER — BTC ${args.symbol} ${args.timeframe} strategy=${args.strategy} policy=${args.commonHorizonPolicy} ${args.dryRun ? "DRY-RUN" : "LIVE"} enableWrite=${args.enableSmartMoneyWrite} emitOnBootstrap=${args.emitOnBootstrap} envWrite=${process.env.SMART_MONEY_WRITE_ENABLED} ===`);
+  console.log(`=== SIGNAL WORKER — BTC ${args.symbol} ${args.timeframe} strategy=${args.strategy} policy=${args.commonHorizonPolicy} ${args.dryRun ? "DRY-RUN" : "LIVE"} enableWrite=${args.enableSmartMoneyWrite} emitOnBootstrap=${args.emitOnBootstrap} envWrite=${process.env.SMART_MONEY_WRITE_ENABLED} envV2=${process.env.SMART_MONEY_V2_WRITE_ENABLED} ===`);
 
   if (args.symbol !== "BTC") {
     console.error(`Only BTC supported for pilot, got ${args.symbol}`);
@@ -134,8 +139,7 @@ async function main() {
       args.dryRun = true;
     }
     if (args.strategy === "smart-money-v2" && !args.dryRun) {
-      console.log(`V2: DRY_RUN/FORWARD_TEST allowed when AND guard passes, LIVE remains gated — engine will block LIVE mode`);
-      // LIVE blocking is enforced in v2-signal-engine.ts, not here; allow FORWARD_TEST writes
+      console.log(`V2: DRY_RUN/FORWARD_TEST allowed when AND guard passes, LIVE remains gated — engine will block LIVE mode, effectiveMode from DB column authoritative`);
     }
   }
 
@@ -151,18 +155,28 @@ async function main() {
     } as any);
 
     console.log(`\n=== DONE ===`);
-    console.log(`Signals created: ${result.signalsCreated} (LONG ${result.longSignals} SHORT ${result.shortSignals})`);
-    console.log(`Evaluated markets: ${result.evaluatedMarkets} assets: ${result.evaluatedAssets} neutral: ${result.neutralGroups}`);
+    console.log(`Strategy=${args.strategy} TF=${args.timeframe} Signals created: ${result.signalsCreated} (LONG ${result.longSignals} SHORT ${result.shortSignals})`);
+    console.log(`Evaluated markets: ${result.evaluatedMarkets} assets: ${result.evaluatedAssets} neutral: ${result.neutralGroups} skippedDup: ${result.signalsSkippedDuplicate}`);
+    if (result.errors && result.errors.length) {
+      console.log(`Errors: ${result.errors.join("; ")}`);
+    }
 
     if (args.dryRun) {
-      console.log(`\nDRY-RUN complete — no DB writes, no StrategySignalState mutation.`);
+      console.log(`\nDRY-RUN complete — no DB writes, no StrategySignalState mutation (effective mode from DB, not hardcoded).`);
       if (args.strategy === "smart-money-suslik") {
         console.log(`To enable live write (after owner approval, AND guard + EDGE semantics):`);
         console.log(`  SMART_MONEY_WRITE_ENABLED=true npx tsx scripts/signal-worker.ts --symbol=BTC --timeframe=15m --strategy=smart-money-suslik --no-dry-run --enable-smart-money-write`);
-        console.log(`  Default bootstrap SHORT => NO SIGNAL, only after SHORT->NEUTRAL->SHORT or reversal. Use --emit-on-bootstrap to override (not recommended).`);
+      }
+      if (args.strategy === "smart-money-v2") {
+        console.log(`V2 DRY-RUN: effective mode from DB column authoritative, LIVE gated, FORWARD_TEST persists State even on NEUTRAL bootstrap with 0 Signal (when not dry-run)`);
       }
     } else {
-      console.log(`\nLIVE run complete — signals created in DB (if AND guard satisfied) with transactional State update.`);
+      const isV2 = args.strategy === "smart-money-v2";
+      if (isV2) {
+        console.log(`\n${args.strategy} ${args.timeframe} RUN complete — effectiveMode from DB column (FORWARD_TEST expected, LIVE gated) — signals created=${result.signalsCreated} (if AND guard satisfied) with transactional State update. State MUST persist even on NEUTRAL bootstrap (0 Signal).`);
+      } else {
+        console.log(`\n${args.strategy} ${args.timeframe} RUN complete — signals created=${result.signalsCreated} (if AND guard satisfied) with transactional State update.`);
+      }
     }
   } catch (e) {
     console.error("Signal worker failed:", (e as Error).message);

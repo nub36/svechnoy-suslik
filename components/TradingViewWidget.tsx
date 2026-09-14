@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useId } from "react";
 
 declare global {
   interface Window {
@@ -9,44 +9,38 @@ declare global {
 }
 
 type Props = {
-  symbol?: string; // e.g. BINANCE:BTCUSDT
-  interval?: string; // e.g. 15
+  symbol?: string;
+  interval?: string;
   theme?: "light" | "dark";
 };
 
 export default function TradingViewWidget({ symbol = "BINANCE:BTCUSDT", interval = "15", theme = "dark" }: Props) {
-  const containerRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<HTMLDivElement>(null);
   const widgetRef = useRef<any>(null);
-  const idRef = useRef<string>(`tradingview_${Math.random().toString(36).slice(2)}_${Date.now()}`);
+  const reactId = useId();
+  // Stable id for SSR — useId is stable, no random in render
+  const containerId = `tradingview_${reactId.replace(/:/g, "_")}`;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!chartRef.current) return;
     if (typeof window === "undefined") return;
-
-    const containerId = idRef.current;
-    // Ensure container has stable id
-    if (containerRef.current) {
-      containerRef.current.id = containerId;
-    }
 
     let cancelled = false;
 
     const createWidget = () => {
       if (cancelled) return;
-      if (!containerRef.current) return;
+      if (!chartRef.current) return;
       if (!window.TradingView || !window.TradingView.widget) {
         setError("TradingView не загрузился");
         setLoading(false);
         return;
       }
       try {
-        // Clear previous content safely (avoid blank large box on re-mount)
-        if (containerRef.current) {
-          containerRef.current.innerHTML = "";
-        }
-
+        // Ensure chart container has id and is empty (TradingView injects iframe)
+        chartRef.current.id = containerId;
+        // Do not use innerHTML = "" that would remove React children — chartRef is dedicated empty div
         widgetRef.current = new window.TradingView.widget({
           autosize: true,
           symbol,
@@ -63,9 +57,7 @@ export default function TradingViewWidget({ symbol = "BINANCE:BTCUSDT", interval
           allow_symbol_change: false,
           container_id: containerId,
           studies: [],
-          // Official Advanced Chart widget — plain chart only, Pine separate
         });
-
         setLoading(false);
         setError(null);
       } catch (e) {
@@ -80,22 +72,23 @@ export default function TradingViewWidget({ symbol = "BINANCE:BTCUSDT", interval
         createWidget();
         return;
       }
-
-      // Avoid duplicate script tags
       const existing = document.querySelector('script[data-tradingview="true"]') as HTMLScriptElement | null;
       if (existing) {
         if (window.TradingView && window.TradingView.widget) {
           createWidget();
         } else {
-          existing.addEventListener("load", createWidget);
-          existing.addEventListener("error", () => {
-            setError("Не удалось загрузить TradingView (блокировщик?)");
-            setLoading(false);
-          });
+          const onLoad = () => createWidget();
+          const onError = () => {
+            if (!cancelled) {
+              setError("Не удалось загрузить TradingView (блокировщик?)");
+              setLoading(false);
+            }
+          };
+          existing.addEventListener("load", onLoad);
+          existing.addEventListener("error", onError);
         }
         return;
       }
-
       const script = document.createElement("script");
       script.src = "https://s3.tradingview.com/tv.js";
       script.async = true;
@@ -105,29 +98,27 @@ export default function TradingViewWidget({ symbol = "BINANCE:BTCUSDT", interval
       };
       script.onerror = () => {
         if (!cancelled) {
-          setError("Не удалось загрузить TradingView (проверьте блокировщик рекламы)");
+          setError("Не удалось загрузить TradingView (проверьте блокировщик)");
           setLoading(false);
         }
       };
       document.head.appendChild(script);
     };
 
-    // Small delay to ensure container is mounted and has height (Next.js client navigation)
-    const timer = setTimeout(() => {
-      loadScript();
-    }, 100);
+    const timer = setTimeout(() => loadScript(), 50);
 
     return () => {
       cancelled = true;
       clearTimeout(timer);
       try {
-        if (containerRef.current) {
-          containerRef.current.innerHTML = "";
+        // Best effort cleanup — TradingView widget doesn't have official destroy, remove container content
+        if (chartRef.current) {
+          chartRef.current.innerHTML = "";
         }
       } catch {}
       widgetRef.current = null;
     };
-  }, [symbol, interval, theme]);
+  }, [symbol, interval, theme, containerId]);
 
   return (
     <div className="tradingViewCard">
@@ -137,18 +128,17 @@ export default function TradingViewWidget({ symbol = "BINANCE:BTCUSDT", interval
           BTC/USDT · 15 минут · TradingView
         </span>
       </div>
-      <div ref={containerRef} className="tradingViewContainer">
+      <div className="tradingViewContainer" style={{ position: "relative" }}>
+        <div ref={chartRef} id={containerId} style={{ width: "100%", height: "100%" }} />
         {loading && (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--muted)", fontSize: "12px" }}>
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--panel)", color: "var(--muted)", fontSize: "12px" }}>
             Загрузка графика {symbol} {interval}м...
           </div>
         )}
         {error && (
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: "6px", padding: "12px", textAlign: "center" }}>
+          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "6px", padding: "12px", textAlign: "center", background: "var(--panel)" }}>
             <span style={{ fontSize: "12px", color: "var(--muted)" }}>{error}</span>
-            <span style={{ fontSize: "11px", color: "var(--muted)" }}>
-              BINANCE:BTCUSDT 15м — откройте график на TradingView.com или проверьте блокировщик
-            </span>
+            <span style={{ fontSize: "11px", color: "var(--muted)" }}>BINANCE:BTCUSDT 15м — откройте на TradingView.com</span>
             <a href={`https://www.tradingview.com/chart/?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`} target="_blank" rel="noopener noreferrer" style={{ fontSize: "11px", color: "var(--accent)", textDecoration: "underline" }}>
               Открыть на TradingView.com
             </a>

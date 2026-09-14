@@ -114,14 +114,19 @@ export async function PUT(
   }
 
   if (existing.slug === "smart-money-v2") {
-    const v2Config = normalizeV2Config(config);
+    // ONE effective operating mode — DB column mode is authoritative
+    // Bug was: strategy.mode=FORWARD_TEST but config.mode=DISABLED stale, engine used config.mode
     const rawMode = typeof body.mode === "string" ? body.mode : (config as any).mode || (existing as any).mode || "DISABLED";
     if (rawMode === "LIVE") {
       return NextResponse.json(
-        { error: "LIVE режим запрещён в этой задаче — используйте DISABLED или DRY_RUN" },
+        { error: "LIVE режим запрещён в этой задаче — используйте DISABLED/DRY_RUN/FORWARD_TEST, LIVE gated" },
         { status: 400 }
       );
     }
+    const v2Config = normalizeV2Config(config);
+    // Ensure config JSON mode matches authoritative column mode — single source of truth
+    (v2Config as any).mode = rawMode;
+
     const runtimeValidation = validateV2Config(v2Config, rawTimeframes, rawMinExchanges);
     if (runtimeValidation.length > 0) {
       return NextResponse.json(

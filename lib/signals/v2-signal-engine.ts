@@ -75,9 +75,21 @@ export async function runSmartMoneyV2Engine(opts: {
   }
 
   const rawConfig = strategy.config;
-  const v2Config: SmartMoneyV2Config = normalizeV2Config(rawConfig);
+  // ONE effective operating mode — DB column is authoritative, config JSON may be stale (bug was config DISABLED but column FORWARD_TEST)
+  const dbMode = (strategy as any).mode as string;
+  let v2Config: SmartMoneyV2Config = normalizeV2Config(rawConfig);
+  // Override config JSON mode with authoritative DB column mode to ensure single source of truth
+  if (dbMode && ["DISABLED","DRY_RUN","FORWARD_TEST","LIVE"].includes(dbMode)) {
+    (v2Config as any).mode = dbMode as any;
+  }
+  // If still mismatch, log warning
+  if (dbMode && (rawConfig as any)?.mode && dbMode !== (rawConfig as any).mode) {
+    console.log(`  WARNING: DB mode ${dbMode} != config JSON mode ${(rawConfig as any).mode} — using DB mode as authoritative (fix applied)`);
+  }
 
-  if (v2Config.mode === 'LIVE') {
+  const effectiveMode = v2Config.mode;
+
+  if (effectiveMode === 'LIVE') {
     result.errors.push('V2 mode LIVE blocked per task — use DISABLED/DRY_RUN/FORWARD_TEST');
     return;
   }
@@ -223,12 +235,13 @@ export async function runSmartMoneyV2Engine(opts: {
   const envEnabled = process.env.SMART_MONEY_WRITE_ENABLED === 'true' || process.env.SMART_MONEY_V2_WRITE_ENABLED === 'true';
   const writeAllowed = flagEnabled && envEnabled;
 
-  console.log(`\n=== V2 WRITE GUARD AND === flag=${flagEnabled} env=${envEnabled} => allowed=${writeAllowed} mode=${v2Config.mode}`);
+  // effectiveMode is already synced from DB column — ONE source of truth
+  console.log(`\n=== V2 WRITE GUARD AND === flag=${flagEnabled} env=${envEnabled} => allowed=${writeAllowed} effectiveMode=${effectiveMode} dbMode=${dbMode} configMode=${(rawConfig as any)?.mode}`);
 
-  if (v2Config.mode === 'DISABLED') {
-    console.log(`V2 mode DISABLED — no signal emission even if EDGE, only state would be updated in LIVE but currently blocked (first deliverable NOT LIVE)`);
+  if (effectiveMode === 'DISABLED') {
+    console.log(`V2 mode DISABLED — no signal emission, no state persistence (DISABLED remains blocked per task)`);
     if (dryRun) {
-      console.log(`DRY-RUN: would ${transition.shouldEmit ? 'EMIT' : 'update state to ' + currentAggregate}`);
+      console.log(`DRY-RUN DISABLED: would ${transition.shouldEmit ? 'EMIT' : 'update state to ' + currentAggregate} but blocked`);
       if (transition.shouldEmit) {
         result.signalsCreated++;
         if (transition.emitDirection === 'LONG') result.longSignals++;
@@ -238,7 +251,7 @@ export async function runSmartMoneyV2Engine(opts: {
       }
       return;
     }
-    console.log(`WRITE BLOCKED — V2 DISABLED mode, forcing dry-run`);
+    console.log(`WRITE BLOCKED — V2 DISABLED mode, state NOT persisted`);
     result.neutralGroups++;
     return;
   }
