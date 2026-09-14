@@ -134,7 +134,7 @@ async function main() {
   // After successful loop, clear ranks for assets NOT in ranked list (those without markets or excluded)
   // This is safe because ranked list already persisted
   try {
-    const rankedIds = new Set(ranked.map(r => r.id));
+    const rankedIds = new Set(ranked.map((r: { id: number }) => r.id));
     // Find assets that currently have rank not null but are not in ranked list
     const toClear = await prisma.asset.findMany({
       where: { rank: { not: null }, id: { notIn: Array.from(rankedIds) } },
@@ -143,7 +143,7 @@ async function main() {
     if (toClear.length > 0) {
       console.log(`Clearing ${toClear.length} assets that are no longer ranked (no markets/excluded)`);
       await prisma.asset.updateMany({
-        where: { id: { in: toClear.map(c => c.id) } },
+        where: { id: { in: toClear.map((c: { id: number }) => c.id) } },
         data: { rank: null, top500: false }
       });
     } else {

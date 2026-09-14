@@ -53,8 +53,8 @@ function tfLabel(tf: string): string {
 function strategyLabel(slug: string, name: string): string {
   const map: Record<string, string> = {
     "trend-suslik": "Trend",
-    "smart-money-suslik": "SM V1",
-    "smart-money-v2": "SM V2",
+    "smart-money-suslik": "Smart Money V1",
+    "smart-money-v2": "Smart Money V2",
   };
   return map[slug] ?? name;
 }
