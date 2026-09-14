@@ -26,7 +26,7 @@ const EXCLUDED = new Set([
 ]);
 
 async function main() {
-  console.log("🐿️ Суслик строит глобальный рейтинг...");
+  console.log("🐿️ Суслик строит глобальный рейтинг... (SAFE MODE: no global rank=null clear before repopulate)");
 
   const assets = await prisma.asset.findMany({
     include: {
@@ -94,34 +94,64 @@ async function main() {
         b.liquidityScore - a.liquidityScore
     );
 
-  await prisma.asset.updateMany({
-    data: {
-      top500: false,
-      rank: null
-    }
-  });
+  if (ranked.length === 0) {
+    console.error("No ranked assets — aborting to avoid clearing ranks (safe guard)");
+    return;
+  }
 
-  for (let i = 0; i < ranked.length; i++) {
-    const item = ranked[i];
+  console.log(`Ranked ${ranked.length} assets, will update ranks without prior global clear (safe)`);
 
-    await prisma.asset.update({
-      where: {
-        id: item.id
-      },
-
-      data: {
-        rank: i + 1,
-        // Legacy-флаг для первых 500 мест:
-        // сохраняется ради совместимости старых
-        // данных. Основной universe — rank <= 100
-        // (lib/universe.ts), НЕ этот флаг.
-        top500: i < 500,
-        exchangeCount: item.exchangeCount,
-        totalVolume24h: item.totalVolume,
-        maxVolume24h: item.maxVolume,
-        liquidityScore: item.liquidityScore
+  // SAFE: Update ranked assets first, without clearing all ranks before
+  // If crash mid-loop, old ranks remain for not-yet-updated assets, so TOP-50 not fully empty
+  // Previously: updateMany rank=null for ALL, then loop — crash left site with rank=null empty
+  let updated = 0;
+  try {
+    for (let i = 0; i < ranked.length; i++) {
+      const item = ranked[i];
+      await prisma.asset.update({
+        where: { id: item.id },
+        data: {
+          rank: i + 1,
+          top500: i < 500,
+          exchangeCount: item.exchangeCount,
+          totalVolume24h: item.totalVolume,
+          maxVolume24h: item.maxVolume,
+          liquidityScore: item.liquidityScore
+        }
+      });
+      updated++;
+      if ((i + 1) % 100 === 0) {
+        console.log(`  Updated ${i + 1}/${ranked.length}...`);
       }
+    }
+    console.log(`✓ Updated ${updated}/${ranked.length} ranked assets`);
+  } catch (e) {
+    console.error(`Error during ranked updates after ${updated} items: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`SAFE: Not clearing remaining ranks — old ranks preserved for not-yet-updated assets, site still shows TOP-50 (possibly stale but not empty)`);
+    throw e;
+  }
+
+  // After successful loop, clear ranks for assets NOT in ranked list (those without markets or excluded)
+  // This is safe because ranked list already persisted
+  try {
+    const rankedIds = new Set(ranked.map(r => r.id));
+    // Find assets that currently have rank not null but are not in ranked list
+    const toClear = await prisma.asset.findMany({
+      where: { rank: { not: null }, id: { notIn: Array.from(rankedIds) } },
+      select: { id: true }
     });
+    if (toClear.length > 0) {
+      console.log(`Clearing ${toClear.length} assets that are no longer ranked (no markets/excluded)`);
+      await prisma.asset.updateMany({
+        where: { id: { in: toClear.map(c => c.id) } },
+        data: { rank: null, top500: false }
+      });
+    } else {
+      console.log(`No stale ranked assets to clear`);
+    }
+  } catch (e) {
+    console.error(`Error clearing stale ranks (non-critical): ${e instanceof Error ? e.message : String(e)}`);
+    // Non-critical, don't throw
   }
 
   // Историческая сводка Top-500 (legacy, только
